@@ -330,6 +330,10 @@ pub struct Store {
     // MultiMap with Set semantics (no duplicate values per key).
     multimaps: Mutex<HashMap<String, HashMap<Vec<u8>, Vec<Vec<u8>>>>>,
     lists: Mutex<HashMap<String, Vec<Vec<u8>>>>,
+    // Per-(map,key) reentrant lock: (owner thread id, hold count). Owner identity
+    // is the request's threadId; full (clientUuid, threadId) ownership is a
+    // refinement. Non-blocking: tryLock returns immediately.
+    locks: Mutex<HashMap<(String, Vec<u8>), (i64, u32)>>,
 }
 
 impl Default for Store {
@@ -351,7 +355,46 @@ impl Store {
             sets: Mutex::new(HashMap::new()),
             multimaps: Mutex::new(HashMap::new()),
             lists: Mutex::new(HashMap::new()),
+            locks: Mutex::new(HashMap::new()),
         }
+    }
+
+    // ---- Per-key locking ----
+    pub fn try_lock(&self, map: &str, key: &[u8], tid: i64) -> bool {
+        let mut g = self.locks.lock().unwrap();
+        let k = (map.to_string(), key.to_vec());
+        match g.get_mut(&k) {
+            Some((owner, count)) => {
+                if *owner == tid {
+                    *count += 1; // reentrant
+                    true
+                } else {
+                    false
+                }
+            }
+            None => {
+                g.insert(k, (tid, 1));
+                true
+            }
+        }
+    }
+    pub fn unlock(&self, map: &str, key: &[u8], tid: i64) {
+        let mut g = self.locks.lock().unwrap();
+        let k = (map.to_string(), key.to_vec());
+        if let Some((owner, count)) = g.get_mut(&k) {
+            if *owner == tid {
+                *count -= 1;
+                if *count == 0 {
+                    g.remove(&k);
+                }
+            }
+        }
+    }
+    pub fn is_locked(&self, map: &str, key: &[u8]) -> bool {
+        self.locks.lock().unwrap().contains_key(&(map.to_string(), key.to_vec()))
+    }
+    pub fn force_unlock(&self, map: &str, key: &[u8]) {
+        self.locks.lock().unwrap().remove(&(map.to_string(), key.to_vec()));
     }
 
     // ---- Distributed List ----

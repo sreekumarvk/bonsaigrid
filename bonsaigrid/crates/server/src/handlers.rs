@@ -336,6 +336,38 @@ pub fn dispatch(
             store.clear(&name);
             vec![empty_response(77057)]
         }
+        // ---- Per-key locking ----
+        // MapLock (blocking in Hazelcast): best-effort grant if free/reentrant.
+        69632 => {
+            let (name, key) = map::decode_name_key(&req);
+            let tid = read_i64_le(&req[0].content, 16);
+            store.try_lock(&name, &key, tid);
+            vec![empty_response(69633)]
+        }
+        // MapTryLock -> bool
+        69888 => {
+            let (name, key) = map::decode_name_key(&req);
+            let tid = read_i64_le(&req[0].content, 16);
+            vec![map::bool_response(69889, store.try_lock(&name, &key, tid))]
+        }
+        // MapUnlock -> void
+        70400 => {
+            let (name, key) = map::decode_name_key(&req);
+            let tid = read_i64_le(&req[0].content, 16);
+            store.unlock(&name, &key, tid);
+            vec![empty_response(70401)]
+        }
+        // MapIsLocked -> bool
+        70144 => {
+            let (name, key) = map::decode_name_key(&req);
+            vec![map::bool_response(70145, store.is_locked(&name, &key))]
+        }
+        // MapForceUnlock -> void
+        78592 => {
+            let (name, key) = map::decode_name_key(&req);
+            store.force_unlock(&name, &key);
+            vec![empty_response(78593)]
+        }
         // MapGetAll -> EntryList<Data,Data>
         74496 => {
             let name = map::decode_name(&req);
