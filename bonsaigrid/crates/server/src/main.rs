@@ -55,9 +55,12 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
     if let Some(id) = core_affinity::get_core_ids().and_then(|v| v.get(self_index % 64).copied()) {
         core_affinity::set_for_current(id);
     }
-    server::reactor::run(vec![listener], move |msg, out| {
-        server::handlers::dispatch_bytes(msg, &store, &cfg, out)
-    })
+    let n = members;
+    server::reactor::run(
+        vec![listener],
+        move |msg, out| server::handlers::dispatch_bytes(msg, &store, &cfg, out),
+        move |path| server::handlers::http_health(path, n),
+    )
 }
 
 fn run_single_node() -> std::io::Result<()> {
@@ -90,9 +93,11 @@ fn run_single_node() -> std::io::Result<()> {
             if let Some(id) = core_id {
                 core_affinity::set_for_current(id);
             }
-            let _ = server::reactor::run(vec![main_listener, tpc_listener], move |msg, out| {
-                server::handlers::dispatch_bytes(msg, &store, &cfg, out)
-            });
+            let _ = server::reactor::run(
+                vec![main_listener, tpc_listener],
+                move |msg, out| server::handlers::dispatch_bytes(msg, &store, &cfg, out),
+                |path| server::handlers::http_health(path, 1),
+            );
         }));
     }
     for h in handles {

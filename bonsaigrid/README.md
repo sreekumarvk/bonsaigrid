@@ -20,9 +20,20 @@ two modes:
   routes each key to its owner — verified by 1000 keys round-tripping across a
   3-member cluster (`conformance-python/run_cluster.sh`).
 
-Unmodified Hazelcast clients (Python + Java) connect and perform `IMap.put` /
-`IMap.get` — unisocket, smart-routing, TPC-enabled, and cross-cluster. See
-`bench/BASELINE.md` for measured single-node performance.
+Unmodified Hazelcast clients (Python + Java) connect and perform a broad `IMap`
+API (put/get/remove/delete/containsKey/containsValue/size/isEmpty/putIfAbsent/
+replace/clear + TTL) — unisocket, smart-routing, TPC-enabled, and cross-cluster.
+See `bench/BASELINE.md` for measured single-node performance.
+
+**Operator surface:** Hazelcast's REST health endpoints are served on the main
+port (protocol-detected alongside the binary client), so existing health checks
+/ k8s probes / load balancers work unchanged:
+
+```
+GET /hazelcast/health/node-state         -> ACTIVE
+GET /hazelcast/health/cluster-size       -> <member count>
+GET /hazelcast/health                    -> {"nodeState":"ACTIVE",...,"clusterSize":N}
+```
 
 | # | Increment | Target | Result |
 |---|-----------|--------|--------|

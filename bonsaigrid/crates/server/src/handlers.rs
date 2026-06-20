@@ -70,6 +70,29 @@ fn try_fast_get(msg: &[u8], store: &Store, out: &mut Vec<u8>) -> bool {
     true
 }
 
+/// Hazelcast REST health endpoints (served on the main port via protocol
+/// detection). Operators' existing health checks / k8s probes / load balancers
+/// keep working unchanged. Returns (status, content-type, body).
+pub fn http_health(path: &str, cluster_size: usize) -> (u16, &'static str, String) {
+    let text = "text/plain";
+    match path {
+        "/hazelcast/health/node-state" => (200, text, "ACTIVE".into()),
+        "/hazelcast/health/cluster-state" => (200, text, "ACTIVE".into()),
+        "/hazelcast/health/cluster-safe" => (200, text, "TRUE".into()),
+        "/hazelcast/health/migration-queue-size" => (200, text, "0".into()),
+        "/hazelcast/health/cluster-size" => (200, text, cluster_size.to_string()),
+        "/hazelcast/health/ready" => (200, text, String::new()),
+        "/hazelcast/health" | "/hazelcast/health/" => (
+            200,
+            "application/json",
+            format!(
+                "{{\"nodeState\":\"ACTIVE\",\"clusterState\":\"ACTIVE\",\"clusterSafe\":true,\"migrationQueueSize\":0,\"clusterSize\":{cluster_size}}}"
+            ),
+        ),
+        _ => (404, text, "Not Found".into()),
+    }
+}
+
 /// Feed one complete request message; append framed reply bytes to `out`.
 pub fn dispatch_bytes(msg: &[u8], store: &Store, cfg: &Cfg, out: &mut Vec<u8>) {
     if try_fast_get(msg, store, out) {
@@ -337,6 +360,20 @@ mod tests {
         assert_eq!(msg_type(&out[0]), 257);
         // member_uuid lives at offset 14 (after backupAcks@12 + status@13).
         assert_eq!(protocol::fixed::read_uuid(&out[0][0].content, 14), Some((1, 3)));
+    }
+
+    #[test]
+    fn http_health_endpoints() {
+        assert_eq!(http_health("/hazelcast/health/node-state", 1).2, "ACTIVE");
+        assert_eq!(http_health("/hazelcast/health/cluster-state", 3).2, "ACTIVE");
+        assert_eq!(http_health("/hazelcast/health/cluster-safe", 1).2, "TRUE");
+        assert_eq!(http_health("/hazelcast/health/cluster-size", 3).2, "3");
+        assert_eq!(http_health("/hazelcast/health/migration-queue-size", 1).2, "0");
+        let (status, ctype, body) = http_health("/hazelcast/health", 5);
+        assert_eq!(status, 200);
+        assert_eq!(ctype, "application/json");
+        assert!(body.contains("\"clusterSize\":5"));
+        assert_eq!(http_health("/nope", 1).0, 404);
     }
 
     #[test]

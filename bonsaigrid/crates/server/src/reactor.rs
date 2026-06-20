@@ -18,13 +18,21 @@ const ACCEPT_BASE: u64 = u64::MAX - 255;
 const RECV_BUF: usize = 64 * 1024;
 const OUT_CAP: usize = 4 * 1024 * 1024; // reserved so appends never realloc mid-send
 
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum Mode {
+    Unknown, // haven't seen the preamble yet
+    Binary,  // CP2 client protocol
+    Http,    // REST (health endpoints)
+}
+
 struct Conn {
     fd: RawFd,
     rbuf: Box<[u8]>,
     acc: Vec<u8>,
     out: Vec<u8>,
     inflight_send: usize, // bytes currently being sent (0 == no send in flight)
-    preamble_left: u8,
+    mode: Mode,
+    close_after_flush: bool,
     open: bool,
 }
 
@@ -38,7 +46,8 @@ impl Conn {
             acc: Vec::with_capacity(RECV_BUF),
             out,
             inflight_send: 0,
-            preamble_left: 3,
+            mode: Mode::Unknown,
+            close_after_flush: false,
             open: true,
         }
     }
@@ -54,11 +63,13 @@ fn send_ud(id: usize) -> u64 {
 /// Run the reactor over `listener`, dispatching each parsed request message to
 /// `dispatch` (which returns zero or more reply messages). Never returns under
 /// normal operation.
-/// `dispatch(msg, out)` receives one complete request message as a byte slice and
-/// appends framed reply bytes (responses and pushed events) to `out`.
+/// `dispatch(msg, out)` receives one complete binary request message and appends
+/// framed reply bytes to `out`. `http(path, out)` handles a REST request line
+/// (target path) and appends a full HTTP response to `out`.
 pub fn run(
     listeners: Vec<std::net::TcpListener>,
     mut dispatch: impl FnMut(&[u8], &mut Vec<u8>),
+    http: impl Fn(&str) -> (u16, &'static str, String),
 ) -> std::io::Result<()> {
     let fds: Vec<RawFd> = listeners.iter().map(|l| l.as_raw_fd()).collect();
     let mut ring = IoUring::new(4096)?;
@@ -120,7 +131,7 @@ pub fn run(
             if is_send {
                 on_send(&mut conns, id, res, &mut pending);
             } else {
-                on_recv(&mut conns, id, res, &mut pending, &mut dispatch);
+                on_recv(&mut conns, id, res, &mut pending, &mut dispatch, &http);
             }
 
             if !conns[id].as_ref().map(|c| c.open).unwrap_or(false) {
@@ -172,35 +183,90 @@ fn on_recv(
     res: i32,
     pending: &mut Vec<io_uring::squeue::Entry>,
     dispatch: &mut impl FnMut(&[u8], &mut Vec<u8>),
+    http: &impl Fn(&str) -> (u16, &'static str, String),
 ) {
     if res <= 0 {
         conns[id].as_mut().unwrap().open = false;
         return;
     }
     let n = res as usize;
-    {
-        let c = conns[id].as_mut().unwrap();
-        c.acc.extend_from_slice(&c.rbuf[..n]);
-        // Consume the CP2 preamble.
-        while c.preamble_left > 0 && !c.acc.is_empty() {
-            c.acc.remove(0);
-            c.preamble_left -= 1;
+    let c = conns[id].as_mut().unwrap();
+    c.acc.extend_from_slice(&c.rbuf[..n]);
+
+    // Detect the protocol from the first bytes: "CP2" -> binary client, anything
+    // else (an HTTP method) -> REST.
+    if c.mode == Mode::Unknown {
+        if c.acc.len() < 3 {
+            arm_recv(conns, id, pending);
+            return;
+        }
+        if &c.acc[..3] == b"CP2" {
+            c.mode = Mode::Binary;
+            c.acc.drain(0..3);
+        } else {
+            c.mode = Mode::Http;
         }
     }
-    // Hand each complete message (as a byte slice) to the dispatcher, which
-    // appends reply bytes straight into the reused `out` buffer.
-    loop {
-        let c = conns[id].as_mut().unwrap();
-        if c.preamble_left > 0 {
-            break;
+
+    match conns[id].as_ref().unwrap().mode {
+        Mode::Http => {
+            let c = conns[id].as_mut().unwrap();
+            // Wait for the end of the request headers.
+            if let Some(pos) = find_subslice(&c.acc, b"\r\n\r\n") {
+                let path = request_target(&c.acc[..pos]);
+                let (status, ctype, body) = http(&path);
+                write_http_response(&mut c.out, status, ctype, &body);
+                c.acc.clear();
+                c.close_after_flush = true; // HTTP/1.0-style: one request per connection
+                maybe_arm_send(conns, id, pending);
+            } else {
+                arm_recv(conns, id, pending);
+            }
         }
-        let Some(len) = message_len(&c.acc) else { break };
-        let Conn { acc, out, .. } = c;
-        dispatch(&acc[..len], out);
-        acc.drain(0..len);
+        Mode::Binary => {
+            loop {
+                let c = conns[id].as_mut().unwrap();
+                let Some(len) = message_len(&c.acc) else { break };
+                let Conn { acc, out, .. } = c;
+                dispatch(&acc[..len], out);
+                acc.drain(0..len);
+            }
+            maybe_arm_send(conns, id, pending);
+            arm_recv(conns, id, pending);
+        }
+        Mode::Unknown => unreachable!(),
     }
-    maybe_arm_send(conns, id, pending);
-    arm_recv(conns, id, pending);
+}
+
+fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Extract the request-target from an HTTP request's first line
+/// (`GET /path HTTP/1.1`).
+fn request_target(headers: &[u8]) -> String {
+    let line_end = find_subslice(headers, b"\r\n").unwrap_or(headers.len());
+    let line = &headers[..line_end];
+    let mut parts = line.split(|&b| b == b' ');
+    let _method = parts.next();
+    match parts.next() {
+        Some(p) => String::from_utf8_lossy(p).into_owned(),
+        None => String::new(),
+    }
+}
+
+fn write_http_response(out: &mut Vec<u8>, status: u16, ctype: &str, body: &str) {
+    let reason = match status {
+        200 => "OK",
+        404 => "Not Found",
+        _ => "OK",
+    };
+    let head = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    out.extend_from_slice(head.as_bytes());
+    out.extend_from_slice(body.as_bytes());
 }
 
 fn on_send(conns: &mut [Option<Conn>], id: usize, res: i32, pending: &mut Vec<io_uring::squeue::Entry>) {
@@ -212,6 +278,10 @@ fn on_send(conns: &mut [Option<Conn>], id: usize, res: i32, pending: &mut Vec<io
     let sent = res as usize;
     c.out.drain(0..sent);
     c.inflight_send = 0;
+    if c.out.is_empty() && c.close_after_flush {
+        c.open = false; // HTTP response fully sent -> close
+        return;
+    }
     // If more queued (or a partial send), arm the next send.
     maybe_arm_send(conns, id, pending);
 }
