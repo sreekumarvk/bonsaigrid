@@ -167,8 +167,26 @@ impl Inner {
     }
 }
 
+/// Standalone shard selector — independent of per-shard map interning, so the
+/// same (map, key) always lands on the same shard regardless of which core or
+/// connection serves the request. This makes a request servable by *any* core
+/// correctly (the spec's per-core ownership realized as per-shard locks; under
+/// TPC each core touches only its own shard, so the lock is uncontended).
+fn shard_of(map: &str, key: &[u8], n: usize) -> usize {
+    let mut h = 0xcbf29ce484222325u64;
+    for &b in map.as_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    for &b in key {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    (h as usize) % n
+}
+
 pub struct Store {
-    inner: Mutex<Inner>,
+    shards: Vec<Mutex<Inner>>,
 }
 
 impl Default for Store {
@@ -179,19 +197,27 @@ impl Default for Store {
 
 impl Store {
     pub fn new() -> Store {
+        Self::with_shards(1)
+    }
+
+    /// Create a store partitioned into `n` independently-locked shards.
+    pub fn with_shards(n: usize) -> Store {
+        assert!(n >= 1);
         Store {
-            inner: Mutex::new(Inner::new()),
+            shards: (0..n).map(|_| Mutex::new(Inner::new())).collect(),
         }
     }
 
     /// Insert; returns the previous value if the key existed.
     pub fn put(&self, map: &str, key: Vec<u8>, val: Vec<u8>) -> Option<Vec<u8>> {
-        self.inner.lock().unwrap().put(map, &key, &val)
+        let i = shard_of(map, &key, self.shards.len());
+        self.shards[i].lock().unwrap().put(map, &key, &val)
     }
 
     /// Look up; returns the stored blob verbatim.
     pub fn get(&self, map: &str, key: &[u8]) -> Option<Vec<u8>> {
-        self.inner.lock().unwrap().get(map, key)
+        let i = shard_of(map, key, self.shards.len());
+        self.shards[i].lock().unwrap().get(map, key)
     }
 }
 
@@ -233,6 +259,19 @@ mod tests {
         // overwrite returns prior and reclaims slab
         assert_eq!(s.put("m", 7u32.to_le_bytes().to_vec(), vec![1]), Some(vec![7u8; 40]));
         assert_eq!(s.get("m", &7u32.to_le_bytes()), Some(vec![1]));
+    }
+
+    #[test]
+    fn sharded_store_is_correct_for_all_keys() {
+        let s = Store::with_shards(8);
+        for i in 0..10000u32 {
+            s.put("m", i.to_le_bytes().to_vec(), vec![i as u8; 30]);
+        }
+        for i in 0..10000u32 {
+            assert_eq!(s.get("m", &i.to_le_bytes()), Some(vec![i as u8; 30]));
+        }
+        // same key always resolves to the same shard -> overwrite works
+        assert_eq!(s.put("m", 42u32.to_le_bytes().to_vec(), vec![1]), Some(vec![42u8; 30]));
     }
 
     #[test]

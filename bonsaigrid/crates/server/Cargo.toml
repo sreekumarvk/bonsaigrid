@@ -9,6 +9,8 @@ codecs = { path = "../codecs" }
 store = { path = "../store" }
 io-uring = "0.6"
 libc = "0.2"
+socket2 = { version = "0.5", features = ["all"] }
+core_affinity = "0.8"
 
 [dev-dependencies]
 protocol = { path = "../protocol" }

@@ -24,6 +24,21 @@ targets. Increment 1's win is memory, below.
 |-----------|------:|-----------------:|
 | 2 io_uring reactor | 64 | 173,605 |
 
+### Increment 3 — thread-per-core scaling (96 conns, put+get each)
+
+| cores | ops/sec | speedup |
+|------:|--------:|--------:|
+| 1 | 132,454 | 1.0× |
+| 2 | 222,776 | 1.7× |
+| 4 | 420,333 | 3.2× |
+| 8 | 690,294 | 5.2× |
+
+N pinned io_uring reactors over `SO_REUSEPORT`; the kernel spreads connections
+across cores; the store is partitioned into N independently-locked shards so any
+core serves any key correctly. Sub-linear past 4 cores is partly the sequential
+benchmark client (also a bottleneck) and shard-lock contention under non-TPC
+routing — which TPC alignment (each core touches only its own shard) removes.
+
 Increment 2 moves socket I/O to a single-core io_uring event loop with
 per-connection reusable buffers (no per-request socket-buffer allocation). On a
 single connection, io_uring is comparable to (slightly behind) blocking I/O —
