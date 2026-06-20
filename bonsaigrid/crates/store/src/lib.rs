@@ -283,6 +283,18 @@ impl Inner {
         self.counts[map_id as usize] = 0;
     }
 
+    fn collect_entries(&self, map: &str, out: &mut Vec<(Vec<u8>, Vec<u8>)>) {
+        let Some(&map_id) = self.map_ids.get(map) else { return };
+        let now = now_ms();
+        for e in self.table.iter() {
+            if e.occupied() && e.map_id == map_id && !e.expired(now) {
+                let total = (e.key_len + e.val_len) as usize;
+                let bytes = self.slab.get(e.handle, total);
+                out.push((bytes[..e.key_len as usize].to_vec(), bytes[e.key_len as usize..].to_vec()));
+            }
+        }
+    }
+
     fn contains_value(&self, map: &str, val: &[u8]) -> bool {
         let Some(&map_id) = self.map_ids.get(map) else { return false };
         let now = now_ms();
@@ -397,6 +409,29 @@ impl Store {
 
     pub fn contains_value(&self, map: &str, val: &[u8]) -> bool {
         self.shards.iter().any(|s| s.lock().unwrap().contains_value(map, val))
+    }
+
+    /// All live (key, value) pairs for a map, across shards.
+    pub fn entries(&self, map: &str) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let mut out = Vec::new();
+        for s in &self.shards {
+            s.lock().unwrap().collect_entries(map, &mut out);
+        }
+        out
+    }
+
+    /// Bulk get: returns the present (key, value) pairs for the requested keys.
+    pub fn get_all(&self, map: &str, keys: &[Vec<u8>]) -> Vec<(Vec<u8>, Vec<u8>)> {
+        keys.iter()
+            .filter_map(|k| self.get(map, k).map(|v| (k.clone(), v)))
+            .collect()
+    }
+
+    /// Bulk put.
+    pub fn put_all(&self, map: &str, entries: Vec<(Vec<u8>, Vec<u8>)>) {
+        for (k, v) in entries {
+            self.put(map, k, v);
+        }
     }
 }
 

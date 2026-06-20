@@ -55,9 +55,57 @@ pub fn encode_entry_event(
     write_message(&frames)
 }
 
-/// name-only request (Size/IsEmpty/Clear): var-frame[1] is the map name.
+/// name-only request (Size/IsEmpty/Clear/KeySet/Values/EntrySet): map name @[1].
 pub fn decode_name(frames: &[Frame]) -> String {
     decode_string(&frames[1])
+}
+
+/// Decode a `List<Data>` starting at frame `start` (frames[start] is BEGIN).
+pub fn decode_data_list(frames: &[Frame], start: usize) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut i = start + 1; // skip BEGIN
+    while i < frames.len() && !frames[i].is_end() {
+        out.push(frames[i].content.clone());
+        i += 1;
+    }
+    out
+}
+
+/// Decode an `EntryList<Data,Data>` starting at frame `start` (BEGIN, then
+/// key,value pairs, END).
+pub fn decode_entry_list(frames: &[Frame], start: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut i = start + 1; // skip BEGIN
+    while i + 1 < frames.len() && !frames[i].is_end() {
+        out.push((frames[i].content.clone(), frames[i + 1].content.clone()));
+        i += 2;
+    }
+    out
+}
+
+/// Response carrying a `List<Data>` (KeySet/Values).
+pub fn encode_data_list_response(msg_type: i32, items: &[Vec<u8>]) -> Vec<Frame> {
+    let mut c = vec![0u8; 13];
+    write_i32_le(&mut c, 0, msg_type);
+    let mut frames = vec![initial_frame(c), crate::begin_frame()];
+    for it in items {
+        frames.push(data_frame(it));
+    }
+    frames.push(crate::end_frame());
+    frames
+}
+
+/// Response carrying an `EntryList<Data,Data>` (GetAll/EntrySet).
+pub fn encode_entry_list_response(msg_type: i32, entries: &[(Vec<u8>, Vec<u8>)]) -> Vec<Frame> {
+    let mut c = vec![0u8; 13];
+    write_i32_le(&mut c, 0, msg_type);
+    let mut frames = vec![initial_frame(c), crate::begin_frame()];
+    for (k, v) in entries {
+        frames.push(data_frame(k));
+        frames.push(data_frame(v));
+    }
+    frames.push(crate::end_frame());
+    frames
 }
 
 /// name + value request (ContainsValue): no threadId.

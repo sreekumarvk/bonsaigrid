@@ -336,6 +336,38 @@ pub fn dispatch(
             store.clear(&name);
             vec![empty_response(77057)]
         }
+        // MapGetAll -> EntryList<Data,Data>
+        74496 => {
+            let name = map::decode_name(&req);
+            let keys = map::decode_data_list(&req, 2);
+            let entries = store.get_all(&name, &keys);
+            vec![map::encode_entry_list_response(74497, &entries)]
+        }
+        // MapPutAll -> void
+        76800 => {
+            let name = map::decode_name(&req);
+            let entries = map::decode_entry_list(&req, 2);
+            store.put_all(&name, entries);
+            vec![empty_response(76801)]
+        }
+        // MapKeySet -> List<Data>
+        74240 => {
+            let name = map::decode_name(&req);
+            let keys: Vec<Vec<u8>> = store.entries(&name).into_iter().map(|(k, _)| k).collect();
+            vec![map::encode_data_list_response(74241, &keys)]
+        }
+        // MapValues -> List<Data>
+        74752 => {
+            let name = map::decode_name(&req);
+            let vals: Vec<Vec<u8>> = store.entries(&name).into_iter().map(|(_, v)| v).collect();
+            vec![map::encode_data_list_response(74753, &vals)]
+        }
+        // MapEntrySet -> EntryList<Data,Data>
+        75008 => {
+            let name = map::decode_name(&req);
+            let entries = store.entries(&name);
+            vec![map::encode_entry_list_response(75009, &entries)]
+        }
         // ClientLocalBackupListener: smart clients register it; response is a
         // UUID registration id at offset 13. We never push backup events.
         3840 => vec![uuid_response(3841, REGISTRATION_UUID)],
