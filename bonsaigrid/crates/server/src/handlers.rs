@@ -229,6 +229,19 @@ pub fn dispatch(req: Vec<Frame>, store: &Store, cfg: &Cfg) -> Vec<Vec<Frame>> {
         // MapPut (with TTL ms; <=0 means no expiry)
         65792 => {
             let r = map::decode_put(&req);
+            // Verify server-side partition computation matches the client's
+            // routing: a member only receives keys whose partition it owns, so
+            // computed_partition % N must equal this member's index.
+            if std::env::var_os("BONSAI_VERIFY_PARTITION").is_some() {
+                let n = cfg.members.len() as i32;
+                let computed = serialization::partition_id(&r.key, PARTITION_COUNT);
+                let owner = computed % n;
+                eprintln!(
+                    "PARTITION {} computed={computed} owner={owner} self={}",
+                    if owner == cfg.self_index as i32 { "OK" } else { "MISMATCH" },
+                    cfg.self_index
+                );
+            }
             let ttl = if r.ttl > 0 { r.ttl as u64 } else { 0 };
             let old = store.put_ttl(&r.name, r.key, r.value, ttl);
             vec![map::encode_put_response(old.as_deref())]
