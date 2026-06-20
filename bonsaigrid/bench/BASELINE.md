@@ -18,6 +18,20 @@ Latency is unchanged within run-to-run noise — this single-sequential-connecti
 test is dominated by blocking-socket syscalls, which increment 2 (io_uring)
 targets. Increment 1's win is memory, below.
 
+## Concurrent throughput, single core (N connections, put+get each)
+
+| Increment | conns | ops/sec (1 core) |
+|-----------|------:|-----------------:|
+| 2 io_uring reactor | 64 | 173,605 |
+
+Increment 2 moves socket I/O to a single-core io_uring event loop with
+per-connection reusable buffers (no per-request socket-buffer allocation). On a
+single connection, io_uring is comparable to (slightly behind) blocking I/O —
+its `submit_and_wait` overhead doesn't pay off for strict ping-pong. Its value
+is **multiplexing many connections on one core** (173k ops/s/core above) and
+being the foundation for thread-per-core scaling in increment 3 — where this
+number multiplies across cores.
+
 ## Memory density (200,000 entries × 100-byte values, raw payload ~115 B/entry)
 
 | Increment | bytes/entry | RSS delta (KB) | overhead vs payload |

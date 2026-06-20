@@ -136,6 +136,32 @@ fn latency_bench(addr: &str, n: usize) {
     println!("p999_us       {}", percentile(&lat, 0.999));
 }
 
+fn concurrent_bench(addr: &str, conns: usize, ops_per_conn: usize) {
+    let start = Instant::now();
+    let mut handles = Vec::new();
+    for c in 0..conns {
+        let addr = addr.to_string();
+        handles.push(std::thread::spawn(move || {
+            let mut cli = Client::connect(&addr);
+            let val = vec![0xABu8; 64];
+            for i in 0..ops_per_conn {
+                let k = format!("c{}k{}", c, i % 1024);
+                cli.put("m", k.as_bytes(), &val);
+                cli.get("m", k.as_bytes());
+            }
+        }));
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+    let elapsed = start.elapsed();
+    let ops = (conns * ops_per_conn * 2) as f64;
+    println!("conns         {}", conns);
+    println!("total_ops     {}", conns * ops_per_conn * 2);
+    println!("wall_sec      {:.3}", elapsed.as_secs_f64());
+    println!("throughput    {:.0} ops/sec", ops / elapsed.as_secs_f64());
+}
+
 fn load_bench(addr: &str, count: usize, valsz: usize) {
     let mut cli = Client::connect(addr);
     let val = vec![0xCDu8; valsz];
@@ -158,6 +184,11 @@ fn main() {
             let count = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(100_000);
             let valsz = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(100);
             load_bench(&addr, count, valsz);
+        }
+        Some("concurrent") => {
+            let conns = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(64);
+            let ops = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(20_000);
+            concurrent_bench(&addr, conns, ops);
         }
         _ => {
             eprintln!("usage: bench latency [n] | bench load <count> <valsz>");

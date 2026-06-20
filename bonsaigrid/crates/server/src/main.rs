@@ -1,18 +1,9 @@
-//! BonsaiGrid increment-0 server binary: single-node, thread-per-connection.
-
-use std::sync::Arc;
+//! BonsaiGrid increment-2 server binary: single-core io_uring reactor.
 
 fn main() -> std::io::Result<()> {
-    let store = Arc::new(store::Store::new());
+    let store = store::Store::new();
     let addr = "127.0.0.1:5701";
     let listener = std::net::TcpListener::bind(addr)?;
-    eprintln!("BonsaiGrid listening on {addr}");
-    for stream in listener.incoming() {
-        let stream = stream?;
-        let store = store.clone();
-        std::thread::spawn(move || {
-            let _ = server::connection::handle(stream, |req| server::handlers::dispatch(req, &store));
-        });
-    }
-    Ok(())
+    eprintln!("BonsaiGrid listening on {addr} (io_uring reactor)");
+    server::reactor::run(listener, |req| server::handlers::dispatch(req, &store))
 }
