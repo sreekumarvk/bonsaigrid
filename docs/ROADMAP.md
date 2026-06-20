@@ -12,6 +12,17 @@ core + TTL · slab store (tombstones) · io_uring thread-per-core (5.2×/8c) ·
 zero-alloc MapGet · static multi-node cluster (Phase B) · lock-free SPSC ring ·
 REST health. Stock Python + Java (unisocket/smart/TPC) conformance.
 
+## Status snapshot (current)
+- ✅ **Epic 2 complete** — entry listeners, same- and cross-connection (reactor timer).
+- 🟡 **Epic 1** — server-side partitioning done & verified (1000/1000); **Portable/Compact field decode remains** (the query unblocker).
+- 🟡 **Epic 5** — core IMap + TTL + bulk (getAll/putAll/keySet/values/entrySet) + **locking** done; queries/indexes/entry-processors/eviction/near-cache remain (need Epic 1 field decode + map-config).
+- 🟡 **Epic 6** — Queue, Set, List, MultiMap, **Topic** (5 structures) done; ReplicatedMap, Ringbuffer, PNCounter, FlakeId remain.
+- The remaining tails of **Epic 1 + Epic 5** are one coupled subsystem — a
+  **serialization + query engine** (Compact/Portable field decode → predicate
+  parse → evaluate → indexes). This is core Hazelcast IP and a large dedicated
+  effort; it is scoped here, not stubbed, to avoid a fragile query path that
+  breaks on real client data.
+
 ---
 
 ## Epic 1 — Serialization & server-side partitioning  ⭐ gates the most
