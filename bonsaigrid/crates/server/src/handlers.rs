@@ -5,7 +5,7 @@
 
 use codecs::auth::{self, AuthResponse, MemberTuple};
 use codecs::{cluster_view, map};
-use protocol::fixed::write_i32_le;
+use protocol::fixed::{write_i32_le, write_uuid};
 use protocol::frame::{Frame, UNFRAGMENTED};
 use protocol::message::{correlation_id, msg_type, set_correlation_id};
 use store::Store;
@@ -51,6 +51,20 @@ fn empty_response(msg_type: i32) -> Vec<Frame> {
     vec![Frame { flags: UNFRAGMENTED, content: c }]
 }
 
+/// A response whose initial frame carries a single UUID at offset 13 (after
+/// backupAcks). Used by listener-registration responses that return a
+/// registration id. Since this increment sends no events for these listeners,
+/// any stable id works.
+fn uuid_response(msg_type: i32, uuid: (i64, i64)) -> Vec<Frame> {
+    let mut c = vec![0u8; 30]; // type@0, corr@4, backupAcks@12, uuid@13 (17B)
+    write_i32_le(&mut c, 0, msg_type);
+    write_uuid(&mut c, 13, Some(uuid));
+    vec![Frame { flags: UNFRAGMENTED, content: c }]
+}
+
+/// Stable registration id handed back for listener registrations.
+pub const REGISTRATION_UUID: (i64, i64) = (3, 3);
+
 pub fn dispatch(req: Vec<Frame>, store: &Store) -> Vec<Vec<Frame>> {
     let corr = correlation_id(&req);
     let mut replies: Vec<Vec<Frame>> = match msg_type(&req) {
@@ -70,10 +84,19 @@ pub fn dispatch(req: Vec<Frame>, store: &Store) -> Vec<Vec<Frame>> {
             let v = store.get(&r.name, &r.key);
             vec![map::encode_get_response(v.as_deref())]
         }
+        // ClientLocalBackupListener: smart clients register it; response is a
+        // UUID registration id at offset 13. We never push backup events.
+        3840 => vec![uuid_response(3841, REGISTRATION_UUID)],
+        // ClientCreateProxy: client creates a distributed-object proxy (e.g. on
+        // getMap). Response is an empty ack.
+        1024 => vec![empty_response(1025)],
         // Unknown op: ack with an empty response of type+1 so the client does
         // not hang (covers e.g. CreateProxy). The live client reveals any op
         // that needs a richer reply (per plan's empirical-risk note).
-        other => vec![empty_response(other + 1)],
+        other => {
+            eprintln!("UNKNOWN op type {other} (0x{other:06x}) -> empty ack {}", other + 1);
+            vec![empty_response(other + 1)]
+        }
     };
     for reply in replies.iter_mut() {
         set_correlation_id(reply, corr);
@@ -138,6 +161,26 @@ mod tests {
         ];
         set_correlation_id(&mut f, corr);
         f
+    }
+
+    #[test]
+    fn local_backup_listener_replies_3841_with_uuid() {
+        use protocol::fixed::read_uuid;
+        let store = Store::new();
+        let out = dispatch(request(3840, 7), &store);
+        assert_eq!(msg_type(&out[0]), 3841);
+        // initial frame must be 30 bytes with the registration UUID at offset 13
+        assert_eq!(out[0][0].content.len(), 30);
+        assert_eq!(read_uuid(&out[0][0].content, 13), Some(REGISTRATION_UUID));
+        assert_eq!(correlation_id(&out[0]), 7);
+    }
+
+    #[test]
+    fn create_proxy_replies_empty_1025() {
+        let store = Store::new();
+        let out = dispatch(request(1024, 8), &store);
+        assert_eq!(msg_type(&out[0]), 1025);
+        assert_eq!(correlation_id(&out[0]), 8);
     }
 
     #[test]

@@ -11,3 +11,6 @@ conformance-python/.venv/
 
 # Java build
 conformance-java/target/
+
+__pycache__/
+*.pyc
