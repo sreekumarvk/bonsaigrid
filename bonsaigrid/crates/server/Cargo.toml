@@ -7,3 +7,7 @@ version.workspace = true
 protocol = { path = "../protocol" }
 codecs = { path = "../codecs" }
 store = { path = "../store" }
+
+[dev-dependencies]
+protocol = { path = "../protocol" }
+codecs = { path = "../codecs" }
