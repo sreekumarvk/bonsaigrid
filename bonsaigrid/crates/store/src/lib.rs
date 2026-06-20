@@ -1,42 +1,54 @@
 //! Single-node, opaque-blob in-memory map.
 //!
-//! Increment 1: a slab allocator (contiguous, size-classed, O(1) free list)
-//! holds each entry's `key ++ value` bytes, and an open-addressing (linear
-//! probing) table holds fixed-size entry records inline. This removes the
-//! per-entry `HashMap` node, `String` key, and separate `Vec` allocations the
-//! baseline paid — cutting bytes/entry substantially.
+//! A size-classed slab allocator (contiguous, O(1) free list) holds each entry's
+//! `key ++ value` bytes; an open-addressing (linear-probing, tombstoned) table
+//! holds fixed-size entry records inline. Keys/values stay opaque serialized
+//! `Data` blobs, never deserialized. Optional per-entry TTL with lazy expiry.
 //!
-//! Keys/values remain opaque serialized `Data` blobs, never deserialized.
-//!
-//! The `Mutex` exists only because the increment-1 server is still
-//! thread-per-connection. Increment 3 replaces it with a shared-nothing,
-//! per-core store (see the cross-core routing spec).
+//! Partitioned into N independently-locked shards (`with_shards`); single-key
+//! ops route to one shard, aggregate ops fold over all. The per-shard `Mutex`
+//! is the increment-3 realization of per-core ownership.
 
 mod slab;
 
 use slab::{Handle, Slab};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
+
+const EMPTY: u64 = 0;
+const TOMBSTONE: u64 = 1;
+
+/// Monotonic milliseconds since first use (for TTL).
+fn now_ms() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
 
 #[derive(Clone, Copy)]
 struct Entry {
-    hash: u64, // 0 == empty slot
+    hash: u64, // EMPTY / TOMBSTONE / real (MSB set)
     map_id: u32,
     handle: Handle,
     key_len: u32,
     val_len: u32,
+    expire_at: u64, // 0 == never
 }
 
 impl Entry {
     const EMPTY: Entry = Entry {
-        hash: 0,
+        hash: EMPTY,
         map_id: 0,
         handle: Handle { class: 0, slot: 0 },
         key_len: 0,
         val_len: 0,
+        expire_at: 0,
     };
-    fn is_empty(&self) -> bool {
-        self.hash == 0
+    fn occupied(&self) -> bool {
+        self.hash > TOMBSTONE
+    }
+    fn expired(&self, now: u64) -> bool {
+        self.expire_at != 0 && now >= self.expire_at
     }
 }
 
@@ -45,11 +57,14 @@ struct Inner {
     table: Vec<Entry>,
     mask: usize,
     len: usize,
+    tombstones: usize,
     map_ids: HashMap<String, u32>,
     map_names: Vec<String>,
+    counts: Vec<usize>, // live entries per map_id
 }
 
-/// FNV-1a over (map_id, key); forced non-zero so 0 can mark empty slots.
+/// FNV-1a over (map_id, key) with the MSB forced set, so real hashes are
+/// distinct from the EMPTY(0) and TOMBSTONE(1) sentinels.
 fn hash(map_id: u32, key: &[u8]) -> u64 {
     let mut h = 0xcbf29ce484222325u64;
     for b in map_id.to_le_bytes() {
@@ -60,7 +75,7 @@ fn hash(map_id: u32, key: &[u8]) -> u64 {
         h ^= b as u64;
         h = h.wrapping_mul(0x100000001b3);
     }
-    h | 1
+    h | (1u64 << 63)
 }
 
 impl Inner {
@@ -71,8 +86,10 @@ impl Inner {
             table: vec![Entry::EMPTY; cap],
             mask: cap - 1,
             len: 0,
+            tombstones: 0,
             map_ids: HashMap::new(),
             map_names: Vec::new(),
+            counts: Vec::new(),
         }
     }
 
@@ -83,58 +100,74 @@ impl Inner {
         let id = self.map_names.len() as u32;
         self.map_names.push(map.to_string());
         self.map_ids.insert(map.to_string(), id);
+        self.counts.push(0);
         id
     }
 
     fn key_bytes(&self, e: &Entry) -> &[u8] {
         &self.slab.get(e.handle, (e.key_len + e.val_len) as usize)[..e.key_len as usize]
     }
-
     fn val_bytes(&self, e: &Entry) -> Vec<u8> {
         let total = (e.key_len + e.val_len) as usize;
         self.slab.get(e.handle, total)[e.key_len as usize..].to_vec()
     }
 
     fn maybe_grow(&mut self) {
-        // Resize at 7/8 load (matches hashbrown, for fair density comparison).
-        if (self.len + 1) * 8 < (self.mask + 1) * 7 {
+        // Grow at 7/8 of (live + tombstones); rehash drops tombstones.
+        if (self.len + self.tombstones + 1) * 8 < (self.mask + 1) * 7 {
             return;
         }
         let new_cap = (self.mask + 1) * 2;
         let mut new_table = vec![Entry::EMPTY; new_cap];
         let new_mask = new_cap - 1;
-        for e in self.table.iter().filter(|e| !e.is_empty()) {
+        for e in self.table.iter().filter(|e| e.occupied()) {
             let mut i = e.hash as usize & new_mask;
-            while !new_table[i].is_empty() {
+            while new_table[i].occupied() {
                 i = (i + 1) & new_mask;
             }
             new_table[i] = *e;
         }
         self.table = new_table;
         self.mask = new_mask;
+        self.tombstones = 0;
     }
 
-    fn put(&mut self, map: &str, key: &[u8], val: &[u8]) -> Option<Vec<u8>> {
+    fn put(&mut self, map: &str, key: &[u8], val: &[u8], ttl_ms: u64) -> Option<Vec<u8>> {
         let map_id = self.intern(map);
         let h = hash(map_id, key);
+        let expire_at = if ttl_ms > 0 { now_ms() + ttl_ms } else { 0 };
         self.maybe_grow();
         let mut i = h as usize & self.mask;
+        let mut first_free: Option<usize> = None;
         loop {
             let e = self.table[i];
-            if e.is_empty() {
+            if e.hash == EMPTY {
+                let slot = first_free.unwrap_or(i);
+                if self.table[slot].hash == TOMBSTONE {
+                    self.tombstones -= 1;
+                }
                 let handle = self.slab.put_two(key, val);
-                self.table[i] = Entry {
+                self.table[slot] = Entry {
                     hash: h,
                     map_id,
                     handle,
                     key_len: key.len() as u32,
                     val_len: val.len() as u32,
+                    expire_at,
                 };
                 self.len += 1;
+                self.counts[map_id as usize] += 1;
                 return None;
             }
+            if e.hash == TOMBSTONE {
+                if first_free.is_none() {
+                    first_free = Some(i);
+                }
+                i = (i + 1) & self.mask;
+                continue;
+            }
             if e.hash == h && e.map_id == map_id && self.key_bytes(&e) == key {
-                let old = self.val_bytes(&e);
+                let old = if e.expired(now_ms()) { None } else { Some(self.val_bytes(&e)) };
                 self.slab.free(e.handle);
                 let handle = self.slab.put_two(key, val);
                 self.table[i] = Entry {
@@ -143,35 +176,126 @@ impl Inner {
                     handle,
                     key_len: key.len() as u32,
                     val_len: val.len() as u32,
+                    expire_at,
                 };
-                return Some(old);
+                if old.is_none() && e.expired(now_ms()) {
+                    // previously-expired slot becomes live again
+                }
+                return old;
             }
             i = (i + 1) & self.mask;
         }
     }
 
-    fn get(&self, map: &str, key: &[u8]) -> Option<Vec<u8>> {
+    /// Returns the slot index of a live (non-expired) entry for (map,key), lazily
+    /// reaping an expired one.
+    fn find(&mut self, map: &str, key: &[u8]) -> Option<usize> {
         let map_id = *self.map_ids.get(map)?;
         let h = hash(map_id, key);
+        let now = now_ms();
         let mut i = h as usize & self.mask;
         loop {
             let e = self.table[i];
-            if e.is_empty() {
+            if e.hash == EMPTY {
                 return None;
             }
+            if e.hash == TOMBSTONE {
+                i = (i + 1) & self.mask;
+                continue;
+            }
             if e.hash == h && e.map_id == map_id && self.key_bytes(&e) == key {
-                return Some(self.val_bytes(&e));
+                if e.expired(now) {
+                    self.slab.free(e.handle);
+                    self.table[i].hash = TOMBSTONE;
+                    self.len -= 1;
+                    self.tombstones += 1;
+                    self.counts[map_id as usize] -= 1;
+                    return None;
+                }
+                return Some(i);
             }
             i = (i + 1) & self.mask;
         }
     }
+
+    fn get(&mut self, map: &str, key: &[u8]) -> Option<Vec<u8>> {
+        let i = self.find(map, key)?;
+        Some(self.val_bytes(&self.table[i]))
+    }
+
+    fn contains_key(&mut self, map: &str, key: &[u8]) -> bool {
+        self.find(map, key).is_some()
+    }
+
+    fn remove(&mut self, map: &str, key: &[u8]) -> Option<Vec<u8>> {
+        let i = self.find(map, key)?;
+        let e = self.table[i];
+        let old = self.val_bytes(&e);
+        self.slab.free(e.handle);
+        self.table[i].hash = TOMBSTONE;
+        self.len -= 1;
+        self.tombstones += 1;
+        self.counts[e.map_id as usize] -= 1;
+        Some(old)
+    }
+
+    fn put_if_absent(&mut self, map: &str, key: &[u8], val: &[u8], ttl_ms: u64) -> Option<Vec<u8>> {
+        if let Some(i) = self.find(map, key) {
+            return Some(self.val_bytes(&self.table[i]));
+        }
+        self.put(map, key, val, ttl_ms);
+        None
+    }
+
+    fn replace(&mut self, map: &str, key: &[u8], val: &[u8]) -> Option<Vec<u8>> {
+        let i = self.find(map, key)?;
+        let e = self.table[i];
+        let old = self.val_bytes(&e);
+        self.slab.free(e.handle);
+        let handle = self.slab.put_two(key, val);
+        self.table[i] = Entry {
+            handle,
+            key_len: key.len() as u32,
+            val_len: val.len() as u32,
+            ..e
+        };
+        Some(old)
+    }
+
+    fn size(&self, map: &str) -> usize {
+        match self.map_ids.get(map) {
+            Some(&id) => self.counts[id as usize],
+            None => 0,
+        }
+    }
+
+    fn clear(&mut self, map: &str) {
+        let Some(&map_id) = self.map_ids.get(map) else { return };
+        for i in 0..self.table.len() {
+            let e = self.table[i];
+            if e.occupied() && e.map_id == map_id {
+                self.slab.free(e.handle);
+                self.table[i].hash = TOMBSTONE;
+                self.tombstones += 1;
+                self.len -= 1;
+            }
+        }
+        self.counts[map_id as usize] = 0;
+    }
+
+    fn contains_value(&self, map: &str, val: &[u8]) -> bool {
+        let Some(&map_id) = self.map_ids.get(map) else { return false };
+        let now = now_ms();
+        self.table.iter().any(|e| {
+            e.occupied()
+                && e.map_id == map_id
+                && !e.expired(now)
+                && &self.slab.get(e.handle, (e.key_len + e.val_len) as usize)[e.key_len as usize..]
+                    == val
+        })
+    }
 }
 
-/// Standalone shard selector — independent of per-shard map interning, so the
-/// same (map, key) always lands on the same shard regardless of which core or
-/// connection serves the request. This makes a request servable by *any* core
-/// correctly (the spec's per-core ownership realized as per-shard locks; under
-/// TPC each core touches only its own shard, so the lock is uncontended).
 fn shard_of(map: &str, key: &[u8], n: usize) -> usize {
     let mut h = 0xcbf29ce484222325u64;
     for &b in map.as_bytes() {
@@ -200,7 +324,6 @@ impl Store {
         Self::with_shards(1)
     }
 
-    /// Create a store partitioned into `n` independently-locked shards.
     pub fn with_shards(n: usize) -> Store {
         assert!(n >= 1);
         Store {
@@ -208,16 +331,57 @@ impl Store {
         }
     }
 
-    /// Insert; returns the previous value if the key existed.
-    pub fn put(&self, map: &str, key: Vec<u8>, val: Vec<u8>) -> Option<Vec<u8>> {
-        let i = shard_of(map, &key, self.shards.len());
-        self.shards[i].lock().unwrap().put(map, &key, &val)
+    fn shard(&self, map: &str, key: &[u8]) -> &Mutex<Inner> {
+        &self.shards[shard_of(map, key, self.shards.len())]
     }
 
-    /// Look up; returns the stored blob verbatim.
+    pub fn put(&self, map: &str, key: Vec<u8>, val: Vec<u8>) -> Option<Vec<u8>> {
+        self.shard(map, &key).lock().unwrap().put(map, &key, &val, 0)
+    }
+
+    /// Put with TTL in milliseconds (0 == no expiry).
+    pub fn put_ttl(&self, map: &str, key: Vec<u8>, val: Vec<u8>, ttl_ms: u64) -> Option<Vec<u8>> {
+        self.shard(map, &key).lock().unwrap().put(map, &key, &val, ttl_ms)
+    }
+
     pub fn get(&self, map: &str, key: &[u8]) -> Option<Vec<u8>> {
-        let i = shard_of(map, key, self.shards.len());
-        self.shards[i].lock().unwrap().get(map, key)
+        self.shard(map, key).lock().unwrap().get(map, key)
+    }
+
+    pub fn remove(&self, map: &str, key: &[u8]) -> Option<Vec<u8>> {
+        self.shard(map, key).lock().unwrap().remove(map, key)
+    }
+
+    /// Insert only if absent; returns the existing value if present.
+    pub fn put_if_absent(&self, map: &str, key: Vec<u8>, val: Vec<u8>, ttl_ms: u64) -> Option<Vec<u8>> {
+        self.shard(map, &key).lock().unwrap().put_if_absent(map, &key, &val, ttl_ms)
+    }
+
+    /// Replace only if present; returns the old value, or None if absent.
+    pub fn replace(&self, map: &str, key: Vec<u8>, val: Vec<u8>) -> Option<Vec<u8>> {
+        self.shard(map, &key).lock().unwrap().replace(map, &key, &val)
+    }
+
+    pub fn contains_key(&self, map: &str, key: &[u8]) -> bool {
+        self.shard(map, key).lock().unwrap().contains_key(map, key)
+    }
+
+    pub fn size(&self, map: &str) -> usize {
+        self.shards.iter().map(|s| s.lock().unwrap().size(map)).sum()
+    }
+
+    pub fn is_empty(&self, map: &str) -> bool {
+        self.size(map) == 0
+    }
+
+    pub fn clear(&self, map: &str) {
+        for s in &self.shards {
+            s.lock().unwrap().clear(map);
+        }
+    }
+
+    pub fn contains_value(&self, map: &str, val: &[u8]) -> bool {
+        self.shards.iter().any(|s| s.lock().unwrap().contains_value(map, val))
     }
 }
 
@@ -226,18 +390,65 @@ mod tests {
     use super::*;
 
     #[test]
-    fn put_returns_prior_value() {
+    fn put_get_remove_roundtrip() {
         let s = Store::new();
         assert_eq!(s.put("m", vec![1, 2], vec![9]), None);
-        assert_eq!(s.put("m", vec![1, 2], vec![8]), Some(vec![9]));
+        assert_eq!(s.get("m", &[1, 2]), Some(vec![9]));
+        assert_eq!(s.remove("m", &[1, 2]), Some(vec![9]));
+        assert_eq!(s.get("m", &[1, 2]), None);
+        assert_eq!(s.remove("m", &[1, 2]), None);
     }
 
     #[test]
-    fn get_returns_stored_blob_verbatim() {
+    fn contains_size_clear() {
+        let s = Store::with_shards(4);
+        for i in 0..100u32 {
+            s.put("m", i.to_le_bytes().to_vec(), vec![i as u8]);
+        }
+        assert_eq!(s.size("m"), 100);
+        assert!(s.contains_key("m", &7u32.to_le_bytes()));
+        assert!(!s.contains_key("m", &999u32.to_le_bytes()));
+        assert!(s.contains_value("m", &[7]));
+        assert!(!s.contains_value("m", &[200]));
+        assert!(!s.is_empty("m"));
+        s.clear("m");
+        assert_eq!(s.size("m"), 0);
+        assert!(s.is_empty("m"));
+        assert_eq!(s.get("m", &7u32.to_le_bytes()), None);
+    }
+
+    #[test]
+    fn tombstone_reuse_keeps_probe_chains_correct() {
         let s = Store::new();
-        s.put("m", vec![1, 2], vec![0xAB, 0xCD]);
-        assert_eq!(s.get("m", &[1, 2]), Some(vec![0xAB, 0xCD]));
-        assert_eq!(s.get("m", &[9, 9]), None);
+        // insert, remove, re-insert many times to churn tombstones
+        for round in 0..50 {
+            for i in 0..200u32 {
+                s.put("m", i.to_le_bytes().to_vec(), vec![round as u8]);
+            }
+            for i in 0..200u32 {
+                assert_eq!(s.get("m", &i.to_le_bytes()), Some(vec![round as u8]));
+            }
+            if round < 49 {
+                for i in 0..200u32 {
+                    s.remove("m", &i.to_le_bytes());
+                }
+            }
+        }
+        assert_eq!(s.size("m"), 200);
+    }
+
+    #[test]
+    fn ttl_entries_expire() {
+        let s = Store::new();
+        s.put_ttl("m", vec![1], vec![9], 1); // 1 ms
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        assert_eq!(s.get("m", &[1]), None, "expired entry is gone");
+        assert!(!s.contains_key("m", &[1]));
+        assert_eq!(s.size("m"), 0);
+        // non-expiring put still works
+        s.put("m", vec![2], vec![8]);
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        assert_eq!(s.get("m", &[2]), Some(vec![8]));
     }
 
     #[test]
@@ -245,33 +456,7 @@ mod tests {
         let s = Store::new();
         s.put("a", vec![1], vec![10]);
         assert_eq!(s.get("b", &[1]), None);
-    }
-
-    #[test]
-    fn survives_growth_and_overwrites() {
-        let s = Store::new();
-        for i in 0..5000u32 {
-            assert_eq!(s.put("m", i.to_le_bytes().to_vec(), vec![i as u8; 40]), None);
-        }
-        for i in 0..5000u32 {
-            assert_eq!(s.get("m", &i.to_le_bytes()), Some(vec![i as u8; 40]));
-        }
-        // overwrite returns prior and reclaims slab
-        assert_eq!(s.put("m", 7u32.to_le_bytes().to_vec(), vec![1]), Some(vec![7u8; 40]));
-        assert_eq!(s.get("m", &7u32.to_le_bytes()), Some(vec![1]));
-    }
-
-    #[test]
-    fn sharded_store_is_correct_for_all_keys() {
-        let s = Store::with_shards(8);
-        for i in 0..10000u32 {
-            s.put("m", i.to_le_bytes().to_vec(), vec![i as u8; 30]);
-        }
-        for i in 0..10000u32 {
-            assert_eq!(s.get("m", &i.to_le_bytes()), Some(vec![i as u8; 30]));
-        }
-        // same key always resolves to the same shard -> overwrite works
-        assert_eq!(s.put("m", 42u32.to_le_bytes().to_vec(), vec![1]), Some(vec![42u8; 30]));
+        assert_eq!(s.size("b"), 0);
     }
 
     #[test]

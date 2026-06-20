@@ -134,15 +134,69 @@ pub fn dispatch(req: Vec<Frame>, store: &Store, cfg: &Cfg) -> Vec<Vec<Frame>> {
                 cluster_view::partitions_view_event(1, &parts),
             ]
         }
+        // MapPut (with TTL ms; <=0 means no expiry)
         65792 => {
             let r = map::decode_put(&req);
-            let old = store.put(&r.name, r.key, r.value);
+            let ttl = if r.ttl > 0 { r.ttl as u64 } else { 0 };
+            let old = store.put_ttl(&r.name, r.key, r.value, ttl);
             vec![map::encode_put_response(old.as_deref())]
         }
+        // MapGet
         66048 => {
             let r = map::decode_get(&req);
             let v = store.get(&r.name, &r.key);
             vec![map::encode_get_response(v.as_deref())]
+        }
+        // MapRemove -> old value
+        66304 => {
+            let r = map::decode_get(&req);
+            let old = store.remove(&r.name, &r.key);
+            vec![map::data_response(66305, old.as_deref())]
+        }
+        // MapDelete -> void
+        67840 => {
+            let r = map::decode_get(&req);
+            store.remove(&r.name, &r.key);
+            vec![empty_response(67841)]
+        }
+        // MapContainsKey -> bool
+        67072 => {
+            let r = map::decode_get(&req);
+            vec![map::bool_response(67073, store.contains_key(&r.name, &r.key))]
+        }
+        // MapContainsValue -> bool
+        67328 => {
+            let (name, value) = map::decode_name_value(&req);
+            vec![map::bool_response(67329, store.contains_value(&name, &value))]
+        }
+        // MapSize -> int
+        76288 => {
+            let name = map::decode_name(&req);
+            vec![map::int_response(76289, store.size(&name) as i32)]
+        }
+        // MapIsEmpty -> bool
+        76544 => {
+            let name = map::decode_name(&req);
+            vec![map::bool_response(76545, store.is_empty(&name))]
+        }
+        // MapPutIfAbsent -> existing value (or null)
+        69120 => {
+            let r = map::decode_put(&req);
+            let ttl = if r.ttl > 0 { r.ttl as u64 } else { 0 };
+            let existing = store.put_if_absent(&r.name, r.key, r.value, ttl);
+            vec![map::data_response(69121, existing.as_deref())]
+        }
+        // MapReplace -> old value (only if present)
+        66560 => {
+            let r = map::decode_replace(&req);
+            let old = store.replace(&r.name, r.key, r.value);
+            vec![map::data_response(66561, old.as_deref())]
+        }
+        // MapClear -> void
+        77056 => {
+            let name = map::decode_name(&req);
+            store.clear(&name);
+            vec![empty_response(77057)]
         }
         // ClientLocalBackupListener: smart clients register it; response is a
         // UUID registration id at offset 13. We never push backup events.
