@@ -10,23 +10,24 @@ Design philosophy and the cross-core routing architecture:
 `../docs/superpowers/specs/2026-06-19-cross-core-routing-design.md`.
 Build plan: `../docs/superpowers/plans/2026-06-19-increment-0-walking-skeleton.md`.
 
-## Status: Increment 0 — walking skeleton ✅
+## Status: Increment 3 — thread-per-core + TPC ✅
 
-Single-core, single-node server speaking the Hazelcast Open Client Protocol
-(fixtures version 2.10). An **unmodified Hazelcast client connects and performs
-`IMap.put` / `IMap.get`**, in both unisocket and smart-routing modes.
+Multi-core, single-node server speaking the Hazelcast Open Client Protocol
+(fixtures version 2.10). Unmodified Hazelcast clients (Python + Java) connect and
+perform `IMap.put` / `IMap.get` — unisocket, smart-routing, **and** TPC-enabled.
+See `bench/BASELINE.md` for measured results.
 
-This increment deliberately does **not** yet meet the performance guardrails
-(zero-alloc hot path, `io_uring`, thread-per-core, slab allocator) — those are
-the measurable optimization increments that follow:
+| # | Increment | Target | Result |
+|---|-----------|--------|--------|
+| 0 | Walking skeleton | compat proven | ✅ stock Python + Java clients pass |
+| 1 | slab + open-addressing store | memory density | ✅ 272 → 179 B/entry (−34%) |
+| 2 | single-core io_uring reactor | per-core efficiency | ✅ 173k ops/s/core (64 conns) |
+| 3 | thread-per-core + TPC + `SO_REUSEPORT` | throughput scaling | ✅ 5.2× on 8 cores (690k ops/s); TPC client validated |
 
-| # | Increment | Measurable win |
-|---|-----------|----------------|
-| 0 | Walking skeleton (this) | compat proven + benchmark harness |
-| 1 | slab allocator + open-addressing store | memory density |
-| 2 | raw io_uring + zero hot-path alloc | p99 latency |
-| 3 | multi-core + TPC + `p%N` routing | throughput scaling |
-| 4 | cross-core delegation fallback (SPSC) | classic-client correctness at N cores |
+Remaining on the roadmap: cross-core SPSC delegation (zero-lock shared-nothing),
+true zero-allocation response encoding, then multi-node (clustering, replication
+— see the routing spec's A→B→C→D phases), and operator-surface parity (metrics /
+Management Center).
 
 ## Layout
 

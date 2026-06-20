@@ -39,6 +39,13 @@ core serves any key correctly. Sub-linear past 4 cores is partly the sequential
 benchmark client (also a bottleneck) and shard-lock contention under non-TPC
 routing — which TPC alignment (each core touches only its own shard) removes.
 
+**TPC validated:** the auth response advertises one TPC port per core; a
+**TPC-enabled** Hazelcast Java client connects to those ports, completes the TPC
+handshake, and routes each partition to its owning core — confirmed by the
+`tpc_put_then_get` Java conformance test passing. The **default** stock client
+(TPC off) ignores the advertised ports and works unchanged, so conformance is
+preserved either way.
+
 Increment 2 moves socket I/O to a single-core io_uring event loop with
 per-connection reusable buffers (no per-request socket-buffer allocation). On a
 single connection, io_uring is comparable to (slightly behind) blocking I/O —

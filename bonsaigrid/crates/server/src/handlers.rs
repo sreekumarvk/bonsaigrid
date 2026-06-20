@@ -17,6 +17,20 @@ pub const HOST: &str = "127.0.0.1";
 pub const PORT: i32 = 5701;
 pub const SERVER_VERSION: &str = "5.8.0";
 pub const VERSION: (u8, u8, u8) = (5, 8, 0);
+const TPC_TOKEN: &[u8] = b"bonsaigrid-tpc-token";
+
+/// Runtime config the handshake needs to know about.
+#[derive(Clone)]
+pub struct Cfg {
+    /// One TPC port per core; empty disables TPC advertisement.
+    pub tpc_ports: Vec<i32>,
+}
+
+impl Cfg {
+    pub fn single() -> Cfg {
+        Cfg { tpc_ports: Vec::new() }
+    }
+}
 
 fn members() -> Vec<MemberTuple> {
     vec![(MEMBER_UUID, HOST.to_string(), PORT, false, VERSION)]
@@ -26,9 +40,14 @@ fn partitions() -> Vec<((i64, i64), Vec<i32>)> {
     vec![(MEMBER_UUID, (0..PARTITION_COUNT).collect())]
 }
 
-fn auth_response() -> Vec<Frame> {
+fn auth_response(cfg: &Cfg) -> Vec<Frame> {
     let mem = members();
     let parts = partitions();
+    let tpc = if cfg.tpc_ports.is_empty() {
+        (None, None)
+    } else {
+        (Some(cfg.tpc_ports.as_slice()), Some(TPC_TOKEN))
+    };
     auth::encode_response(&AuthResponse {
         status: 0, // AUTHENTICATED
         member_uuid: MEMBER_UUID,
@@ -42,6 +61,8 @@ fn auth_response() -> Vec<Frame> {
         members: &mem,
         partition_list_version: 1,
         partitions: &parts,
+        tpc_ports: tpc.0,
+        tpc_token: tpc.1,
     })
 }
 
@@ -65,10 +86,13 @@ fn uuid_response(msg_type: i32, uuid: (i64, i64)) -> Vec<Frame> {
 /// Stable registration id handed back for listener registrations.
 pub const REGISTRATION_UUID: (i64, i64) = (3, 3);
 
-pub fn dispatch(req: Vec<Frame>, store: &Store) -> Vec<Vec<Frame>> {
+pub fn dispatch(req: Vec<Frame>, store: &Store, cfg: &Cfg) -> Vec<Vec<Frame>> {
     let corr = correlation_id(&req);
     let mut replies: Vec<Vec<Frame>> = match msg_type(&req) {
-        256 => vec![auth_response()],
+        256 => vec![auth_response(cfg)],
+        // ClientTpcAuthentication: a TPC client authenticates each per-core
+        // channel with the token from the main auth. Response is an empty ack.
+        5632 => vec![empty_response(5633)],
         768 => vec![
             cluster_view::encode_response(),
             cluster_view::members_view_event(1, &members()),
@@ -90,6 +114,8 @@ pub fn dispatch(req: Vec<Frame>, store: &Store) -> Vec<Vec<Frame>> {
         // ClientCreateProxy: client creates a distributed-object proxy (e.g. on
         // getMap). Response is an empty ack.
         1024 => vec![empty_response(1025)],
+        // ClientStatistics: periodic client metrics push. Empty ack.
+        3072 => vec![empty_response(3073)],
         // Unknown op: ack with an empty response of type+1 so the client does
         // not hang (covers e.g. CreateProxy). The live client reveals any op
         // that needs a richer reply (per plan's empirical-risk note).
@@ -119,7 +145,7 @@ mod tests {
     #[test]
     fn auth_replies_257_with_echoed_correlation() {
         let store = Store::new();
-        let out = dispatch(request(256, 99), &store);
+        let out = dispatch(request(256, 99), &store, &Cfg::single());
         assert_eq!(out.len(), 1);
         assert_eq!(msg_type(&out[0]), 257);
         assert_eq!(correlation_id(&out[0]), 99);
@@ -128,7 +154,7 @@ mod tests {
     #[test]
     fn cluster_view_replies_response_plus_two_events() {
         let store = Store::new();
-        let out = dispatch(request(768, 5), &store);
+        let out = dispatch(request(768, 5), &store, &Cfg::single());
         assert_eq!(out.len(), 3);
         assert_eq!(msg_type(&out[0]), 769);
         assert_eq!(msg_type(&out[1]), 770);
@@ -167,7 +193,7 @@ mod tests {
     fn local_backup_listener_replies_3841_with_uuid() {
         use protocol::fixed::read_uuid;
         let store = Store::new();
-        let out = dispatch(request(3840, 7), &store);
+        let out = dispatch(request(3840, 7), &store, &Cfg::single());
         assert_eq!(msg_type(&out[0]), 3841);
         // initial frame must be 30 bytes with the registration UUID at offset 13
         assert_eq!(out[0][0].content.len(), 30);
@@ -178,7 +204,7 @@ mod tests {
     #[test]
     fn create_proxy_replies_empty_1025() {
         let store = Store::new();
-        let out = dispatch(request(1024, 8), &store);
+        let out = dispatch(request(1024, 8), &store, &Cfg::single());
         assert_eq!(msg_type(&out[0]), 1025);
         assert_eq!(correlation_id(&out[0]), 8);
     }
@@ -186,11 +212,11 @@ mod tests {
     #[test]
     fn put_then_get_roundtrips_through_store() {
         let store = Store::new();
-        let out = dispatch(put_request("m", &[1, 2], &[9], 1), &store);
+        let out = dispatch(put_request("m", &[1, 2], &[9], 1), &store, &Cfg::single());
         assert_eq!(msg_type(&out[0]), 65793);
         assert!(out[0][1].is_null()); // no prior value
 
-        let out = dispatch(get_request("m", &[1, 2], 2), &store);
+        let out = dispatch(get_request("m", &[1, 2], 2), &store, &Cfg::single());
         assert_eq!(msg_type(&out[0]), 66049);
         assert_eq!(out[0][1].content, vec![9]);
     }

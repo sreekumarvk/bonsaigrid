@@ -49,6 +49,9 @@ pub struct AuthResponse<'a> {
     pub members: &'a [MemberTuple],
     pub partition_list_version: i32,
     pub partitions: &'a [((i64, i64), Vec<i32>)],
+    /// One TPC port per core, or None to disable TPC.
+    pub tpc_ports: Option<&'a [i32]>,
+    pub tpc_token: Option<&'a [u8]>,
 }
 
 pub fn encode_response(r: &AuthResponse) -> Vec<Frame> {
@@ -68,8 +71,22 @@ pub fn encode_response(r: &AuthResponse) -> Vec<Frame> {
     let mut out = vec![initial_frame(c)];
     address::encode(&mut out, r.address_host, r.address_port); // nullable address (present)
     out.push(string_frame(r.server_version)); // serverHazelcastVersion
-    out.push(null_frame()); // tpcPorts = null (TPC disabled this increment)
-    out.push(null_frame()); // tpcToken = null
+    match r.tpc_ports {
+        // ListIntegerCodec: one frame of N little-endian i32 ports.
+        Some(ports) => {
+            let mut pc = vec![0u8; ports.len() * 4];
+            for (i, p) in ports.iter().enumerate() {
+                write_i32_le(&mut pc, i * 4, *p);
+            }
+            out.push(Frame { flags: 0, content: pc });
+        }
+        None => out.push(null_frame()),
+    }
+    match r.tpc_token {
+        // ByteArrayCodec: one frame of raw bytes.
+        Some(tok) => out.push(Frame { flags: 0, content: tok.to_vec() }),
+        None => out.push(null_frame()),
+    }
     member_info::encode_list(&mut out, r.members);
     partition_table::encode(&mut out, r.partitions);
     // keyValuePairs: empty map
@@ -98,6 +115,8 @@ mod tests {
             members: &[((1, 1), "127.0.0.1".into(), 5701, false, (5, 8, 0))],
             partition_list_version: 1,
             partitions: &[((1, 1), (0..271).collect())],
+            tpc_ports: None,
+            tpc_token: None,
         };
         let frames = encode_response(&resp);
         assert_eq!(msg_type(&frames), 257);

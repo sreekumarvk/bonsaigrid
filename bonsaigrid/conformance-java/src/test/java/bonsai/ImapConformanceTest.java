@@ -59,4 +59,26 @@ class ImapConformanceTest {
             client.shutdown();
         }
     }
+
+    /** TPC-enabled client: connects to the per-core TPC ports and routes each
+     *  partition to its owning core. Validates the increment-3 TPC path. */
+    @Test
+    void tpc_put_then_get_returns_value() {
+        ClientConfig cfg = new ClientConfig();
+        cfg.setClusterName("dev");
+        cfg.getNetworkConfig().addAddress("127.0.0.1:5701");
+        cfg.getTpcConfig().setEnabled(true);
+        HazelcastInstance client = HazelcastClient.newHazelcastClient(cfg);
+        try {
+            IMap<String, String> map = client.getMap("tpcmap");
+            for (int i = 0; i < 50; i++) {
+                map.put("tk" + i, "tv" + i);
+            }
+            for (int i = 0; i < 50; i++) {
+                assertEquals("tv" + i, map.get("tk" + i));
+            }
+        } finally {
+            client.shutdown();
+        }
+    }
 }

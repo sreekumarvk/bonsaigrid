@@ -13,7 +13,8 @@ use io_uring::{opcode, types, IoUring};
 use protocol::frame::{read_message, write_message, Frame};
 use std::os::fd::{AsRawFd, RawFd};
 
-const ACCEPT_UD: u64 = u64::MAX;
+// Accepts use the top of the user_data range, one slot per listener.
+const ACCEPT_BASE: u64 = u64::MAX - 255;
 const RECV_BUF: usize = 64 * 1024;
 const OUT_CAP: usize = 4 * 1024 * 1024; // reserved so appends never realloc mid-send
 
@@ -54,20 +55,23 @@ fn send_ud(id: usize) -> u64 {
 /// `dispatch` (which returns zero or more reply messages). Never returns under
 /// normal operation.
 pub fn run(
-    listener: std::net::TcpListener,
+    listeners: Vec<std::net::TcpListener>,
     mut dispatch: impl FnMut(Vec<Frame>) -> Vec<Vec<Frame>>,
 ) -> std::io::Result<()> {
-    let listen_fd = listener.as_raw_fd();
+    let fds: Vec<RawFd> = listeners.iter().map(|l| l.as_raw_fd()).collect();
     let mut ring = IoUring::new(4096)?;
     let mut conns: Vec<Option<Conn>> = Vec::new();
     let mut free: Vec<usize> = Vec::new();
     let mut pending: Vec<io_uring::squeue::Entry> = Vec::new();
 
-    // Prime an accept.
-    let accept = opcode::Accept::new(types::Fd(listen_fd), std::ptr::null_mut(), std::ptr::null_mut())
-        .build()
-        .user_data(ACCEPT_UD);
-    pending.push(accept);
+    // Prime one accept per listener.
+    for (i, fd) in fds.iter().enumerate() {
+        pending.push(
+            opcode::Accept::new(types::Fd(*fd), std::ptr::null_mut(), std::ptr::null_mut())
+                .build()
+                .user_data(ACCEPT_BASE + i as u64),
+        );
+    }
 
     loop {
         // Submit everything queued, then wait for at least one completion.
@@ -80,12 +84,13 @@ pub fn run(
             .collect();
 
         for (ud, res) in cqes {
-            if ud == ACCEPT_UD {
-                // Re-arm accept regardless.
+            if ud >= ACCEPT_BASE {
+                let idx = (ud - ACCEPT_BASE) as usize;
+                // Re-arm this listener's accept regardless.
                 pending.push(
-                    opcode::Accept::new(types::Fd(listen_fd), std::ptr::null_mut(), std::ptr::null_mut())
+                    opcode::Accept::new(types::Fd(fds[idx]), std::ptr::null_mut(), std::ptr::null_mut())
                         .build()
-                        .user_data(ACCEPT_UD),
+                        .user_data(ud),
                 );
                 if res >= 0 {
                     let fd = res as RawFd;
