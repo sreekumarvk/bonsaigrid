@@ -20,6 +20,9 @@ static CONN_SEQ: AtomicU64 = AtomicU64::new(1);
 
 // Accepts use the top of the user_data range, one slot per listener.
 const ACCEPT_BASE: u64 = u64::MAX - 255;
+// Periodic timer used to flush cross-connection events even when a connection
+// has no socket activity of its own.
+const TIMEOUT_UD: u64 = ACCEPT_BASE - 1;
 const RECV_BUF: usize = 64 * 1024;
 const OUT_CAP: usize = 4 * 1024 * 1024; // reserved so appends never realloc mid-send
 
@@ -95,6 +98,11 @@ pub fn run(
         );
     }
 
+    // Periodic 20ms timer to flush queued cross-connection events.
+    let tick = types::Timespec::new().sec(0).nsec(20_000_000);
+    pending.push(opcode::Timeout::new(&tick).build().user_data(TIMEOUT_UD));
+
+    let mut flush_events = false;
     loop {
         // Submit everything queued, then wait for at least one completion.
         flush(&mut ring, &mut pending)?;
@@ -106,6 +114,11 @@ pub fn run(
             .collect();
 
         for (ud, res) in cqes {
+            if ud == TIMEOUT_UD {
+                flush_events = true;
+                pending.push(opcode::Timeout::new(&tick).build().user_data(TIMEOUT_UD));
+                continue;
+            }
             if ud >= ACCEPT_BASE {
                 let idx = (ud - ACCEPT_BASE) as usize;
                 // Re-arm this listener's accept regardless.
@@ -149,6 +162,23 @@ pub fn run(
                     unsafe { libc::close(c.fd) };
                 }
                 free.push(id);
+            }
+        }
+
+        // On each timer tick, flush queued events to every binary connection
+        // (covers events published by *other* connections).
+        if flush_events {
+            flush_events = false;
+            for id in 0..conns.len() {
+                let ready = matches!(conns.get(id), Some(Some(c)) if c.open && c.mode == Mode::Binary);
+                if !ready {
+                    continue;
+                }
+                {
+                    let c = conns[id].as_mut().unwrap();
+                    drain_events(c.conn_id, &mut c.out);
+                }
+                maybe_arm_send(&mut conns, id, &mut pending);
             }
         }
     }
