@@ -1,0 +1,13 @@
+# Upstream Apache Hazelcast reference baseline — not part of BonsaiGrid, not pushed
+/hazelcast/
+
+# Rust build output
+target/
+**/target/
+
+# Python venv
+.venv/
+conformance-python/.venv/
+
+# Java build
+conformance-java/target/
