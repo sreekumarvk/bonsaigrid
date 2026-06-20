@@ -14,3 +14,6 @@ conformance-java/target/
 
 __pycache__/
 *.pyc
+
+# Local JDK/Maven (downloaded, not committed)
+/.tools/

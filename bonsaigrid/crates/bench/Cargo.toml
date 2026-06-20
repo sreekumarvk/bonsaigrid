@@ -1,0 +1,11 @@
+[package]
+name = "bench"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+protocol = { path = "../protocol" }
+
+[[bin]]
+name = "bench"
+path = "src/main.rs"
