@@ -15,3 +15,4 @@ core_affinity = "0.8"
 [dev-dependencies]
 protocol = { path = "../protocol" }
 codecs = { path = "../codecs" }
+store = { path = "../store" }

@@ -348,6 +348,21 @@ impl Store {
         self.shard(map, key).lock().unwrap().get(map, key)
     }
 
+    /// Zero-copy read: runs `f` with the value slice (or None) while holding the
+    /// shard lock, so the value is never copied into an intermediate `Vec`.
+    pub fn get_with<R>(&self, map: &str, key: &[u8], f: impl FnOnce(Option<&[u8]>) -> R) -> R {
+        let mut inner = self.shard(map, key).lock().unwrap();
+        match inner.find(map, key) {
+            Some(i) => {
+                let e = inner.table[i];
+                let total = (e.key_len + e.val_len) as usize;
+                let val = &inner.slab.get(e.handle, total)[e.key_len as usize..];
+                f(Some(val))
+            }
+            None => f(None),
+        }
+    }
+
     pub fn remove(&self, map: &str, key: &[u8]) -> Option<Vec<u8>> {
         self.shard(map, key).lock().unwrap().remove(map, key)
     }

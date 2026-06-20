@@ -8,10 +8,79 @@
 
 use codecs::auth::{self, AuthResponse, MemberTuple};
 use codecs::{cluster_view, map};
-use protocol::fixed::{write_i32_le, write_uuid};
-use protocol::frame::{Frame, UNFRAGMENTED};
+use protocol::fixed::{read_i32_le, read_i64_le, write_i32_le, write_i64_le, write_u16_le, write_uuid};
+use protocol::frame::{read_message, write_message, Frame, IS_FINAL, IS_NULL, UNFRAGMENTED};
 use protocol::message::{correlation_id, msg_type, set_correlation_id};
 use store::Store;
+
+// ---- Zero-allocation hot path (MapGet) -------------------------------------
+//
+// The reactor hands us a complete request message as a byte slice and a reused
+// output buffer. For the hottest op (MapGet) we parse the request frames in
+// place and encode the response straight into the output buffer, copying the
+// value directly out of the slab under the shard lock — no `Vec<Frame>`, no
+// intermediate value `Vec`, no allocation after warmup. All other ops fall back
+// to the frame-based path below.
+
+fn frame_at(msg: &[u8], off: usize) -> Option<(&[u8], usize)> {
+    if off + 6 > msg.len() {
+        return None;
+    }
+    let len = read_i32_le(msg, off) as usize;
+    if len < 6 || off + len > msg.len() {
+        return None;
+    }
+    Some((&msg[off + 6..off + len], off + len))
+}
+
+fn encode_get_into(out: &mut Vec<u8>, corr: i64, v: Option<&[u8]>) {
+    // initial frame: 13-byte content [type 66049 @0, corr @4, backupAcks @12]
+    let mut hdr = [0u8; 19];
+    write_i32_le(&mut hdr, 0, 19); // frame length = 6 + 13
+    write_u16_le(&mut hdr, 4, UNFRAGMENTED);
+    write_i32_le(&mut hdr, 6, 66049);
+    write_i64_le(&mut hdr, 10, corr);
+    out.extend_from_slice(&hdr);
+    let mut p = [0u8; 6];
+    match v {
+        Some(val) => {
+            write_i32_le(&mut p, 0, (6 + val.len()) as i32);
+            write_u16_le(&mut p, 4, IS_FINAL);
+            out.extend_from_slice(&p);
+            out.extend_from_slice(val);
+        }
+        None => {
+            write_i32_le(&mut p, 0, 6);
+            write_u16_le(&mut p, 4, IS_NULL | IS_FINAL);
+            out.extend_from_slice(&p);
+        }
+    }
+}
+
+fn try_fast_get(msg: &[u8], store: &Store, out: &mut Vec<u8>) -> bool {
+    let Some((c0, off1)) = frame_at(msg, 0) else { return false };
+    if c0.len() < 12 || read_i32_le(c0, 0) != 66048 {
+        return false; // not MapGet
+    }
+    let corr = read_i64_le(c0, 4);
+    let Some((name_b, off2)) = frame_at(msg, off1) else { return false };
+    let Some((key_b, _)) = frame_at(msg, off2) else { return false };
+    let Ok(name) = std::str::from_utf8(name_b) else { return false };
+    store.get_with(name, key_b, |v| encode_get_into(out, corr, v));
+    true
+}
+
+/// Feed one complete request message; append framed reply bytes to `out`.
+pub fn dispatch_bytes(msg: &[u8], store: &Store, cfg: &Cfg, out: &mut Vec<u8>) {
+    if try_fast_get(msg, store, out) {
+        return;
+    }
+    if let Some((frames, _)) = read_message(msg) {
+        for reply in dispatch(frames, store, cfg) {
+            out.extend_from_slice(&write_message(&reply));
+        }
+    }
+}
 
 pub const CLUSTER_ID: (i64, i64) = (2, 2);
 pub const PARTITION_COUNT: i32 = 271;

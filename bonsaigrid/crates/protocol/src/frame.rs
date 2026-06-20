@@ -49,6 +49,26 @@ pub fn write_message(frames: &[Frame]) -> Vec<u8> {
     out
 }
 
+/// Length in bytes of the first complete message in `bytes`, without allocating
+/// (walks frame prefixes to the IS_FINAL frame). None if more bytes are needed.
+pub fn message_len(bytes: &[u8]) -> Option<usize> {
+    let mut off = 0;
+    loop {
+        if bytes.len() < off + PREFIX_LEN {
+            return None;
+        }
+        let len = read_i32_le(bytes, off) as usize;
+        let flags = read_u16_le(bytes, off + 4);
+        if len < PREFIX_LEN || bytes.len() < off + len {
+            return None;
+        }
+        off += len;
+        if flags & IS_FINAL != 0 {
+            return Some(off);
+        }
+    }
+}
+
 /// Parse one complete message; returns frames + bytes consumed, or None if more bytes are needed.
 pub fn read_message(bytes: &[u8]) -> Option<(Vec<Frame>, usize)> {
     let mut frames = Vec::new();

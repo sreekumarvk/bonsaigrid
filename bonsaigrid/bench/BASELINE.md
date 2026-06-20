@@ -67,6 +67,26 @@ contiguous size-classed arena (O(1) free list), the map name is interned to a
 open-addressing table — eliminating the baseline's three heap allocations per
 entry (String key + key Vec + value Vec) and their malloc/capacity overhead.
 
+## Perf-correctness
+
+- **Zero-allocation read path:** the reactor hands each complete request to a
+  byte-slice dispatcher; MapGet is parsed in place and its response encoded
+  straight into the reused output buffer, copying the value out of the slab
+  under the shard lock. A counting-allocator test (`tests/zero_alloc.rs`) proves
+  **0 heap allocations over 10,000 MapGet calls** after warmup.
+- **Lock-free SPSC ring** (`crates/spsc`): the routing spec's cross-core
+  primitive — bounded, no locks, no post-construction allocation; validated by a
+  2M-item concurrent producer/consumer stress test (FIFO, no loss/dup).
+
+**Design decision (documented):** full cross-core *message-passing delegation*
+over the SPSC ring is deferred. The current per-shard-lock store is already
+correct and, under TPC alignment, near-zero-contention; in this network-bound
+regime (≈14 µs latency is dominated by socket syscalls) the measured benefit of
+replacing it with the two-way SPSC delegation dance does not justify its
+complexity/deadlock risk on a working server. The ring primitive is ready for
+when batching/pipelining makes the network cheap enough that lock contention
+shows up.
+
 ## Notes
 
 - Increment 0 is intentionally unoptimized: blocking `std::net`,

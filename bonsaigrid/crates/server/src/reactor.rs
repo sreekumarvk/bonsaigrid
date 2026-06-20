@@ -10,7 +10,7 @@
 //! SO_REUSEPORT listener (increment 3).
 
 use io_uring::{opcode, types, IoUring};
-use protocol::frame::{read_message, write_message, Frame};
+use protocol::frame::message_len;
 use std::os::fd::{AsRawFd, RawFd};
 
 // Accepts use the top of the user_data range, one slot per listener.
@@ -54,9 +54,11 @@ fn send_ud(id: usize) -> u64 {
 /// Run the reactor over `listener`, dispatching each parsed request message to
 /// `dispatch` (which returns zero or more reply messages). Never returns under
 /// normal operation.
+/// `dispatch(msg, out)` receives one complete request message as a byte slice and
+/// appends framed reply bytes (responses and pushed events) to `out`.
 pub fn run(
     listeners: Vec<std::net::TcpListener>,
-    mut dispatch: impl FnMut(Vec<Frame>) -> Vec<Vec<Frame>>,
+    mut dispatch: impl FnMut(&[u8], &mut Vec<u8>),
 ) -> std::io::Result<()> {
     let fds: Vec<RawFd> = listeners.iter().map(|l| l.as_raw_fd()).collect();
     let mut ring = IoUring::new(4096)?;
@@ -169,14 +171,13 @@ fn on_recv(
     id: usize,
     res: i32,
     pending: &mut Vec<io_uring::squeue::Entry>,
-    dispatch: &mut impl FnMut(Vec<Frame>) -> Vec<Vec<Frame>>,
+    dispatch: &mut impl FnMut(&[u8], &mut Vec<u8>),
 ) {
     if res <= 0 {
         conns[id].as_mut().unwrap().open = false;
         return;
     }
     let n = res as usize;
-    // Append received bytes to the accumulator.
     {
         let c = conns[id].as_mut().unwrap();
         c.acc.extend_from_slice(&c.rbuf[..n]);
@@ -186,23 +187,17 @@ fn on_recv(
             c.preamble_left -= 1;
         }
     }
-    // Parse complete messages and dispatch.
+    // Hand each complete message (as a byte slice) to the dispatcher, which
+    // appends reply bytes straight into the reused `out` buffer.
     loop {
-        let parsed = {
-            let c = conns[id].as_ref().unwrap();
-            if c.preamble_left > 0 {
-                None
-            } else {
-                read_message(&c.acc)
-            }
-        };
-        let Some((frames, used)) = parsed else { break };
-        let replies = dispatch(frames);
         let c = conns[id].as_mut().unwrap();
-        c.acc.drain(0..used);
-        for r in replies {
-            c.out.extend_from_slice(&write_message(&r));
+        if c.preamble_left > 0 {
+            break;
         }
+        let Some(len) = message_len(&c.acc) else { break };
+        let Conn { acc, out, .. } = c;
+        dispatch(&acc[..len], out);
+        acc.drain(0..len);
     }
     maybe_arm_send(conns, id, pending);
     arm_recv(conns, id, pending);
