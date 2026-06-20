@@ -9,7 +9,7 @@
 //! processed); periodic cross-connection flushing needs a reactor timer and is
 //! the documented next step. The queue/registry here already supports it.
 
-use codecs::map::encode_entry_event;
+use codecs::map::{encode_entry_event, encode_topic_event};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -20,8 +20,14 @@ struct Listener {
     include_value: bool,
 }
 
+struct TopicSub {
+    conn_id: u64,
+    corr: i64,
+}
+
 struct Inner {
-    listeners: HashMap<String, Vec<Listener>>, // map name -> listeners
+    listeners: HashMap<String, Vec<Listener>>, // map name -> entry listeners
+    topics: HashMap<String, Vec<TopicSub>>,     // topic name -> subscribers
     queues: HashMap<u64, Vec<Vec<u8>>>,         // conn id -> pending event messages
 }
 
@@ -35,6 +41,7 @@ impl EventBroker {
         EventBroker {
             inner: Mutex::new(Inner {
                 listeners: HashMap::new(),
+                topics: HashMap::new(),
                 queues: HashMap::new(),
             }),
             member_uuid,
@@ -81,6 +88,30 @@ impl EventBroker {
         }
     }
 
+    // ---- Topic pub/sub ----
+    pub fn register_topic(&self, name: &str, conn_id: u64, corr: i64) {
+        self.inner
+            .lock()
+            .unwrap()
+            .topics
+            .entry(name.to_string())
+            .or_default()
+            .push(TopicSub { conn_id, corr });
+    }
+
+    pub fn publish_topic(&self, name: &str, item: &[u8]) {
+        let mut g = self.inner.lock().unwrap();
+        let uuid = self.member_uuid;
+        let Some(subs) = g.topics.get(name) else { return };
+        let to_queue: Vec<(u64, Vec<u8>)> = subs
+            .iter()
+            .map(|s| (s.conn_id, encode_topic_event(s.corr, 0, uuid, item)))
+            .collect();
+        for (conn_id, bytes) in to_queue {
+            g.queues.entry(conn_id).or_default().push(bytes);
+        }
+    }
+
     /// Take all pending event-message bytes for a connection.
     pub fn drain(&self, conn_id: u64) -> Vec<Vec<u8>> {
         self.inner.lock().unwrap().queues.remove(&conn_id).unwrap_or_default()
@@ -91,6 +122,9 @@ impl EventBroker {
         g.queues.remove(&conn_id);
         for v in g.listeners.values_mut() {
             v.retain(|l| l.conn_id != conn_id);
+        }
+        for v in g.topics.values_mut() {
+            v.retain(|s| s.conn_id != conn_id);
         }
     }
 }

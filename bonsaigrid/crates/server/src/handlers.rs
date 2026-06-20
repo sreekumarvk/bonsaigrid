@@ -368,6 +368,101 @@ pub fn dispatch(
             let entries = store.entries(&name);
             vec![map::encode_entry_list_response(75009, &entries)]
         }
+        // ---- Topic (pub/sub) ----
+        262400 => {
+            let (name, message) = map::decode_name_value(&req);
+            broker.publish_topic(&name, &message); // no-ops if no subscribers
+            vec![empty_response(262401)]
+        }
+        262656 => {
+            let name = map::decode_name(&req);
+            broker.register_topic(&name, conn_id, corr);
+            vec![uuid_response(262657, REGISTRATION_UUID)]
+        }
+        // ---- Distributed Set ----
+        394240 => {
+            let (name, value) = map::decode_name_value(&req);
+            vec![map::bool_response(394241, store.set_add(&name, value))]
+        }
+        394496 => {
+            let (name, value) = map::decode_name_value(&req);
+            vec![map::bool_response(394497, store.set_remove(&name, &value))]
+        }
+        393728 => {
+            let (name, value) = map::decode_name_value(&req);
+            vec![map::bool_response(393729, store.set_contains(&name, &value))]
+        }
+        393472 => {
+            let name = map::decode_name(&req);
+            vec![map::int_response(393473, store.set_size(&name) as i32)]
+        }
+        395776 => {
+            let name = map::decode_name(&req);
+            vec![map::encode_data_list_response(395777, &store.set_get_all(&name))]
+        }
+        395520 => {
+            let name = map::decode_name(&req);
+            store.set_clear(&name);
+            vec![empty_response(395521)]
+        }
+        // ---- MultiMap (Set semantics) ----
+        131328 => {
+            let name = map::decode_name(&req);
+            let key = req[2].content.clone();
+            let value = req[3].content.clone();
+            vec![map::bool_response(131329, store.mm_put(&name, key, value))]
+        }
+        131584 => {
+            let (name, key) = map::decode_name_key(&req);
+            vec![map::encode_data_list_response(131585, &store.mm_get(&name, &key))]
+        }
+        131840 => {
+            let (name, key) = map::decode_name_key(&req);
+            vec![map::encode_data_list_response(131841, &store.mm_remove(&name, &key))]
+        }
+        133632 => {
+            let name = map::decode_name(&req);
+            vec![map::int_response(133633, store.mm_size(&name) as i32)]
+        }
+        134144 => {
+            let (name, key) = map::decode_name_key(&req);
+            vec![map::int_response(134145, store.mm_value_count(&name, &key) as i32)]
+        }
+        // ---- Distributed List ----
+        328704 => {
+            let (name, value) = map::decode_name_value(&req);
+            vec![map::bool_response(328705, store.list_add(&name, value))]
+        }
+        331520 => {
+            let name = map::decode_name(&req);
+            let index = read_i32_le(&req[0].content, 16); // ListGet index @16
+            vec![map::data_response(331521, store.list_get(&name, index).as_deref())]
+        }
+        327936 => {
+            let name = map::decode_name(&req);
+            vec![map::int_response(327937, store.list_size(&name) as i32)]
+        }
+        328192 => {
+            let (name, value) = map::decode_name_value(&req);
+            vec![map::bool_response(328193, store.list_contains(&name, &value))]
+        }
+        328960 => {
+            let (name, value) = map::decode_name_value(&req);
+            vec![map::bool_response(328961, store.list_remove(&name, &value))]
+        }
+        330240 => {
+            let name = map::decode_name(&req);
+            vec![map::encode_data_list_response(330241, &store.list_get_all(&name))]
+        }
+        331008 => {
+            let name = map::decode_name(&req);
+            vec![map::bool_response(331009, store.list_is_empty(&name))]
+        }
+        329984 => {
+            let name = map::decode_name(&req);
+            store.list_clear(&name);
+            vec![empty_response(329985)]
+        }
         // ---- Distributed Queue ----
         196864 => {
             let (name, value) = map::decode_name_value(&req);

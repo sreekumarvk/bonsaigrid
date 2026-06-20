@@ -108,9 +108,28 @@ pub fn encode_entry_list_response(msg_type: i32, entries: &[(Vec<u8>, Vec<u8>)])
     frames
 }
 
-/// name + value request (ContainsValue): no threadId.
+/// name + value request (ContainsValue / SetAdd / QueueOffer): no threadId.
 pub fn decode_name_value(frames: &[Frame]) -> (String, Vec<u8>) {
     (decode_string(&frames[1]), frames[2].content.clone())
+}
+
+/// name + key request (MultiMapGet / Lock): key is the data frame @[2].
+pub fn decode_name_key(frames: &[Frame]) -> (String, Vec<u8>) {
+    (decode_string(&frames[1]), frames[2].content.clone())
+}
+
+/// Topic message event (262658): publishTime@16, uuid@24, then the item Data.
+pub fn encode_topic_event(corr: i64, publish_time: i64, uuid: (i64, i64), item: &[u8]) -> Vec<u8> {
+    use protocol::frame::IS_EVENT;
+    let mut c = vec![0u8; 41]; // type@0, corr@4, partitionId@12, publishTime@16, uuid@24
+    write_i32_le(&mut c, 0, 262658);
+    write_i64_le(&mut c, 4, corr);
+    write_i32_le(&mut c, 12, -1);
+    write_i64_le(&mut c, 16, publish_time);
+    write_uuid(&mut c, 24, Some(uuid));
+    let mut frames = vec![Frame { flags: UNFRAGMENTED | IS_EVENT, content: c }];
+    frames.push(data_frame(item));
+    write_message(&frames)
 }
 
 /// Replace: threadId@16; var-frames name, key, value (no ttl).

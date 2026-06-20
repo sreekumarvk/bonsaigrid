@@ -12,7 +12,7 @@
 mod slab;
 
 use slab::{Handle, Slab};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -326,6 +326,10 @@ pub struct Store {
     // Distributed Queue backing: each queue is single-partition, so the owning
     // member holds it locally. Keyed by queue name.
     queues: Mutex<HashMap<String, VecDeque<Vec<u8>>>>,
+    sets: Mutex<HashMap<String, HashSet<Vec<u8>>>>,
+    // MultiMap with Set semantics (no duplicate values per key).
+    multimaps: Mutex<HashMap<String, HashMap<Vec<u8>, Vec<Vec<u8>>>>>,
+    lists: Mutex<HashMap<String, Vec<Vec<u8>>>>,
 }
 
 impl Default for Store {
@@ -344,7 +348,100 @@ impl Store {
         Store {
             shards: (0..n).map(|_| Mutex::new(Inner::new())).collect(),
             queues: Mutex::new(HashMap::new()),
+            sets: Mutex::new(HashMap::new()),
+            multimaps: Mutex::new(HashMap::new()),
+            lists: Mutex::new(HashMap::new()),
         }
+    }
+
+    // ---- Distributed List ----
+    pub fn list_add(&self, name: &str, v: Vec<u8>) -> bool {
+        self.lists.lock().unwrap().entry(name.to_string()).or_default().push(v);
+        true
+    }
+    pub fn list_get(&self, name: &str, index: i32) -> Option<Vec<u8>> {
+        if index < 0 {
+            return None;
+        }
+        self.lists.lock().unwrap().get(name).and_then(|l| l.get(index as usize).cloned())
+    }
+    pub fn list_size(&self, name: &str) -> usize {
+        self.lists.lock().unwrap().get(name).map_or(0, |l| l.len())
+    }
+    pub fn list_contains(&self, name: &str, v: &[u8]) -> bool {
+        self.lists.lock().unwrap().get(name).is_some_and(|l| l.iter().any(|x| x.as_slice() == v))
+    }
+    pub fn list_remove(&self, name: &str, v: &[u8]) -> bool {
+        if let Some(l) = self.lists.lock().unwrap().get_mut(name) {
+            if let Some(i) = l.iter().position(|x| x.as_slice() == v) {
+                l.remove(i);
+                return true;
+            }
+        }
+        false
+    }
+    pub fn list_get_all(&self, name: &str) -> Vec<Vec<u8>> {
+        self.lists.lock().unwrap().get(name).cloned().unwrap_or_default()
+    }
+    pub fn list_clear(&self, name: &str) {
+        if let Some(l) = self.lists.lock().unwrap().get_mut(name) {
+            l.clear();
+        }
+    }
+    pub fn list_is_empty(&self, name: &str) -> bool {
+        self.list_size(name) == 0
+    }
+
+    // ---- Distributed Set ----
+    pub fn set_add(&self, name: &str, v: Vec<u8>) -> bool {
+        self.sets.lock().unwrap().entry(name.to_string()).or_default().insert(v)
+    }
+    pub fn set_remove(&self, name: &str, v: &[u8]) -> bool {
+        self.sets.lock().unwrap().get_mut(name).is_some_and(|s| s.remove(v))
+    }
+    pub fn set_contains(&self, name: &str, v: &[u8]) -> bool {
+        self.sets.lock().unwrap().get(name).is_some_and(|s| s.contains(v))
+    }
+    pub fn set_size(&self, name: &str) -> usize {
+        self.sets.lock().unwrap().get(name).map_or(0, |s| s.len())
+    }
+    pub fn set_get_all(&self, name: &str) -> Vec<Vec<u8>> {
+        self.sets.lock().unwrap().get(name).map_or_else(Vec::new, |s| s.iter().cloned().collect())
+    }
+    pub fn set_clear(&self, name: &str) {
+        if let Some(s) = self.sets.lock().unwrap().get_mut(name) {
+            s.clear();
+        }
+    }
+
+    // ---- MultiMap (Set semantics) ----
+    pub fn mm_put(&self, name: &str, key: Vec<u8>, value: Vec<u8>) -> bool {
+        let mut g = self.multimaps.lock().unwrap();
+        let values = g.entry(name.to_string()).or_default().entry(key).or_default();
+        if values.iter().any(|v| *v == value) {
+            false
+        } else {
+            values.push(value);
+            true
+        }
+    }
+    pub fn mm_get(&self, name: &str, key: &[u8]) -> Vec<Vec<u8>> {
+        self.multimaps
+            .lock()
+            .unwrap()
+            .get(name)
+            .and_then(|m| m.get(key))
+            .cloned()
+            .unwrap_or_default()
+    }
+    pub fn mm_remove(&self, name: &str, key: &[u8]) -> Vec<Vec<u8>> {
+        self.multimaps.lock().unwrap().get_mut(name).and_then(|m| m.remove(key)).unwrap_or_default()
+    }
+    pub fn mm_value_count(&self, name: &str, key: &[u8]) -> usize {
+        self.multimaps.lock().unwrap().get(name).and_then(|m| m.get(key)).map_or(0, |v| v.len())
+    }
+    pub fn mm_size(&self, name: &str) -> usize {
+        self.multimaps.lock().unwrap().get(name).map_or(0, |m| m.values().map(|v| v.len()).sum())
     }
 
     // ---- Distributed Queue ----
