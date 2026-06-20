@@ -368,6 +368,40 @@ pub fn dispatch(
             let entries = store.entries(&name);
             vec![map::encode_entry_list_response(75009, &entries)]
         }
+        // ---- Distributed Queue ----
+        196864 => {
+            let (name, value) = map::decode_name_value(&req);
+            vec![map::bool_response(196865, store.queue_offer(&name, value))]
+        }
+        197888 => {
+            let name = map::decode_name(&req);
+            vec![map::data_response(197889, store.queue_poll(&name).as_deref())]
+        }
+        198400 => {
+            let name = map::decode_name(&req);
+            vec![map::data_response(198401, store.queue_peek(&name).as_deref())]
+        }
+        197376 => {
+            let name = map::decode_name(&req);
+            vec![map::int_response(197377, store.queue_size(&name) as i32)]
+        }
+        197632 => {
+            let (name, value) = map::decode_name_value(&req);
+            vec![map::bool_response(197633, store.queue_remove(&name, &value))]
+        }
+        199424 => {
+            let (name, value) = map::decode_name_value(&req);
+            vec![map::bool_response(199425, store.queue_contains(&name, &value))]
+        }
+        201728 => {
+            let name = map::decode_name(&req);
+            vec![map::bool_response(201729, store.queue_is_empty(&name))]
+        }
+        200448 => {
+            let name = map::decode_name(&req);
+            store.queue_clear(&name);
+            vec![empty_response(200449)]
+        }
         // ClientLocalBackupListener: smart clients register it; response is a
         // UUID registration id at offset 13. We never push backup events.
         3840 => vec![uuid_response(3841, REGISTRATION_UUID)],

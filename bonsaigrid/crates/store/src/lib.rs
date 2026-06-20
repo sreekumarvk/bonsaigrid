@@ -12,7 +12,7 @@
 mod slab;
 
 use slab::{Handle, Slab};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -323,6 +323,9 @@ fn shard_of(map: &str, key: &[u8], n: usize) -> usize {
 
 pub struct Store {
     shards: Vec<Mutex<Inner>>,
+    // Distributed Queue backing: each queue is single-partition, so the owning
+    // member holds it locally. Keyed by queue name.
+    queues: Mutex<HashMap<String, VecDeque<Vec<u8>>>>,
 }
 
 impl Default for Store {
@@ -340,7 +343,43 @@ impl Store {
         assert!(n >= 1);
         Store {
             shards: (0..n).map(|_| Mutex::new(Inner::new())).collect(),
+            queues: Mutex::new(HashMap::new()),
         }
+    }
+
+    // ---- Distributed Queue ----
+    pub fn queue_offer(&self, q: &str, v: Vec<u8>) -> bool {
+        self.queues.lock().unwrap().entry(q.to_string()).or_default().push_back(v);
+        true
+    }
+    pub fn queue_poll(&self, q: &str) -> Option<Vec<u8>> {
+        self.queues.lock().unwrap().get_mut(q)?.pop_front()
+    }
+    pub fn queue_peek(&self, q: &str) -> Option<Vec<u8>> {
+        self.queues.lock().unwrap().get(q)?.front().cloned()
+    }
+    pub fn queue_size(&self, q: &str) -> usize {
+        self.queues.lock().unwrap().get(q).map_or(0, |d| d.len())
+    }
+    pub fn queue_remove(&self, q: &str, v: &[u8]) -> bool {
+        if let Some(d) = self.queues.lock().unwrap().get_mut(q) {
+            if let Some(i) = d.iter().position(|x| x.as_slice() == v) {
+                d.remove(i);
+                return true;
+            }
+        }
+        false
+    }
+    pub fn queue_contains(&self, q: &str, v: &[u8]) -> bool {
+        self.queues.lock().unwrap().get(q).is_some_and(|d| d.iter().any(|x| x.as_slice() == v))
+    }
+    pub fn queue_clear(&self, q: &str) {
+        if let Some(d) = self.queues.lock().unwrap().get_mut(q) {
+            d.clear();
+        }
+    }
+    pub fn queue_is_empty(&self, q: &str) -> bool {
+        self.queue_size(q) == 0
     }
 
     fn shard(&self, map: &str, key: &[u8]) -> &Mutex<Inner> {
