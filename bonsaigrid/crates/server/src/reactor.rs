@@ -12,6 +12,11 @@
 use io_uring::{opcode, types, IoUring};
 use protocol::frame::message_len;
 use std::os::fd::{AsRawFd, RawFd};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+// Globally-unique connection ids, so a shared event broker can address any
+// connection across reactor threads.
+static CONN_SEQ: AtomicU64 = AtomicU64::new(1);
 
 // Accepts use the top of the user_data range, one slot per listener.
 const ACCEPT_BASE: u64 = u64::MAX - 255;
@@ -27,6 +32,7 @@ enum Mode {
 
 struct Conn {
     fd: RawFd,
+    conn_id: u64,
     rbuf: Box<[u8]>,
     acc: Vec<u8>,
     out: Vec<u8>,
@@ -42,6 +48,7 @@ impl Conn {
         out.reserve_exact(OUT_CAP);
         Conn {
             fd,
+            conn_id: CONN_SEQ.fetch_add(1, Ordering::Relaxed),
             rbuf: vec![0u8; RECV_BUF].into_boxed_slice(),
             acc: Vec::with_capacity(RECV_BUF),
             out,
@@ -68,8 +75,10 @@ fn send_ud(id: usize) -> u64 {
 /// (target path) and appends a full HTTP response to `out`.
 pub fn run(
     listeners: Vec<std::net::TcpListener>,
-    mut dispatch: impl FnMut(&[u8], &mut Vec<u8>),
+    mut dispatch: impl FnMut(&[u8], u64, &mut Vec<u8>),
     http: impl Fn(&str) -> (u16, &'static str, String),
+    drain_events: impl Fn(u64, &mut Vec<u8>),
+    on_close: impl Fn(u64),
 ) -> std::io::Result<()> {
     let fds: Vec<RawFd> = listeners.iter().map(|l| l.as_raw_fd()).collect();
     let mut ring = IoUring::new(4096)?;
@@ -131,11 +140,12 @@ pub fn run(
             if is_send {
                 on_send(&mut conns, id, res, &mut pending);
             } else {
-                on_recv(&mut conns, id, res, &mut pending, &mut dispatch, &http);
+                on_recv(&mut conns, id, res, &mut pending, &mut dispatch, &http, &drain_events);
             }
 
             if !conns[id].as_ref().map(|c| c.open).unwrap_or(false) {
                 if let Some(c) = conns[id].take() {
+                    on_close(c.conn_id);
                     unsafe { libc::close(c.fd) };
                 }
                 free.push(id);
@@ -182,8 +192,9 @@ fn on_recv(
     id: usize,
     res: i32,
     pending: &mut Vec<io_uring::squeue::Entry>,
-    dispatch: &mut impl FnMut(&[u8], &mut Vec<u8>),
+    dispatch: &mut impl FnMut(&[u8], u64, &mut Vec<u8>),
     http: &impl Fn(&str) -> (u16, &'static str, String),
+    drain_events: &impl Fn(u64, &mut Vec<u8>),
 ) {
     if res <= 0 {
         conns[id].as_mut().unwrap().open = false;
@@ -227,10 +238,13 @@ fn on_recv(
             loop {
                 let c = conns[id].as_mut().unwrap();
                 let Some(len) = message_len(&c.acc) else { break };
-                let Conn { acc, out, .. } = c;
-                dispatch(&acc[..len], out);
+                let Conn { acc, out, conn_id, .. } = c;
+                dispatch(&acc[..len], *conn_id, out);
                 acc.drain(0..len);
             }
+            // Flush any entry-listener events queued for this connection.
+            let c = conns[id].as_mut().unwrap();
+            drain_events(c.conn_id, &mut c.out);
             maybe_arm_send(conns, id, pending);
             arm_recv(conns, id, pending);
         }

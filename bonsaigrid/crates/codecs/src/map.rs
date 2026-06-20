@@ -4,9 +4,56 @@
 //! key (Data), value (Data). Get request: threadId@16; var-frames: name, key.
 //! Responses carry a single nullable Data (the previous/looked-up value).
 
-use protocol::fixed::{read_i64_le, write_i32_le};
-use protocol::frame::Frame;
+use protocol::fixed::{read_i32_le, read_i64_le, write_i32_le, write_i64_le, write_uuid};
+use protocol::frame::{write_message, Frame, IS_EVENT, UNFRAGMENTED};
 use protocol::primitives::{data_frame, decode_string, initial_frame, null_frame};
+
+// Entry event types (Hazelcast EntryEventType bit flags).
+pub const ADDED: i32 = 1;
+pub const REMOVED: i32 = 2;
+pub const UPDATED: i32 = 4;
+
+/// MapAddEntryListener request (71936): includeValue@16, listenerFlags@17,
+/// localOnly@21; var-frame name. Returns (name, flags, include_value).
+pub fn decode_add_entry_listener(frames: &[Frame]) -> (String, i32, bool) {
+    let c = &frames[0].content;
+    let include_value = c[16] == 1;
+    let flags = read_i32_le(c, 17);
+    (decode_string(&frames[1]), flags, include_value)
+}
+
+fn push_nullable(frames: &mut Vec<Frame>, v: Option<&[u8]>) {
+    match v {
+        Some(b) => frames.push(data_frame(b)),
+        None => frames.push(null_frame()),
+    }
+}
+
+/// Encode a MapAddEntryListener entry event (71938) message for one listener.
+/// `corr` is the listener's registration correlation id (routes the event to
+/// its client-side handler).
+pub fn encode_entry_event(
+    corr: i64,
+    event_type: i32,
+    uuid: (i64, i64),
+    key: Option<&[u8]>,
+    value: Option<&[u8]>,
+    old: Option<&[u8]>,
+) -> Vec<u8> {
+    let mut c = vec![0u8; 41]; // type@0, corr@4, partitionId@12, eventType@16, uuid@20, numAffected@37
+    write_i32_le(&mut c, 0, 71938);
+    write_i64_le(&mut c, 4, corr);
+    write_i32_le(&mut c, 12, -1);
+    write_i32_le(&mut c, 16, event_type);
+    write_uuid(&mut c, 20, Some(uuid));
+    write_i32_le(&mut c, 37, 1); // numberOfAffectedEntries
+    let mut frames = vec![Frame { flags: UNFRAGMENTED | IS_EVENT, content: c }];
+    push_nullable(&mut frames, key);
+    push_nullable(&mut frames, value);
+    push_nullable(&mut frames, old);
+    push_nullable(&mut frames, None); // mergingValue
+    write_message(&frames)
+}
 
 /// name-only request (Size/IsEmpty/Clear): var-frame[1] is the map name.
 pub fn decode_name(frames: &[Frame]) -> String {

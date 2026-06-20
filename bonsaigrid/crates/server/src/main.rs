@@ -48,6 +48,7 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
         tpc_ports: Vec::new(), // single core per member in this mode
     });
     let store = Arc::new(store::Store::with_shards(1));
+    let broker = Arc::new(server::events::EventBroker::new(cfg.members[cfg.self_index].uuid));
     let listener = reuseport_listener(format!("127.0.0.1:{port}").parse().unwrap())?;
     eprintln!(
         "BonsaiGrid member {self_index}/{members} listening on 127.0.0.1:{port} (single core)"
@@ -56,10 +57,17 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
         core_affinity::set_for_current(id);
     }
     let n = members;
+    let (eb, cb) = (broker.clone(), broker.clone());
     server::reactor::run(
         vec![listener],
-        move |msg, out| server::handlers::dispatch_bytes(msg, &store, &cfg, out),
+        move |msg, conn_id, out| server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, out),
         move |path| server::handlers::http_health(path, n),
+        move |conn_id, out| {
+            for ev in eb.drain(conn_id) {
+                out.extend_from_slice(&ev);
+            }
+        },
+        move |conn_id| cb.drop_conn(conn_id),
     )
 }
 
@@ -75,6 +83,8 @@ fn run_single_node() -> std::io::Result<()> {
         tpc_ports: tpc_ports.clone(),
     });
     let store = Arc::new(store::Store::with_shards(cores));
+    // One broker shared across this member's cores.
+    let broker = Arc::new(server::events::EventBroker::new(cfg.members[0].uuid));
     let core_ids = core_affinity::get_core_ids().unwrap_or_default();
     eprintln!(
         "BonsaiGrid listening on {addr} (thread-per-core, {cores} cores, io_uring); TPC ports {:?}",
@@ -85,6 +95,7 @@ fn run_single_node() -> std::io::Result<()> {
     for i in 0..cores {
         let store = store.clone();
         let cfg = cfg.clone();
+        let broker = broker.clone();
         let main_listener = reuseport_listener(addr)?;
         let tpc_addr: SocketAddr = format!("127.0.0.1:{}", TPC_BASE + i as i32).parse().unwrap();
         let tpc_listener = reuseport_listener(tpc_addr)?;
@@ -93,10 +104,17 @@ fn run_single_node() -> std::io::Result<()> {
             if let Some(id) = core_id {
                 core_affinity::set_for_current(id);
             }
+            let (eb, cb) = (broker.clone(), broker.clone());
             let _ = server::reactor::run(
                 vec![main_listener, tpc_listener],
-                move |msg, out| server::handlers::dispatch_bytes(msg, &store, &cfg, out),
+                move |msg, conn_id, out| server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, out),
                 |path| server::handlers::http_health(path, 1),
+                move |conn_id, out| {
+                    for ev in eb.drain(conn_id) {
+                        out.extend_from_slice(&ev);
+                    }
+                },
+                move |conn_id| cb.drop_conn(conn_id),
             );
         }));
     }

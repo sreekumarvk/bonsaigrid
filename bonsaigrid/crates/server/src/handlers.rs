@@ -6,6 +6,7 @@
 //! partitions — no server-side partition hashing or member-to-member traffic is
 //! needed for correctness.
 
+use crate::events::EventBroker;
 use codecs::auth::{self, AuthResponse, MemberTuple};
 use codecs::{cluster_view, map};
 use protocol::fixed::{read_i32_le, read_i64_le, write_i32_le, write_i64_le, write_u16_le, write_uuid};
@@ -94,12 +95,19 @@ pub fn http_health(path: &str, cluster_size: usize) -> (u16, &'static str, Strin
 }
 
 /// Feed one complete request message; append framed reply bytes to `out`.
-pub fn dispatch_bytes(msg: &[u8], store: &Store, cfg: &Cfg, out: &mut Vec<u8>) {
+pub fn dispatch_bytes(
+    msg: &[u8],
+    conn_id: u64,
+    store: &Store,
+    cfg: &Cfg,
+    broker: &EventBroker,
+    out: &mut Vec<u8>,
+) {
     if try_fast_get(msg, store, out) {
         return;
     }
     if let Some((frames, _)) = read_message(msg) {
-        for reply in dispatch(frames, store, cfg) {
+        for reply in dispatch(frames, conn_id, store, cfg, broker) {
             out.extend_from_slice(&write_message(&reply));
         }
     }
@@ -210,10 +218,22 @@ fn uuid_response(msg_type: i32, uuid: (i64, i64)) -> Vec<Frame> {
     vec![Frame { flags: UNFRAGMENTED, content: c }]
 }
 
-pub fn dispatch(req: Vec<Frame>, store: &Store, cfg: &Cfg) -> Vec<Vec<Frame>> {
+pub fn dispatch(
+    req: Vec<Frame>,
+    conn_id: u64,
+    store: &Store,
+    cfg: &Cfg,
+    broker: &EventBroker,
+) -> Vec<Vec<Frame>> {
     let corr = correlation_id(&req);
     let mut replies: Vec<Vec<Frame>> = match msg_type(&req) {
         256 => vec![auth_response(cfg)],
+        // MapAddEntryListener: register the listener; reply with a registration id.
+        71936 => {
+            let (name, flags, include_value) = map::decode_add_entry_listener(&req);
+            broker.register(&name, conn_id, corr, flags, include_value);
+            vec![uuid_response(71937, REGISTRATION_UUID)]
+        }
         // ClientTpcAuthentication: a TPC client authenticates each per-core
         // channel with the token from the main auth. Response is an empty ack.
         5632 => vec![empty_response(5633)],
@@ -243,8 +263,15 @@ pub fn dispatch(req: Vec<Frame>, store: &Store, cfg: &Cfg) -> Vec<Vec<Frame>> {
                 );
             }
             let ttl = if r.ttl > 0 { r.ttl as u64 } else { 0 };
-            let old = store.put_ttl(&r.name, r.key, r.value, ttl);
-            vec![map::encode_put_response(old.as_deref())]
+            if broker.has_listeners(&r.name) {
+                let old = store.put_ttl(&r.name, r.key.clone(), r.value.clone(), ttl);
+                let etype = if old.is_some() { map::UPDATED } else { map::ADDED };
+                broker.publish(&r.name, etype, &r.key, Some(&r.value), old.as_deref());
+                vec![map::encode_put_response(old.as_deref())]
+            } else {
+                let old = store.put_ttl(&r.name, r.key, r.value, ttl);
+                vec![map::encode_put_response(old.as_deref())]
+            }
         }
         // MapGet
         66048 => {
@@ -256,12 +283,18 @@ pub fn dispatch(req: Vec<Frame>, store: &Store, cfg: &Cfg) -> Vec<Vec<Frame>> {
         66304 => {
             let r = map::decode_get(&req);
             let old = store.remove(&r.name, &r.key);
+            if old.is_some() && broker.has_listeners(&r.name) {
+                broker.publish(&r.name, map::REMOVED, &r.key, None, old.as_deref());
+            }
             vec![map::data_response(66305, old.as_deref())]
         }
         // MapDelete -> void
         67840 => {
             let r = map::decode_get(&req);
-            store.remove(&r.name, &r.key);
+            let old = store.remove(&r.name, &r.key);
+            if old.is_some() && broker.has_listeners(&r.name) {
+                broker.publish(&r.name, map::REMOVED, &r.key, None, old.as_deref());
+            }
             vec![empty_response(67841)]
         }
         // MapContainsKey -> bool
@@ -369,7 +402,7 @@ mod tests {
     fn auth_reports_self_member_identity() {
         // member index 2 should report its own uuid (1,3) in the response header.
         let cfg = cluster_cfg(3, 2);
-        let out = dispatch(request(256, 1), &Store::new(), &cfg);
+        let out = dispatch(request(256, 1), 0, &Store::new(), &cfg, &EventBroker::new((1, 1)));
         assert_eq!(msg_type(&out[0]), 257);
         // member_uuid lives at offset 14 (after backupAcks@12 + status@13).
         assert_eq!(protocol::fixed::read_uuid(&out[0][0].content, 14), Some((1, 3)));
@@ -392,7 +425,7 @@ mod tests {
     #[test]
     fn auth_replies_257_with_echoed_correlation() {
         let store = Store::new();
-        let out = dispatch(request(256, 99), &store, &Cfg::single());
+        let out = dispatch(request(256, 99), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)));
         assert_eq!(out.len(), 1);
         assert_eq!(msg_type(&out[0]), 257);
         assert_eq!(correlation_id(&out[0]), 99);
@@ -401,7 +434,7 @@ mod tests {
     #[test]
     fn cluster_view_replies_response_plus_two_events() {
         let store = Store::new();
-        let out = dispatch(request(768, 5), &store, &Cfg::single());
+        let out = dispatch(request(768, 5), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)));
         assert_eq!(out.len(), 3);
         assert_eq!(msg_type(&out[0]), 769);
         assert_eq!(msg_type(&out[1]), 770);
@@ -440,7 +473,7 @@ mod tests {
     fn local_backup_listener_replies_3841_with_uuid() {
         use protocol::fixed::read_uuid;
         let store = Store::new();
-        let out = dispatch(request(3840, 7), &store, &Cfg::single());
+        let out = dispatch(request(3840, 7), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)));
         assert_eq!(msg_type(&out[0]), 3841);
         // initial frame must be 30 bytes with the registration UUID at offset 13
         assert_eq!(out[0][0].content.len(), 30);
@@ -451,7 +484,7 @@ mod tests {
     #[test]
     fn create_proxy_replies_empty_1025() {
         let store = Store::new();
-        let out = dispatch(request(1024, 8), &store, &Cfg::single());
+        let out = dispatch(request(1024, 8), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)));
         assert_eq!(msg_type(&out[0]), 1025);
         assert_eq!(correlation_id(&out[0]), 8);
     }
@@ -459,11 +492,11 @@ mod tests {
     #[test]
     fn put_then_get_roundtrips_through_store() {
         let store = Store::new();
-        let out = dispatch(put_request("m", &[1, 2], &[9], 1), &store, &Cfg::single());
+        let out = dispatch(put_request("m", &[1, 2], &[9], 1), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)));
         assert_eq!(msg_type(&out[0]), 65793);
         assert!(out[0][1].is_null()); // no prior value
 
-        let out = dispatch(get_request("m", &[1, 2], 2), &store, &Cfg::single());
+        let out = dispatch(get_request("m", &[1, 2], 2), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)));
         assert_eq!(msg_type(&out[0]), 66049);
         assert_eq!(out[0][1].content, vec![9]);
     }
