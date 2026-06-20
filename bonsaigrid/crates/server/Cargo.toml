@@ -1,0 +1,9 @@
+[package]
+name = "server"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+protocol = { path = "../protocol" }
+codecs = { path = "../codecs" }
+store = { path = "../store" }

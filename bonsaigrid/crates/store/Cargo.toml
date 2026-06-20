@@ -1,0 +1,4 @@
+[package]
+name = "store"
+edition.workspace = true
+version.workspace = true
