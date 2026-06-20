@@ -1,7 +1,10 @@
-//! Message dispatch: the single-node handshake and map ops.
+//! Message dispatch: the cluster handshake and map ops.
 //!
-//! Single-core degenerate case of the cross-core routing invariant: this one
-//! member owns all 271 partitions (`core 0 owns p where p % 1 == 0`).
+//! The handshake advertises the full member list and a deterministic partition
+//! table (partition `p` is owned by member `p % N`). A stock smart client routes
+//! each key to its partition's owner, so each member stores/serves only its own
+//! partitions — no server-side partition hashing or member-to-member traffic is
+//! needed for correctness.
 
 use codecs::auth::{self, AuthResponse, MemberTuple};
 use codecs::{cluster_view, map};
@@ -10,39 +13,71 @@ use protocol::frame::{Frame, UNFRAGMENTED};
 use protocol::message::{correlation_id, msg_type, set_correlation_id};
 use store::Store;
 
-pub const MEMBER_UUID: (i64, i64) = (1, 1);
 pub const CLUSTER_ID: (i64, i64) = (2, 2);
 pub const PARTITION_COUNT: i32 = 271;
-pub const HOST: &str = "127.0.0.1";
-pub const PORT: i32 = 5701;
 pub const SERVER_VERSION: &str = "5.8.0";
 pub const VERSION: (u8, u8, u8) = (5, 8, 0);
 const TPC_TOKEN: &[u8] = b"bonsaigrid-tpc-token";
 
-/// Runtime config the handshake needs to know about.
+/// Stable registration id handed back for listener registrations.
+pub const REGISTRATION_UUID: (i64, i64) = (3, 3);
+
+/// One cluster member.
+#[derive(Clone)]
+pub struct Member {
+    pub uuid: (i64, i64),
+    pub host: String,
+    pub port: i32,
+}
+
+/// Runtime config the handshake needs: the full membership, which member *this*
+/// process is, and this member's TPC ports (empty disables TPC advertisement).
 #[derive(Clone)]
 pub struct Cfg {
-    /// One TPC port per core; empty disables TPC advertisement.
+    pub members: Vec<Member>,
+    pub self_index: usize,
     pub tpc_ports: Vec<i32>,
 }
 
 impl Cfg {
+    /// Single-node, single-member cluster.
     pub fn single() -> Cfg {
-        Cfg { tpc_ports: Vec::new() }
+        Cfg {
+            members: vec![Member { uuid: (1, 1), host: "127.0.0.1".into(), port: 5701 }],
+            self_index: 0,
+            tpc_ports: Vec::new(),
+        }
+    }
+
+    fn member_tuples(&self) -> Vec<MemberTuple> {
+        self.members
+            .iter()
+            .map(|m| (m.uuid, m.host.clone(), m.port, false, VERSION))
+            .collect()
+    }
+
+    /// Deterministic table: member `i` owns partitions `{p : p % N == i}`.
+    fn partition_table(&self) -> Vec<((i64, i64), Vec<i32>)> {
+        let n = self.members.len() as i32;
+        self.members
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                let parts = (0..PARTITION_COUNT).filter(|p| p % n == i as i32).collect();
+                (m.uuid, parts)
+            })
+            .collect()
+    }
+
+    fn self_member(&self) -> &Member {
+        &self.members[self.self_index]
     }
 }
 
-fn members() -> Vec<MemberTuple> {
-    vec![(MEMBER_UUID, HOST.to_string(), PORT, false, VERSION)]
-}
-
-fn partitions() -> Vec<((i64, i64), Vec<i32>)> {
-    vec![(MEMBER_UUID, (0..PARTITION_COUNT).collect())]
-}
-
 fn auth_response(cfg: &Cfg) -> Vec<Frame> {
-    let mem = members();
-    let parts = partitions();
+    let mem = cfg.member_tuples();
+    let parts = cfg.partition_table();
+    let me = cfg.self_member();
     let tpc = if cfg.tpc_ports.is_empty() {
         (None, None)
     } else {
@@ -50,13 +85,13 @@ fn auth_response(cfg: &Cfg) -> Vec<Frame> {
     };
     auth::encode_response(&AuthResponse {
         status: 0, // AUTHENTICATED
-        member_uuid: MEMBER_UUID,
+        member_uuid: me.uuid,
         serialization_version: 1,
         partition_count: PARTITION_COUNT,
         cluster_id: CLUSTER_ID,
         server_version: SERVER_VERSION,
-        address_host: HOST,
-        address_port: PORT,
+        address_host: me.host.as_str(),
+        address_port: me.port,
         member_list_version: 1,
         members: &mem,
         partition_list_version: 1,
@@ -83,9 +118,6 @@ fn uuid_response(msg_type: i32, uuid: (i64, i64)) -> Vec<Frame> {
     vec![Frame { flags: UNFRAGMENTED, content: c }]
 }
 
-/// Stable registration id handed back for listener registrations.
-pub const REGISTRATION_UUID: (i64, i64) = (3, 3);
-
 pub fn dispatch(req: Vec<Frame>, store: &Store, cfg: &Cfg) -> Vec<Vec<Frame>> {
     let corr = correlation_id(&req);
     let mut replies: Vec<Vec<Frame>> = match msg_type(&req) {
@@ -93,11 +125,15 @@ pub fn dispatch(req: Vec<Frame>, store: &Store, cfg: &Cfg) -> Vec<Vec<Frame>> {
         // ClientTpcAuthentication: a TPC client authenticates each per-core
         // channel with the token from the main auth. Response is an empty ack.
         5632 => vec![empty_response(5633)],
-        768 => vec![
-            cluster_view::encode_response(),
-            cluster_view::members_view_event(1, &members()),
-            cluster_view::partitions_view_event(1, &partitions()),
-        ],
+        768 => {
+            let mem = cfg.member_tuples();
+            let parts = cfg.partition_table();
+            vec![
+                cluster_view::encode_response(),
+                cluster_view::members_view_event(1, &mem),
+                cluster_view::partitions_view_event(1, &parts),
+            ]
+        }
         65792 => {
             let r = map::decode_put(&req);
             let old = store.put(&r.name, r.key, r.value);
@@ -140,6 +176,44 @@ mod tests {
         let mut f = vec![Frame { flags: UNFRAGMENTED, content: c }];
         set_correlation_id(&mut f, corr);
         f
+    }
+
+    fn cluster_cfg(n: usize, self_index: usize) -> Cfg {
+        Cfg {
+            members: (0..n)
+                .map(|i| Member {
+                    uuid: (1, (i + 1) as i64),
+                    host: "127.0.0.1".into(),
+                    port: 5701 + i as i32,
+                })
+                .collect(),
+            self_index,
+            tpc_ports: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn partition_table_covers_all_partitions_by_p_mod_n() {
+        let cfg = cluster_cfg(3, 0);
+        let table = cfg.partition_table();
+        assert_eq!(table.len(), 3);
+        let total: usize = table.iter().map(|(_, p)| p.len()).sum();
+        assert_eq!(total, PARTITION_COUNT as usize, "every partition assigned exactly once");
+        for (i, (_, parts)) in table.iter().enumerate() {
+            for &p in parts {
+                assert_eq!((p as usize) % 3, i, "member {i} owns p%3==i");
+            }
+        }
+    }
+
+    #[test]
+    fn auth_reports_self_member_identity() {
+        // member index 2 should report its own uuid (1,3) in the response header.
+        let cfg = cluster_cfg(3, 2);
+        let out = dispatch(request(256, 1), &Store::new(), &cfg);
+        assert_eq!(msg_type(&out[0]), 257);
+        // member_uuid lives at offset 14 (after backupAcks@12 + status@13).
+        assert_eq!(protocol::fixed::read_uuid(&out[0][0].content, 14), Some((1, 3)));
     }
 
     #[test]

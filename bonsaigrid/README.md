@@ -10,12 +10,19 @@ Design philosophy and the cross-core routing architecture:
 `../docs/superpowers/specs/2026-06-19-cross-core-routing-design.md`.
 Build plan: `../docs/superpowers/plans/2026-06-19-increment-0-walking-skeleton.md`.
 
-## Status: Increment 3 — thread-per-core + TPC ✅
+## Status: multi-node static cluster ✅
 
-Multi-core, single-node server speaking the Hazelcast Open Client Protocol
-(fixtures version 2.10). Unmodified Hazelcast clients (Python + Java) connect and
-perform `IMap.put` / `IMap.get` — unisocket, smart-routing, **and** TPC-enabled.
-See `bench/BASELINE.md` for measured results.
+Server speaking the Hazelcast Open Client Protocol (fixtures version 2.10), in
+two modes:
+- **Single node** (default): thread-per-core, io_uring, per-core TPC ports.
+- **Multi-node** (`BONSAI_MEMBERS=K`): K processes form a static cluster; each is
+  one member owning partitions `{p : p % K == index}`. A stock **smart** client
+  routes each key to its owner — verified by 1000 keys round-tripping across a
+  3-member cluster (`conformance-python/run_cluster.sh`).
+
+Unmodified Hazelcast clients (Python + Java) connect and perform `IMap.put` /
+`IMap.get` — unisocket, smart-routing, TPC-enabled, and cross-cluster. See
+`bench/BASELINE.md` for measured single-node performance.
 
 | # | Increment | Target | Result |
 |---|-----------|--------|--------|
