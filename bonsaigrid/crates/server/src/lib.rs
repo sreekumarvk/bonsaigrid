@@ -3,4 +3,5 @@
 pub mod connection;
 pub mod events;
 pub mod handlers;
+pub mod metrics;
 pub mod reactor;

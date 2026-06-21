@@ -58,10 +58,15 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
     }
     let n = members;
     let (eb, cb) = (broker.clone(), broker.clone());
+    let metrics = Arc::new(server::metrics::Metrics::new());
+    let (md, mh) = (metrics.clone(), metrics.clone());
     server::reactor::run(
         vec![listener],
-        move |msg, conn_id, out| server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, out),
-        move |path| server::handlers::http_health(path, n),
+        move |msg, conn_id, out| {
+            md.inc_request();
+            server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, out)
+        },
+        move |path| http_route(path, n, &mh),
         move |conn_id, out| {
             for ev in eb.drain(conn_id) {
                 out.extend_from_slice(&ev);
@@ -69,6 +74,15 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
         },
         move |conn_id| cb.drop_conn(conn_id),
     )
+}
+
+/// HTTP routing on the main port: health endpoints + a Prometheus `/metrics`.
+fn http_route(path: &str, cluster_size: usize, metrics: &server::metrics::Metrics) -> (u16, &'static str, String) {
+    if path == "/metrics" {
+        (200, "text/plain", metrics.prometheus(cluster_size))
+    } else {
+        server::handlers::http_health(path, cluster_size)
+    }
 }
 
 fn run_single_node() -> std::io::Result<()> {
@@ -83,8 +97,9 @@ fn run_single_node() -> std::io::Result<()> {
         tpc_ports: tpc_ports.clone(),
     });
     let store = Arc::new(store::Store::with_shards(cores));
-    // One broker shared across this member's cores.
+    // One broker + metrics registry shared across this member's cores.
     let broker = Arc::new(server::events::EventBroker::new(cfg.members[0].uuid));
+    let metrics = Arc::new(server::metrics::Metrics::new());
     let core_ids = core_affinity::get_core_ids().unwrap_or_default();
     eprintln!(
         "BonsaiGrid listening on {addr} (thread-per-core, {cores} cores, io_uring); TPC ports {:?}",
@@ -96,6 +111,7 @@ fn run_single_node() -> std::io::Result<()> {
         let store = store.clone();
         let cfg = cfg.clone();
         let broker = broker.clone();
+        let metrics = metrics.clone();
         let main_listener = reuseport_listener(addr)?;
         let tpc_addr: SocketAddr = format!("127.0.0.1:{}", TPC_BASE + i as i32).parse().unwrap();
         let tpc_listener = reuseport_listener(tpc_addr)?;
@@ -105,10 +121,14 @@ fn run_single_node() -> std::io::Result<()> {
                 core_affinity::set_for_current(id);
             }
             let (eb, cb) = (broker.clone(), broker.clone());
+            let (md, mh) = (metrics.clone(), metrics.clone());
             let _ = server::reactor::run(
                 vec![main_listener, tpc_listener],
-                move |msg, conn_id, out| server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, out),
-                |path| server::handlers::http_health(path, 1),
+                move |msg, conn_id, out| {
+                    md.inc_request();
+                    server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, out)
+                },
+                move |path| http_route(path, 1, &mh),
                 move |conn_id, out| {
                     for ev in eb.drain(conn_id) {
                         out.extend_from_slice(&ev);
