@@ -3,4 +3,5 @@
 //! machine. Only the *client* protocol is Hazelcast-compatible; everything here
 //! is BonsaiGrid-internal and may change freely.
 
+pub mod replication;
 pub mod wire;
