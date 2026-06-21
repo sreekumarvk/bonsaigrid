@@ -207,6 +207,11 @@ fn empty_response(msg_type: i32) -> Vec<Frame> {
     vec![Frame { flags: UNFRAGMENTED, content: c }]
 }
 
+/// Namespace a ReplicatedMap so it doesn't collide with an IMap of the same name.
+fn repl(name: &str) -> String {
+    format!("\u{1}repl:{name}")
+}
+
 /// A response whose initial frame carries a single UUID at offset 13 (after
 /// backupAcks). Used by listener-registration responses that return a
 /// registration id. Since this increment sends no events for these listeners,
@@ -528,6 +533,83 @@ pub fn dispatch(
             let name = map::decode_name(&req);
             store.queue_clear(&name);
             vec![empty_response(200449)]
+        }
+        // ---- ReplicatedMap (single-node: an IMap in a private namespace) ----
+        852224 => {
+            let r = repl(&map::decode_name(&req));
+            let old = store.put(&r, req[2].content.clone(), req[3].content.clone());
+            vec![map::data_response(852225, old.as_deref())]
+        }
+        853504 => {
+            let (n, k) = map::decode_name_key(&req);
+            vec![map::data_response(853505, store.get(&repl(&n), &k).as_deref())]
+        }
+        853760 => {
+            let (n, k) = map::decode_name_key(&req);
+            vec![map::data_response(853761, store.remove(&repl(&n), &k).as_deref())]
+        }
+        852992 => {
+            let (n, k) = map::decode_name_key(&req);
+            vec![map::bool_response(852993, store.contains_key(&repl(&n), &k))]
+        }
+        853248 => {
+            let (n, v) = map::decode_name_value(&req);
+            vec![map::bool_response(853249, store.contains_value(&repl(&n), &v))]
+        }
+        852480 => vec![map::int_response(852481, store.size(&repl(&map::decode_name(&req))) as i32)],
+        852736 => vec![map::bool_response(852737, store.is_empty(&repl(&map::decode_name(&req))))],
+        854272 => {
+            store.clear(&repl(&map::decode_name(&req)));
+            vec![empty_response(854273)]
+        }
+        855808 => {
+            let ks: Vec<Vec<u8>> = store.entries(&repl(&map::decode_name(&req))).into_iter().map(|(k, _)| k).collect();
+            vec![map::encode_data_list_response(855809, &ks)]
+        }
+        856064 => {
+            let vs: Vec<Vec<u8>> = store.entries(&repl(&map::decode_name(&req))).into_iter().map(|(_, v)| v).collect();
+            vec![map::encode_data_list_response(856065, &vs)]
+        }
+        856320 => {
+            let es = store.entries(&repl(&map::decode_name(&req)));
+            vec![map::encode_entry_list_response(856321, &es)]
+        }
+        // ---- Ringbuffer ----
+        1508864 => {
+            let (n, v) = map::decode_name_value(&req);
+            vec![map::long_response(1508865, store.rb_add(&n, v))]
+        }
+        1509120 => {
+            let n = map::decode_name(&req);
+            let seq = read_i64_le(&req[0].content, 16);
+            vec![map::data_response(1509121, store.rb_read_one(&n, seq).as_deref())]
+        }
+        1507584 => vec![map::long_response(1507585, store.rb_size(&map::decode_name(&req)))],
+        1508352 => vec![map::long_response(1508353, store.rb_capacity(&map::decode_name(&req)))],
+        1507840 => vec![map::long_response(1507841, store.rb_tail(&map::decode_name(&req)))],
+        1508096 => vec![map::long_response(1508097, store.rb_head(&map::decode_name(&req)))],
+        // ---- PNCounter ----
+        // PNCounterGetConfiguredReplicaCount -> int (we run a single replica)
+        1901312 => vec![map::int_response(1901313, 1)],
+        1900800 => {
+            let uuid = cfg.members[cfg.self_index].uuid;
+            let v = store.pn_get(&map::decode_name(&req));
+            vec![map::pncounter_response(1900801, v, 1, uuid, store.pn_tick())]
+        }
+        1901056 => {
+            let n = map::decode_name(&req);
+            let delta = read_i64_le(&req[0].content, 16);
+            let get_before = req[0].content[24] == 1;
+            let uuid = cfg.members[cfg.self_index].uuid;
+            let v = store.pn_add(&n, delta, get_before);
+            vec![map::pncounter_response(1901057, v, 1, uuid, store.pn_tick())]
+        }
+        // ---- FlakeIdGenerator ----
+        1835264 => {
+            let n = map::decode_name(&req);
+            let batch = read_i32_le(&req[0].content, 16);
+            let (base, inc, size) = store.flake_batch(&n, batch);
+            vec![map::flakeid_response(1835265, base, inc, size)]
         }
         // ClientLocalBackupListener: smart clients register it; response is a
         // UUID registration id at offset 13. We never push backup events.

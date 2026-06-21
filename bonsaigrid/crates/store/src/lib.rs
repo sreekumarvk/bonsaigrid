@@ -334,6 +334,16 @@ pub struct Store {
     // is the request's threadId; full (clientUuid, threadId) ownership is a
     // refinement. Non-blocking: tryLock returns immediately.
     locks: Mutex<HashMap<(String, Vec<u8>), (i64, u32)>>,
+    ringbuffers: Mutex<HashMap<String, Ring>>,
+    pncounters: Mutex<HashMap<String, i64>>,
+    flake: Mutex<HashMap<String, i64>>,
+}
+
+struct Ring {
+    items: VecDeque<Vec<u8>>,
+    head: i64,
+    tail: i64,
+    cap: i64,
 }
 
 impl Default for Store {
@@ -356,7 +366,80 @@ impl Store {
             multimaps: Mutex::new(HashMap::new()),
             lists: Mutex::new(HashMap::new()),
             locks: Mutex::new(HashMap::new()),
+            ringbuffers: Mutex::new(HashMap::new()),
+            pncounters: Mutex::new(HashMap::new()),
+            flake: Mutex::new(HashMap::new()),
         }
+    }
+
+    // ---- Ringbuffer ----
+    pub fn rb_add(&self, name: &str, v: Vec<u8>) -> i64 {
+        let mut g = self.ringbuffers.lock().unwrap();
+        let r = g.entry(name.to_string()).or_insert_with(|| Ring {
+            items: VecDeque::new(),
+            head: 0,
+            tail: -1,
+            cap: 10_000,
+        });
+        r.tail += 1;
+        r.items.push_back(v);
+        if r.items.len() as i64 > r.cap {
+            r.items.pop_front();
+            r.head += 1;
+        }
+        r.tail
+    }
+    pub fn rb_read_one(&self, name: &str, seq: i64) -> Option<Vec<u8>> {
+        let g = self.ringbuffers.lock().unwrap();
+        let r = g.get(name)?;
+        if seq < r.head || seq > r.tail {
+            return None;
+        }
+        r.items.get((seq - r.head) as usize).cloned()
+    }
+    pub fn rb_size(&self, name: &str) -> i64 {
+        self.ringbuffers.lock().unwrap().get(name).map_or(0, |r| r.items.len() as i64)
+    }
+    pub fn rb_capacity(&self, name: &str) -> i64 {
+        self.ringbuffers.lock().unwrap().get(name).map_or(10_000, |r| r.cap)
+    }
+    pub fn rb_tail(&self, name: &str) -> i64 {
+        self.ringbuffers.lock().unwrap().get(name).map_or(-1, |r| r.tail)
+    }
+    pub fn rb_head(&self, name: &str) -> i64 {
+        self.ringbuffers.lock().unwrap().get(name).map_or(0, |r| r.head)
+    }
+
+    // ---- PNCounter (single-node: a plain counter + a logical clock) ----
+    /// Monotonic per-process clock for this replica's CRDT timestamp.
+    pub fn pn_tick(&self) -> i64 {
+        use std::sync::atomic::{AtomicI64, Ordering};
+        static CLOCK: AtomicI64 = AtomicI64::new(1);
+        CLOCK.fetch_add(1, Ordering::Relaxed)
+    }
+    pub fn pn_get(&self, name: &str) -> i64 {
+        *self.pncounters.lock().unwrap().get(name).unwrap_or(&0)
+    }
+    pub fn pn_add(&self, name: &str, delta: i64, get_before: bool) -> i64 {
+        let mut g = self.pncounters.lock().unwrap();
+        let c = g.entry(name.to_string()).or_insert(0);
+        let old = *c;
+        *c += delta;
+        if get_before {
+            old
+        } else {
+            *c
+        }
+    }
+
+    // ---- FlakeIdGenerator: hand out monotonic id batches (base, increment=1, size) ----
+    pub fn flake_batch(&self, name: &str, batch: i32) -> (i64, i64, i32) {
+        let batch = batch.max(1);
+        let mut g = self.flake.lock().unwrap();
+        let next = g.entry(name.to_string()).or_insert(1);
+        let base = *next;
+        *next += batch as i64;
+        (base, 1, batch)
     }
 
     // ---- Per-key locking ----

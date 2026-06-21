@@ -170,6 +170,45 @@ pub fn int_response(msg_type: i32, v: i32) -> Vec<Frame> {
     vec![initial_frame(c)]
 }
 
+/// Response carrying an i64 at offset 13 (Ringbuffer size/seq/etc).
+pub fn long_response(msg_type: i32, v: i64) -> Vec<Frame> {
+    let mut c = vec![0u8; 21]; // type@0, corr@4, backupAcks@12, long@13..21
+    write_i32_le(&mut c, 0, msg_type);
+    write_i64_le(&mut c, 13, v);
+    vec![initial_frame(c)]
+}
+
+/// PNCounter response: value (long @13) + replicaCount (int @21), then a
+/// replicaTimestamps EntryList<UUID,Long> (one entry: this replica's logical
+/// clock, so the client's CRDT vector advances monotonically).
+pub fn pncounter_response(
+    msg_type: i32,
+    value: i64,
+    replica_count: i32,
+    ts_uuid: (i64, i64),
+    ts: i64,
+) -> Vec<Frame> {
+    let mut c = vec![0u8; 25];
+    write_i32_le(&mut c, 0, msg_type);
+    write_i64_le(&mut c, 13, value);
+    write_i32_le(&mut c, 21, replica_count);
+    // single timestamp entry: uuid (17B) + long (8B) = 25 bytes
+    let mut ts_frame = vec![0u8; 25];
+    write_uuid(&mut ts_frame, 0, Some(ts_uuid));
+    write_i64_le(&mut ts_frame, 17, ts);
+    vec![initial_frame(c), Frame { flags: 0, content: ts_frame }]
+}
+
+/// FlakeId NewIdBatch response: base (long @13), increment (long @21), batchSize (int @29).
+pub fn flakeid_response(msg_type: i32, base: i64, increment: i64, batch_size: i32) -> Vec<Frame> {
+    let mut c = vec![0u8; 33];
+    write_i32_le(&mut c, 0, msg_type);
+    write_i64_le(&mut c, 13, base);
+    write_i64_le(&mut c, 21, increment);
+    write_i32_le(&mut c, 29, batch_size);
+    vec![initial_frame(c)]
+}
+
 pub struct PutRequest {
     pub name: String,
     pub key: Vec<u8>,
