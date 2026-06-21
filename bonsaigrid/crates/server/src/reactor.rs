@@ -89,10 +89,11 @@ pub fn run(
     let mut free: Vec<usize> = Vec::new();
     let mut pending: Vec<io_uring::squeue::Entry> = Vec::new();
 
-    // Prime one accept per listener.
+    // Prime one *multishot* accept per listener: a single SQE yields a stream of
+    // accept completions, cutting submission churn under connection load.
     for (i, fd) in fds.iter().enumerate() {
         pending.push(
-            opcode::Accept::new(types::Fd(*fd), std::ptr::null_mut(), std::ptr::null_mut())
+            opcode::AcceptMulti::new(types::Fd(*fd))
                 .build()
                 .user_data(ACCEPT_BASE + i as u64),
         );
@@ -108,12 +109,12 @@ pub fn run(
         flush(&mut ring, &mut pending)?;
         ring.submit_and_wait(1)?;
 
-        let cqes: Vec<(u64, i32)> = ring
+        let cqes: Vec<(u64, i32, u32)> = ring
             .completion()
-            .map(|c| (c.user_data(), c.result()))
+            .map(|c| (c.user_data(), c.result(), c.flags()))
             .collect();
 
-        for (ud, res) in cqes {
+        for (ud, res, flags) in cqes {
             if ud == TIMEOUT_UD {
                 flush_events = true;
                 pending.push(opcode::Timeout::new(&tick).build().user_data(TIMEOUT_UD));
@@ -121,12 +122,12 @@ pub fn run(
             }
             if ud >= ACCEPT_BASE {
                 let idx = (ud - ACCEPT_BASE) as usize;
-                // Re-arm this listener's accept regardless.
-                pending.push(
-                    opcode::Accept::new(types::Fd(fds[idx]), std::ptr::null_mut(), std::ptr::null_mut())
-                        .build()
-                        .user_data(ud),
-                );
+                // Multishot: only re-arm if the kernel won't keep delivering.
+                if !io_uring::cqueue::more(flags) {
+                    pending.push(
+                        opcode::AcceptMulti::new(types::Fd(fds[idx])).build().user_data(ud),
+                    );
+                }
                 if res >= 0 {
                     let fd = res as RawFd;
                     let id = match free.pop() {
