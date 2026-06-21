@@ -9,6 +9,8 @@ codecs = { path = "../codecs" }
 store = { path = "../store" }
 serialization = { path = "../serialization" }
 query = { path = "../query" }
+member = { path = "../member" }
+spsc = { path = "../spsc" }
 io-uring = "0.6"
 libc = "0.2"
 socket2 = { version = "0.5", features = ["all"] }

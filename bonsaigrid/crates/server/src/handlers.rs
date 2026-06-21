@@ -7,7 +7,9 @@
 //! needed for correctness.
 
 use crate::events::EventBroker;
+use crate::member_thread::Replicator;
 use crate::membership::Cluster;
+use member::wire::Msg;
 use codecs::auth::{self, AuthResponse};
 use codecs::{cluster_view, map};
 use serialization::compact::CompactExtractor;
@@ -107,13 +109,14 @@ pub fn dispatch_bytes(
     broker: &EventBroker,
     schemas: &SchemaService,
     cluster: &Cluster,
+    replicator: Option<&Replicator>,
     out: &mut Vec<u8>,
 ) {
     if try_fast_get(msg, store, out) {
         return;
     }
     if let Some((frames, _)) = read_message(msg) {
-        for reply in dispatch(frames, conn_id, store, cfg, broker, schemas, cluster) {
+        for reply in dispatch(frames, conn_id, store, cfg, broker, schemas, cluster, replicator) {
             out.extend_from_slice(&write_message(&reply));
         }
     }
@@ -216,6 +219,30 @@ fn empty_response(msg_type: i32) -> Vec<Frame> {
     vec![Frame { flags: UNFRAGMENTED, content: c }]
 }
 
+/// Hand a mutation to the member thread for synchronous backup replication.
+/// Returns `true` if the client reply was deferred (the member thread will
+/// deliver `resp` once backups ack); `false` if the caller should reply now
+/// (no replicator, no configured backups, or no live backup for this partition).
+/// `resp` must already carry the correct correlation id.
+fn replicate_write(
+    repl: Option<&Replicator>,
+    cluster: &Cluster,
+    conn_id: u64,
+    resp: &[Frame],
+    key: &[u8],
+    mk: impl FnOnce(u64) -> Msg,
+) -> bool {
+    let Some(rep) = repl else { return false };
+    if !rep.has_backups() {
+        return false;
+    }
+    let partition = serialization::partition_id(key, PARTITION_COUNT);
+    if cluster.backups_of(partition).is_empty() {
+        return false;
+    }
+    rep.replicate(partition, conn_id, write_message(resp), mk)
+}
+
 /// Namespace a ReplicatedMap so it doesn't collide with an IMap of the same name.
 fn repl(name: &str) -> String {
     format!("\u{1}repl:{name}")
@@ -249,6 +276,7 @@ pub fn dispatch(
     broker: &EventBroker,
     schemas: &SchemaService,
     cluster: &Cluster,
+    replicator: Option<&Replicator>,
 ) -> Vec<Vec<Frame>> {
     let corr = correlation_id(&req);
     let mut replies: Vec<Vec<Frame>> = match msg_type(&req) {
@@ -315,19 +343,26 @@ pub fn dispatch(
             let ttl = if r.ttl > 0 { r.ttl as u64 } else { 0 };
             let el = broker.has_listeners(&r.name);
             let nc = broker.has_near_cache(&r.name);
-            if el || nc {
-                let old = store.put_ttl(&r.name, r.key.clone(), r.value.clone(), ttl);
-                if el {
-                    let etype = if old.is_some() { map::UPDATED } else { map::ADDED };
-                    broker.publish(&r.name, etype, &r.key, Some(&r.value), old.as_deref());
-                }
-                if nc {
-                    broker.invalidate(&r.name, &r.key);
-                }
-                vec![map::encode_put_response(old.as_deref())]
+            let old = store.put_ttl(&r.name, r.key.clone(), r.value.clone(), ttl);
+            if el {
+                let etype = if old.is_some() { map::UPDATED } else { map::ADDED };
+                broker.publish(&r.name, etype, &r.key, Some(&r.value), old.as_deref());
+            }
+            if nc {
+                broker.invalidate(&r.name, &r.key);
+            }
+            let mut resp = map::encode_put_response(old.as_deref());
+            set_correlation_id(&mut resp, corr);
+            if replicate_write(replicator, cluster, conn_id, &resp, &r.key, |op| Msg::BackupPut {
+                op_id: op,
+                name: r.name.clone(),
+                key: r.key.clone(),
+                value: r.value.clone(),
+                ttl_ms: ttl,
+            }) {
+                vec![] // deferred: response delivered after backups ack
             } else {
-                let old = store.put_ttl(&r.name, r.key, r.value, ttl);
-                vec![map::encode_put_response(old.as_deref())]
+                vec![resp]
             }
         }
         // MapGet
@@ -348,7 +383,17 @@ pub fn dispatch(
                     broker.invalidate(&r.name, &r.key);
                 }
             }
-            vec![map::data_response(66305, old.as_deref())]
+            let mut resp = map::data_response(66305, old.as_deref());
+            set_correlation_id(&mut resp, corr);
+            if replicate_write(replicator, cluster, conn_id, &resp, &r.key, |op| Msg::BackupRemove {
+                op_id: op,
+                name: r.name.clone(),
+                key: r.key.clone(),
+            }) {
+                vec![]
+            } else {
+                vec![resp]
+            }
         }
         // MapDelete -> void
         67840 => {
@@ -362,7 +407,17 @@ pub fn dispatch(
                     broker.invalidate(&r.name, &r.key);
                 }
             }
-            vec![empty_response(67841)]
+            let mut resp = empty_response(67841);
+            set_correlation_id(&mut resp, corr);
+            if replicate_write(replicator, cluster, conn_id, &resp, &r.key, |op| Msg::BackupRemove {
+                op_id: op,
+                name: r.name.clone(),
+                key: r.key.clone(),
+            }) {
+                vec![]
+            } else {
+                vec![resp]
+            }
         }
         // MapContainsKey -> bool
         67072 => {
@@ -802,7 +857,7 @@ mod tests {
     fn auth_reports_self_member_identity() {
         // member index 2 should report its own uuid (1,3) in the response header.
         let cfg = cluster_cfg(3, 2);
-        let out = dispatch(auth_request(1), 0, &Store::new(), &cfg, &EventBroker::new((1, 1)), &SchemaService::new(), &cluster_of(3));
+        let out = dispatch(auth_request(1), 0, &Store::new(), &cfg, &EventBroker::new((1, 1)), &SchemaService::new(), &cluster_of(3), None);
         assert_eq!(msg_type(&out[0]), 257);
         // member_uuid lives at offset 14 (after backupAcks@12 + status@13).
         assert_eq!(protocol::fixed::read_uuid(&out[0][0].content, 14), Some((1, 3)));
@@ -825,7 +880,7 @@ mod tests {
     #[test]
     fn auth_replies_257_with_echoed_correlation() {
         let store = Store::new();
-        let out = dispatch(auth_request(99), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster());
+        let out = dispatch(auth_request(99), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster(), None);
         assert_eq!(out.len(), 1);
         assert_eq!(msg_type(&out[0]), 257);
         assert_eq!(correlation_id(&out[0]), 99);
@@ -834,7 +889,7 @@ mod tests {
     #[test]
     fn cluster_view_replies_response_plus_two_events() {
         let store = Store::new();
-        let out = dispatch(request(768, 5), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster());
+        let out = dispatch(request(768, 5), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster(), None);
         assert_eq!(out.len(), 3);
         assert_eq!(msg_type(&out[0]), 769);
         assert_eq!(msg_type(&out[1]), 770);
@@ -873,7 +928,7 @@ mod tests {
     fn local_backup_listener_replies_3841_with_uuid() {
         use protocol::fixed::read_uuid;
         let store = Store::new();
-        let out = dispatch(request(3840, 7), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster());
+        let out = dispatch(request(3840, 7), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster(), None);
         assert_eq!(msg_type(&out[0]), 3841);
         // initial frame must be 30 bytes with the registration UUID at offset 13
         assert_eq!(out[0][0].content.len(), 30);
@@ -884,7 +939,7 @@ mod tests {
     #[test]
     fn create_proxy_replies_empty_1025() {
         let store = Store::new();
-        let out = dispatch(request(1024, 8), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster());
+        let out = dispatch(request(1024, 8), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster(), None);
         assert_eq!(msg_type(&out[0]), 1025);
         assert_eq!(correlation_id(&out[0]), 8);
     }
@@ -892,11 +947,11 @@ mod tests {
     #[test]
     fn put_then_get_roundtrips_through_store() {
         let store = Store::new();
-        let out = dispatch(put_request("m", &[1, 2], &[9], 1), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster());
+        let out = dispatch(put_request("m", &[1, 2], &[9], 1), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster(), None);
         assert_eq!(msg_type(&out[0]), 65793);
         assert!(out[0][1].is_null()); // no prior value
 
-        let out = dispatch(get_request("m", &[1, 2], 2), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster());
+        let out = dispatch(get_request("m", &[1, 2], 2), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster(), None);
         assert_eq!(msg_type(&out[0]), 66049);
         assert_eq!(out[0][1].content, vec![9]);
     }

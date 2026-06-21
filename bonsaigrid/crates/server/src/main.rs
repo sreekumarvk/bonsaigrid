@@ -19,6 +19,8 @@ use std::sync::Arc;
 
 const TPC_BASE: i32 = 12000;
 const BASE_PORT: i32 = 5701;
+/// Internal member-to-member port base (member i listens on MEMBER_BASE + i).
+const MEMBER_BASE: i32 = 7701;
 
 fn reuseport_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
     let sock = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
@@ -76,6 +78,25 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
     if let Some(id) = core_affinity::get_core_ids().and_then(|v| v.get(self_index % 64).copied()) {
         core_affinity::set_for_current(id);
     }
+
+    // Spawn the member thread when this cluster keeps backups; the reactor hands
+    // it replicated writes over an SPSC ring and gets a Replicator handle.
+    let replicator = if backups > 0 {
+        let member_ports: Vec<i32> = (0..members).map(|i| MEMBER_BASE + i as i32).collect();
+        let (tx, rx) = spsc::channel::<server::member_thread::MemberJob>(8192);
+        server::member_thread::spawn(
+            self_index,
+            member_ports,
+            cluster.borrow().clone(),
+            store.clone(),
+            broker.clone(),
+            rx,
+        );
+        Some(server::member_thread::Replicator::new(tx, backups))
+    } else {
+        None
+    };
+
     let n = members;
     let (eb, cb) = (broker.clone(), broker.clone());
     let metrics = Arc::new(server::metrics::Metrics::new());
@@ -86,7 +107,7 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
         move |msg, conn_id, out| {
             md.inc_request();
             let cluster = cl.borrow();
-            server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, &schemas, &cluster, out)
+            server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, &schemas, &cluster, replicator.as_ref(), out)
         },
         move |path| http_route(path, n, &mh),
         move |conn_id, out| {
@@ -157,7 +178,7 @@ fn run_single_node() -> std::io::Result<()> {
                 vec![main_listener, tpc_listener],
                 move |msg, conn_id, out| {
                     md.inc_request();
-                    server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, &schemas, &cluster, out)
+                    server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, &schemas, &cluster, None, out)
                 },
                 move |path| http_route(path, 1, &mh),
                 move |conn_id, out| {

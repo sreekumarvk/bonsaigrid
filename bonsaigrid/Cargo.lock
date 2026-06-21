@@ -98,10 +98,12 @@ dependencies = [
  "core_affinity",
  "io-uring",
  "libc",
+ "member",
  "protocol",
  "query",
  "serialization",
  "socket2",
+ "spsc",
  "store",
 ]
 
