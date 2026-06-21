@@ -10,7 +10,9 @@
 //! SO_REUSEPORT listener (increment 3).
 
 use io_uring::{opcode, types, IoUring};
-use protocol::frame::message_len;
+use protocol::fixed::read_u16_le;
+use protocol::fragment::Reassembler;
+use protocol::frame::{message_len, UNFRAGMENTED};
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -43,6 +45,7 @@ struct Conn {
     mode: Mode,
     close_after_flush: bool,
     open: bool,
+    frag: Reassembler,
 }
 
 impl Conn {
@@ -59,6 +62,7 @@ impl Conn {
             mode: Mode::Unknown,
             close_after_flush: false,
             open: true,
+            frag: Reassembler::new(),
         }
     }
 }
@@ -269,9 +273,21 @@ fn on_recv(
             loop {
                 let c = conns[id].as_mut().unwrap();
                 let Some(len) = message_len(&c.acc) else { break };
-                let Conn { acc, out, conn_id, .. } = c;
-                dispatch(&acc[..len], *conn_id, out);
-                acc.drain(0..len);
+                // First-frame flags: both fragment bits set == a complete,
+                // unfragmented message (the common, fast path).
+                if read_u16_le(&c.acc, 4) & UNFRAGMENTED == UNFRAGMENTED {
+                    let Conn { acc, out, conn_id, .. } = c;
+                    dispatch(&acc[..len], *conn_id, out);
+                    acc.drain(0..len);
+                } else {
+                    // A fragment: reassemble; dispatch once the message completes.
+                    let frag: Vec<u8> = c.acc[..len].to_vec();
+                    c.acc.drain(0..len);
+                    if let Some(assembled) = c.frag.push(&frag) {
+                        let Conn { out, conn_id, .. } = c;
+                        dispatch(&assembled, *conn_id, out);
+                    }
+                }
             }
             // Flush any entry-listener events queued for this connection.
             let c = conns[id].as_mut().unwrap();

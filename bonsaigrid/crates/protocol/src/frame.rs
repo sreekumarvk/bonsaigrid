@@ -5,7 +5,9 @@
 use crate::fixed::{read_i32_le, read_u16_le, write_i32_le, write_u16_le};
 
 pub const PREFIX_LEN: usize = 6;
-pub const UNFRAGMENTED: u16 = 0xC000;
+pub const BEGIN_FRAGMENT: u16 = 0x8000;
+pub const END_FRAGMENT: u16 = 0x4000;
+pub const UNFRAGMENTED: u16 = 0xC000; // BEGIN_FRAGMENT | END_FRAGMENT
 pub const IS_FINAL: u16 = 0x2000;
 pub const BEGIN_DS: u16 = 0x1000;
 pub const END_DS: u16 = 0x0800;
