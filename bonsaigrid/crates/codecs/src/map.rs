@@ -118,6 +118,43 @@ pub fn decode_name_key(frames: &[Frame]) -> (String, Vec<u8>) {
     (decode_string(&frames[1]), frames[2].content.clone())
 }
 
+/// Near-cache invalidation event (81666): sourceUuid@16, partitionUuid@33,
+/// sequence@50, then the invalidated key (Data).
+pub fn encode_invalidation_event(
+    corr: i64,
+    source: (i64, i64),
+    partition: (i64, i64),
+    sequence: i64,
+    key: &[u8],
+) -> Vec<u8> {
+    use protocol::frame::IS_EVENT;
+    let mut c = vec![0u8; 58];
+    write_i32_le(&mut c, 0, 81666);
+    write_i64_le(&mut c, 4, corr);
+    write_i32_le(&mut c, 12, -1);
+    write_uuid(&mut c, 16, Some(source));
+    write_uuid(&mut c, 33, Some(partition));
+    write_i64_le(&mut c, 50, sequence);
+    let mut frames = vec![Frame { flags: UNFRAGMENTED | IS_EVENT, content: c }];
+    frames.push(data_frame(key));
+    write_message(&frames)
+}
+
+/// MapFetchNearCacheInvalidationMetadata response (81153): empty
+/// namePartitionSequenceList (EntryList -> BEGIN/END) + empty partitionUuidList
+/// (a 0-length fixed frame). The client starts with no baseline and relies on
+/// the delivered invalidations.
+pub fn encode_metadata_response(msg_type: i32) -> Vec<Frame> {
+    let mut c = vec![0u8; 13];
+    write_i32_le(&mut c, 0, msg_type);
+    vec![
+        initial_frame(c),
+        crate::begin_frame(),
+        crate::end_frame(),
+        Frame { flags: 0, content: Vec::new() },
+    ]
+}
+
 /// Topic message event (262658): publishTime@16, uuid@24, then the item Data.
 pub fn encode_topic_event(corr: i64, publish_time: i64, uuid: (i64, i64), item: &[u8]) -> Vec<u8> {
     use protocol::frame::IS_EVENT;

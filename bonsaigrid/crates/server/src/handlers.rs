@@ -240,6 +240,14 @@ pub fn dispatch(
     let corr = correlation_id(&req);
     let mut replies: Vec<Vec<Frame>> = match msg_type(&req) {
         256 => vec![auth_response(cfg)],
+        // MapAddNearCacheInvalidationListener: register + registration id.
+        81664 => {
+            let name = map::decode_name(&req);
+            broker.register_near_cache(&name, conn_id, corr);
+            vec![uuid_response(81665, REGISTRATION_UUID)]
+        }
+        // MapFetchNearCacheInvalidationMetadata: empty baseline.
+        81152 => vec![map::encode_metadata_response(81153)],
         // MapAddEntryListener: register the listener; reply with a registration id.
         71936 => {
             let (name, flags, include_value) = map::decode_add_entry_listener(&req);
@@ -275,10 +283,17 @@ pub fn dispatch(
                 );
             }
             let ttl = if r.ttl > 0 { r.ttl as u64 } else { 0 };
-            if broker.has_listeners(&r.name) {
+            let el = broker.has_listeners(&r.name);
+            let nc = broker.has_near_cache(&r.name);
+            if el || nc {
                 let old = store.put_ttl(&r.name, r.key.clone(), r.value.clone(), ttl);
-                let etype = if old.is_some() { map::UPDATED } else { map::ADDED };
-                broker.publish(&r.name, etype, &r.key, Some(&r.value), old.as_deref());
+                if el {
+                    let etype = if old.is_some() { map::UPDATED } else { map::ADDED };
+                    broker.publish(&r.name, etype, &r.key, Some(&r.value), old.as_deref());
+                }
+                if nc {
+                    broker.invalidate(&r.name, &r.key);
+                }
                 vec![map::encode_put_response(old.as_deref())]
             } else {
                 let old = store.put_ttl(&r.name, r.key, r.value, ttl);
@@ -295,8 +310,13 @@ pub fn dispatch(
         66304 => {
             let r = map::decode_get(&req);
             let old = store.remove(&r.name, &r.key);
-            if old.is_some() && broker.has_listeners(&r.name) {
-                broker.publish(&r.name, map::REMOVED, &r.key, None, old.as_deref());
+            if old.is_some() {
+                if broker.has_listeners(&r.name) {
+                    broker.publish(&r.name, map::REMOVED, &r.key, None, old.as_deref());
+                }
+                if broker.has_near_cache(&r.name) {
+                    broker.invalidate(&r.name, &r.key);
+                }
             }
             vec![map::data_response(66305, old.as_deref())]
         }
@@ -304,8 +324,13 @@ pub fn dispatch(
         67840 => {
             let r = map::decode_get(&req);
             let old = store.remove(&r.name, &r.key);
-            if old.is_some() && broker.has_listeners(&r.name) {
-                broker.publish(&r.name, map::REMOVED, &r.key, None, old.as_deref());
+            if old.is_some() {
+                if broker.has_listeners(&r.name) {
+                    broker.publish(&r.name, map::REMOVED, &r.key, None, old.as_deref());
+                }
+                if broker.has_near_cache(&r.name) {
+                    broker.invalidate(&r.name, &r.key);
+                }
             }
             vec![empty_response(67841)]
         }

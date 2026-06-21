@@ -9,8 +9,9 @@
 //! processed); periodic cross-connection flushing needs a reactor timer and is
 //! the documented next step. The queue/registry here already supports it.
 
-use codecs::map::{encode_entry_event, encode_topic_event};
+use codecs::map::{encode_entry_event, encode_invalidation_event, encode_topic_event};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Mutex;
 
 struct Listener {
@@ -28,12 +29,14 @@ struct TopicSub {
 struct Inner {
     listeners: HashMap<String, Vec<Listener>>, // map name -> entry listeners
     topics: HashMap<String, Vec<TopicSub>>,     // topic name -> subscribers
+    near_caches: HashMap<String, Vec<TopicSub>>, // map name -> near-cache invalidation listeners
     queues: HashMap<u64, Vec<Vec<u8>>>,         // conn id -> pending event messages
 }
 
 pub struct EventBroker {
     inner: Mutex<Inner>,
     member_uuid: (i64, i64),
+    nc_seq: AtomicI64, // monotonic invalidation sequence
 }
 
 impl EventBroker {
@@ -42,9 +45,40 @@ impl EventBroker {
             inner: Mutex::new(Inner {
                 listeners: HashMap::new(),
                 topics: HashMap::new(),
+                near_caches: HashMap::new(),
                 queues: HashMap::new(),
             }),
             member_uuid,
+            nc_seq: AtomicI64::new(1),
+        }
+    }
+
+    // ---- Near-cache invalidation ----
+    pub fn register_near_cache(&self, map: &str, conn_id: u64, corr: i64) {
+        self.inner
+            .lock()
+            .unwrap()
+            .near_caches
+            .entry(map.to_string())
+            .or_default()
+            .push(TopicSub { conn_id, corr });
+    }
+
+    pub fn has_near_cache(&self, map: &str) -> bool {
+        self.inner.lock().unwrap().near_caches.get(map).map(|v| !v.is_empty()).unwrap_or(false)
+    }
+
+    pub fn invalidate(&self, map: &str, key: &[u8]) {
+        let seq = self.nc_seq.fetch_add(1, Ordering::Relaxed);
+        let uuid = self.member_uuid;
+        let mut g = self.inner.lock().unwrap();
+        let Some(subs) = g.near_caches.get(map) else { return };
+        let to_queue: Vec<(u64, Vec<u8>)> = subs
+            .iter()
+            .map(|s| (s.conn_id, encode_invalidation_event(s.corr, uuid, uuid, seq, key)))
+            .collect();
+        for (conn_id, bytes) in to_queue {
+            g.queues.entry(conn_id).or_default().push(bytes);
         }
     }
 
@@ -130,6 +164,9 @@ impl EventBroker {
             v.retain(|l| l.conn_id != conn_id);
         }
         for v in g.topics.values_mut() {
+            v.retain(|s| s.conn_id != conn_id);
+        }
+        for v in g.near_caches.values_mut() {
             v.retain(|s| s.conn_id != conn_id);
         }
     }
