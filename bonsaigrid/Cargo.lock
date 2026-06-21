@@ -20,6 +20,7 @@ name = "codecs"
 version = "0.0.0"
 dependencies = [
  "protocol",
+ "serialization",
 ]
 
 [[package]]

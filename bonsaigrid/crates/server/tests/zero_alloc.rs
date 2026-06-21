@@ -48,20 +48,21 @@ fn map_get_hot_path_is_zero_alloc() {
     store.put("m", b"k".to_vec(), b"value".to_vec());
     let cfg = Cfg::single();
     let broker = EventBroker::new((1, 1));
+    let schemas = serialization::schema::SchemaService::new();
     let msg = build_get_msg("m", b"k");
     let mut out: Vec<u8> = Vec::with_capacity(64 * 1024); // pre-reserved, like the reactor
 
     // Warmup: intern the map name, settle buffers.
     for _ in 0..200 {
         out.clear();
-        dispatch_bytes(&msg, 1, &store, &cfg, &broker, &mut out);
+        dispatch_bytes(&msg, 1, &store, &cfg, &broker, &schemas, &mut out);
     }
     assert!(out.windows(5).any(|w| w == b"value"), "response carries the value");
 
     let before = ALLOCS.load(Ordering::Relaxed);
     for _ in 0..10_000 {
         out.clear();
-        dispatch_bytes(&msg, 1, &store, &cfg, &broker, &mut out);
+        dispatch_bytes(&msg, 1, &store, &cfg, &broker, &schemas, &mut out);
     }
     let allocs = ALLOCS.load(Ordering::Relaxed) - before;
     assert_eq!(allocs, 0, "MapGet hot path allocated {allocs} times over 10k calls");

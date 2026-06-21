@@ -62,6 +62,7 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
     });
     let store = Arc::new(store::Store::with_shards(1));
     let broker = Arc::new(server::events::EventBroker::new(cfg.members[cfg.self_index].uuid));
+    let schemas = Arc::new(serialization::schema::SchemaService::new());
     let listener = reuseport_listener(format!("127.0.0.1:{port}").parse().unwrap())?;
     eprintln!(
         "BonsaiGrid member {self_index}/{members} listening on 127.0.0.1:{port} (single core)"
@@ -77,7 +78,7 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
         vec![listener],
         move |msg, conn_id, out| {
             md.inc_request();
-            server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, out)
+            server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, &schemas, out)
         },
         move |path| http_route(path, n, &mh),
         move |conn_id, out| {
@@ -117,6 +118,7 @@ fn run_single_node() -> std::io::Result<()> {
     // One broker + metrics registry shared across this member's cores.
     let broker = Arc::new(server::events::EventBroker::new(cfg.members[0].uuid));
     let metrics = Arc::new(server::metrics::Metrics::new());
+    let schemas = Arc::new(serialization::schema::SchemaService::new());
     let core_ids = core_affinity::get_core_ids().unwrap_or_default();
     eprintln!(
         "BonsaiGrid listening on {addr} (thread-per-core, {cores} cores, io_uring); TPC ports {:?}",
@@ -129,6 +131,7 @@ fn run_single_node() -> std::io::Result<()> {
         let cfg = cfg.clone();
         let broker = broker.clone();
         let metrics = metrics.clone();
+        let schemas = schemas.clone();
         let main_listener = reuseport_listener(addr)?;
         let tpc_addr: SocketAddr = format!("127.0.0.1:{}", TPC_BASE + i as i32).parse().unwrap();
         let tpc_listener = reuseport_listener(tpc_addr)?;
@@ -143,7 +146,7 @@ fn run_single_node() -> std::io::Result<()> {
                 vec![main_listener, tpc_listener],
                 move |msg, conn_id, out| {
                     md.inc_request();
-                    server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, out)
+                    server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, &schemas, out)
                 },
                 move |path| http_route(path, 1, &mh),
                 move |conn_id, out| {

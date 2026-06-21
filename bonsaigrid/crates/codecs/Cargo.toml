@@ -5,3 +5,4 @@ version.workspace = true
 
 [dependencies]
 protocol = { path = "../protocol" }
+serialization = { path = "../serialization" }
