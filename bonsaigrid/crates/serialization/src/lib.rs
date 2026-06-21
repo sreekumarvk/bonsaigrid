@@ -9,6 +9,7 @@
 //! the server can derive the same partition the client routed to — needed for
 //! queries, backup placement, and TPC zero-contention alignment.
 
+pub mod compact;
 pub mod schema;
 
 pub const PARTITION_HASH_OFFSET: usize = 0;

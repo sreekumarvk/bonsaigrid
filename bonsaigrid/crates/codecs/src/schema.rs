@@ -22,7 +22,7 @@ pub fn decode_schema(frames: &[Frame], start: usize) -> Schema {
         // FieldDescriptor = BEGIN(i), initial[kind@0](i+1), fieldName(i+2), END(i+3)
         let kind = read_i32_le(&frames[i + 1].content, 0);
         let name = decode_string(&frames[i + 2]);
-        fields.push(FieldDescriptor { name, kind });
+        fields.push(FieldDescriptor::new(name, kind));
         i += 4;
     }
     Schema::new(type_name, fields)
