@@ -1,0 +1,9 @@
+[package]
+name = "member"
+edition = "2021"
+version = "0.0.0"
+
+[dependencies]
+store = { path = "../store" }
+io-uring = "0.6"
+libc = "0.2"
