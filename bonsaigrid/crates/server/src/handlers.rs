@@ -267,7 +267,6 @@ fn uuid_response(msg_type: i32, uuid: (i64, i64)) -> Vec<Frame> {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub fn dispatch(
     req: Vec<Frame>,
     conn_id: u64,
