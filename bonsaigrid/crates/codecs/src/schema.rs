@@ -105,9 +105,8 @@ mod tests {
         let s = decode_schema(&frames, 1);
         assert_eq!(s.type_name, "person");
         assert_eq!(s.fields.len(), 2);
-        assert_eq!(s.fields[0].name, "name");
-        assert_eq!(s.fields[0].kind, STRING);
-        assert_eq!(s.fields[1].name, "age");
-        assert_eq!(s.fields[1].kind, INT32);
+        // Schema::new sorts fields by name; look them up by name.
+        assert_eq!(s.field("name").unwrap().kind, STRING);
+        assert_eq!(s.field("age").unwrap().kind, INT32);
     }
 }
