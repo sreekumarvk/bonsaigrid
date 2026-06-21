@@ -71,6 +71,13 @@ name = "protocol"
 version = "0.0.0"
 
 [[package]]
+name = "query"
+version = "0.1.0"
+dependencies = [
+ "serialization",
+]
+
+[[package]]
 name = "serialization"
 version = "0.0.0"
 
