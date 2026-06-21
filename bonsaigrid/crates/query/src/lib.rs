@@ -21,10 +21,30 @@
 mod eval;
 pub use eval::eval;
 
-use serialization::compact::FieldValue;
+use serialization::compact::{FieldExtractor, FieldValue};
+use serialization::schema::SchemaService;
+
+/// Run `predicate` over candidate entries and return the matching `(key, value)`
+/// pairs. Today the candidate set is every entry (full scan); an index would
+/// supply a narrower candidate iterator without changing this signature — the
+/// seam for future indexed queries. The predicate is evaluated against the
+/// **value** (Compact records live in the value).
+pub fn scan<I>(
+    predicate: &Predicate,
+    entries: I,
+    schemas: &SchemaService,
+    ex: &dyn FieldExtractor,
+) -> Vec<(Vec<u8>, Vec<u8>)>
+where
+    I: IntoIterator<Item = (Vec<u8>, Vec<u8>)>,
+{
+    entries
+        .into_iter()
+        .filter(|(_, v)| eval(predicate, v, schemas, ex))
+        .collect()
+}
 
 const TYPE_IDS: i32 = -2;
-const FACTORY_PREDICATE: i32 = -20;
 const CLASS_AND: i32 = 1;
 const CLASS_OR: i32 = 2;
 const CLASS_EQUAL: i32 = 3;
@@ -77,7 +97,7 @@ fn decode_object(c: &mut Cur) -> Option<Predicate> {
 /// Decode an IDS body positioned at the `identified` byte.
 fn decode_ids(c: &mut Cur) -> Option<Predicate> {
     let _identified = c.u8()?;
-    let _factory = c.i32()?; // FACTORY_PREDICATE for the kinds we support
+    let _factory = c.i32()?; // -20 (PredicateDataSerializerHook) for the kinds we support
     let class_id = c.i32()?;
     match class_id {
         CLASS_EQUAL => {

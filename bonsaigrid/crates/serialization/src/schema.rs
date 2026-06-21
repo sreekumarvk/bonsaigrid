@@ -79,15 +79,13 @@ impl Schema {
 
         // Booleans bit-packed after the fixed fields.
         let mut bit: i8 = 0;
-        for i in 0..fields.len() {
-            if fields[i].kind == BOOLEAN {
-                fields[i].offset = offset;
-                fields[i].bit = bit;
-                bit += 1;
-                if bit == 8 {
-                    bit = 0;
-                    offset += 1;
-                }
+        for f in fields.iter_mut().filter(|f| f.kind == BOOLEAN) {
+            f.offset = offset;
+            f.bit = bit;
+            bit += 1;
+            if bit == 8 {
+                bit = 0;
+                offset += 1;
             }
         }
         if bit != 0 {

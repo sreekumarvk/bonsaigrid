@@ -9,6 +9,7 @@
 use crate::events::EventBroker;
 use codecs::auth::{self, AuthResponse, MemberTuple};
 use codecs::{cluster_view, map};
+use serialization::compact::CompactExtractor;
 use serialization::schema::SchemaService;
 use protocol::fixed::{read_i32_le, read_i64_le, write_i32_le, write_i64_le, write_u16_le, write_uuid};
 use protocol::frame::{read_message, write_message, Frame, IS_FINAL, IS_NULL, UNFRAGMENTED};
@@ -489,6 +490,27 @@ pub fn dispatch(
             let name = map::decode_name(&req);
             let entries = store.entries(&name);
             vec![map::encode_entry_list_response(75009, &entries)]
+        }
+        // ---- Predicate queries (full scan; Compact values) ----
+        // MapKeySetWithPredicate -> List<Data> (keys of matching entries)
+        75264 => {
+            let (name, pred) = map::decode_name_value(&req);
+            let matches = query::scan(&query::decode(&pred), store.entries(&name), schemas, &CompactExtractor);
+            let keys: Vec<Vec<u8>> = matches.into_iter().map(|(k, _)| k).collect();
+            vec![map::encode_data_list_response(75265, &keys)]
+        }
+        // MapValuesWithPredicate -> List<Data> (values of matching entries)
+        75520 => {
+            let (name, pred) = map::decode_name_value(&req);
+            let matches = query::scan(&query::decode(&pred), store.entries(&name), schemas, &CompactExtractor);
+            let vals: Vec<Vec<u8>> = matches.into_iter().map(|(_, v)| v).collect();
+            vec![map::encode_data_list_response(75521, &vals)]
+        }
+        // MapEntriesWithPredicate -> EntryList<Data,Data> (matching entries)
+        75776 => {
+            let (name, pred) = map::decode_name_value(&req);
+            let matches = query::scan(&query::decode(&pred), store.entries(&name), schemas, &CompactExtractor);
+            vec![map::encode_entry_list_response(75777, &matches)]
         }
         // ---- Topic (pub/sub) ----
         262400 => {

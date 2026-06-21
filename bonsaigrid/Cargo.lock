@@ -90,6 +90,7 @@ dependencies = [
  "io-uring",
  "libc",
  "protocol",
+ "query",
  "serialization",
  "socket2",
  "store",
