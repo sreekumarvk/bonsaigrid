@@ -212,6 +212,13 @@ fn repl(name: &str) -> String {
     format!("\u{1}repl:{name}")
 }
 
+/// Deliver a deferred MapLock (69633) grant to a waiting connection.
+fn grant_lock_to_waiter(broker: &EventBroker, conn_id: u64, corr: i64) {
+    let mut resp = empty_response(69633);
+    set_correlation_id(&mut resp, corr);
+    broker.enqueue(conn_id, write_message(&resp));
+}
+
 /// A response whose initial frame carries a single UUID at offset 13 (after
 /// backupAcks). Used by listener-registration responses that return a
 /// registration id. Since this increment sends no events for these listeners,
@@ -342,12 +349,15 @@ pub fn dispatch(
             vec![empty_response(77057)]
         }
         // ---- Per-key locking ----
-        // MapLock (blocking in Hazelcast): best-effort grant if free/reentrant.
+        // MapLock (blocking): grant now, or defer the response until granted.
         69632 => {
             let (name, key) = map::decode_name_key(&req);
             let tid = read_i64_le(&req[0].content, 16);
-            store.try_lock(&name, &key, tid);
-            vec![empty_response(69633)]
+            if store.lock_or_wait(&name, &key, tid, conn_id, corr) {
+                vec![empty_response(69633)]
+            } else {
+                vec![] // queued: the granting unlock will deliver the response
+            }
         }
         // MapTryLock -> bool
         69888 => {
@@ -355,11 +365,13 @@ pub fn dispatch(
             let tid = read_i64_le(&req[0].content, 16);
             vec![map::bool_response(69889, store.try_lock(&name, &key, tid))]
         }
-        // MapUnlock -> void
+        // MapUnlock -> void (may grant a waiter, delivered out-of-band)
         70400 => {
             let (name, key) = map::decode_name_key(&req);
             let tid = read_i64_le(&req[0].content, 16);
-            store.unlock(&name, &key, tid);
+            if let Some((wc, wcorr)) = store.unlock(&name, &key, tid) {
+                grant_lock_to_waiter(broker, wc, wcorr);
+            }
             vec![empty_response(70401)]
         }
         // MapIsLocked -> bool
@@ -370,7 +382,9 @@ pub fn dispatch(
         // MapForceUnlock -> void
         78592 => {
             let (name, key) = map::decode_name_key(&req);
-            store.force_unlock(&name, &key);
+            if let Some((wc, wcorr)) = store.force_unlock(&name, &key) {
+                grant_lock_to_waiter(broker, wc, wcorr);
+            }
             vec![empty_response(78593)]
         }
         // MapGetAll -> EntryList<Data,Data>

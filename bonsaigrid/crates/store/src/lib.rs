@@ -330,10 +330,8 @@ pub struct Store {
     // MultiMap with Set semantics (no duplicate values per key).
     multimaps: Mutex<HashMap<String, HashMap<Vec<u8>, Vec<Vec<u8>>>>>,
     lists: Mutex<HashMap<String, Vec<Vec<u8>>>>,
-    // Per-(map,key) reentrant lock: (owner thread id, hold count). Owner identity
-    // is the request's threadId; full (clientUuid, threadId) ownership is a
-    // refinement. Non-blocking: tryLock returns immediately.
-    locks: Mutex<HashMap<(String, Vec<u8>), (i64, u32)>>,
+    // Per-(map,key) reentrant lock with a FIFO waiter queue for blocking lock().
+    locks: Mutex<HashMap<(String, Vec<u8>), LockState>>,
     ringbuffers: Mutex<HashMap<String, Ring>>,
     pncounters: Mutex<HashMap<String, i64>>,
     flake: Mutex<HashMap<String, i64>>,
@@ -344,6 +342,12 @@ struct Ring {
     head: i64,
     tail: i64,
     cap: i64,
+}
+
+struct LockState {
+    owner: i64,
+    count: u32,
+    waiters: VecDeque<(u64, i64, i64)>, // (conn_id, correlation_id, thread_id)
 }
 
 impl Default for Store {
@@ -447,37 +451,76 @@ impl Store {
         let mut g = self.locks.lock().unwrap();
         let k = (map.to_string(), key.to_vec());
         match g.get_mut(&k) {
-            Some((owner, count)) => {
-                if *owner == tid {
-                    *count += 1; // reentrant
+            Some(s) => {
+                if s.owner == tid {
+                    s.count += 1; // reentrant
                     true
                 } else {
                     false
                 }
             }
             None => {
-                g.insert(k, (tid, 1));
+                g.insert(k, LockState { owner: tid, count: 1, waiters: VecDeque::new() });
                 true
             }
         }
     }
-    pub fn unlock(&self, map: &str, key: &[u8], tid: i64) {
+    /// Blocking lock: grant immediately if free/reentrant (returns true), else
+    /// queue (conn_id, corr) and return false — the caller defers its response
+    /// until granted on a later unlock.
+    pub fn lock_or_wait(&self, map: &str, key: &[u8], tid: i64, conn_id: u64, corr: i64) -> bool {
         let mut g = self.locks.lock().unwrap();
         let k = (map.to_string(), key.to_vec());
-        if let Some((owner, count)) = g.get_mut(&k) {
-            if *owner == tid {
-                *count -= 1;
-                if *count == 0 {
+        match g.get_mut(&k) {
+            Some(s) => {
+                if s.owner == tid {
+                    s.count += 1;
+                    true
+                } else {
+                    s.waiters.push_back((conn_id, corr, tid));
+                    false
+                }
+            }
+            None => {
+                g.insert(k, LockState { owner: tid, count: 1, waiters: VecDeque::new() });
+                true
+            }
+        }
+    }
+    /// Release; if a waiter is granted, returns (conn_id, corr) to wake.
+    pub fn unlock(&self, map: &str, key: &[u8], tid: i64) -> Option<(u64, i64)> {
+        let mut g = self.locks.lock().unwrap();
+        let k = (map.to_string(), key.to_vec());
+        if let Some(s) = g.get_mut(&k) {
+            if s.owner == tid {
+                s.count -= 1;
+                if s.count == 0 {
+                    if let Some((c, corr, wtid)) = s.waiters.pop_front() {
+                        s.owner = wtid;
+                        s.count = 1;
+                        return Some((c, corr));
+                    }
                     g.remove(&k);
                 }
             }
         }
+        None
     }
     pub fn is_locked(&self, map: &str, key: &[u8]) -> bool {
         self.locks.lock().unwrap().contains_key(&(map.to_string(), key.to_vec()))
     }
-    pub fn force_unlock(&self, map: &str, key: &[u8]) {
-        self.locks.lock().unwrap().remove(&(map.to_string(), key.to_vec()));
+    pub fn force_unlock(&self, map: &str, key: &[u8]) -> Option<(u64, i64)> {
+        let mut g = self.locks.lock().unwrap();
+        let k = (map.to_string(), key.to_vec());
+        if let Some(s) = g.get_mut(&k) {
+            if let Some((c, corr, wtid)) = s.waiters.pop_front() {
+                s.owner = wtid;
+                s.count = 1;
+                return Some((c, corr));
+            }
+            g.remove(&k);
+        }
+        None
     }
 
     // ---- Distributed List ----

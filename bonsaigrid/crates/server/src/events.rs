@@ -112,6 +112,12 @@ impl EventBroker {
         }
     }
 
+    /// Queue an already-encoded message for a connection (e.g. a deferred
+    /// blocking-lock grant). Delivered by the reactor like any other event.
+    pub fn enqueue(&self, conn_id: u64, bytes: Vec<u8>) {
+        self.inner.lock().unwrap().queues.entry(conn_id).or_default().push(bytes);
+    }
+
     /// Take all pending event-message bytes for a connection.
     pub fn drain(&self, conn_id: u64) -> Vec<Vec<u8>> {
         self.inner.lock().unwrap().queues.remove(&conn_id).unwrap_or_default()
