@@ -16,6 +16,8 @@ REST health. Stock Python + Java (unisocket/smart/TPC) conformance.
 - ✅ **Epic 2 complete** — entry listeners, same- and cross-connection (reactor timer).
 - 🟡 **Epic 1** — server-side partitioning done & verified (1000/1000); **Portable/Compact field decode remains** (the query unblocker).
 - 🟡 **Epic 5** — core IMap + TTL + bulk + **locking (incl blocking)** + **near-cache invalidation** done; queries/indexes/entry-processors/eviction remain (need Epic 1 field decode).
+- 🟡 **Epic 12** — metrics registry + Prometheus /metrics (full MC protocol/JMX remains, needs the MC GUI to verify).
+- 🟡 **Epic 13** — real auth (cluster-name gate + optional user/pass) done; TLS remains (io_uring stream-cipher integration).
 - ✅ **Epic 6 complete** — Queue, Set, List, MultiMap, Topic, ReplicatedMap, Ringbuffer, PNCounter, FlakeId (9 structures).
 - The remaining tails of **Epic 1 + Epic 5** are one coupled subsystem — a
   **serialization + query engine** (Compact/Portable field decode → predicate

@@ -30,6 +30,15 @@ fn env_usize(key: &str, default: usize) -> usize {
     std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
 }
 
+/// Auth config: cluster name (default "dev") + optional username/password.
+fn auth_cfg() -> (String, Option<String>, Option<String>) {
+    (
+        std::env::var("BONSAI_CLUSTER").unwrap_or_else(|_| "dev".into()),
+        std::env::var("BONSAI_USER").ok(),
+        std::env::var("BONSAI_PASS").ok(),
+    )
+}
+
 fn cluster_members(n: usize) -> Vec<Member> {
     (0..n)
         .map(|i| Member {
@@ -42,10 +51,14 @@ fn cluster_members(n: usize) -> Vec<Member> {
 
 fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
     let port = BASE_PORT + self_index as i32;
+    let (cluster_name, username, password) = auth_cfg();
     let cfg = Arc::new(Cfg {
         members: cluster_members(members),
         self_index,
         tpc_ports: Vec::new(), // single core per member in this mode
+        cluster_name,
+        username,
+        password,
     });
     let store = Arc::new(store::Store::with_shards(1));
     let broker = Arc::new(server::events::EventBroker::new(cfg.members[cfg.self_index].uuid));
@@ -91,10 +104,14 @@ fn run_single_node() -> std::io::Result<()> {
 
     let addr: SocketAddr = "127.0.0.1:5701".parse().unwrap();
     let tpc_ports: Vec<i32> = (0..cores as i32).map(|i| TPC_BASE + i).collect();
+    let (cluster_name, username, password) = auth_cfg();
     let cfg = Arc::new(Cfg {
         members: vec![Member { uuid: (1, 1), host: "127.0.0.1".into(), port: BASE_PORT }],
         self_index: 0,
         tpc_ports: tpc_ports.clone(),
+        cluster_name,
+        username,
+        password,
     });
     let store = Arc::new(store::Store::with_shards(cores));
     // One broker + metrics registry shared across this member's cores.

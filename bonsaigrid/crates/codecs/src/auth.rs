@@ -12,6 +12,8 @@ use protocol::primitives::{decode_string, initial_frame, null_frame, string_fram
 
 pub struct AuthRequest {
     pub cluster_name: String,
+    pub username: Option<String>,
+    pub password: Option<String>,
     pub client_type: String,
     pub serialization_version: u8,
     pub routing_mode: u8,
@@ -23,11 +25,12 @@ pub fn decode_request(frames: &[Frame]) -> AuthRequest {
     let routing_mode = if initial.len() > 34 { initial[34] } else { 0 };
     // Var-frames: each nullable field is exactly one frame, so positions are fixed:
     // [1]=clusterName [2]=username [3]=password [4]=clientType ...
-    let cluster_name = decode_string(&frames[1]);
-    let client_type = decode_string(&frames[4]);
+    let nullable = |f: &Frame| if f.is_null() { None } else { Some(decode_string(f)) };
     AuthRequest {
-        cluster_name,
-        client_type,
+        cluster_name: decode_string(&frames[1]),
+        username: nullable(&frames[2]),
+        password: nullable(&frames[3]),
+        client_type: decode_string(&frames[4]),
         serialization_version,
         routing_mode,
     }

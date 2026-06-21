@@ -137,6 +137,11 @@ pub struct Cfg {
     pub members: Vec<Member>,
     pub self_index: usize,
     pub tpc_ports: Vec<i32>,
+    /// Cluster name a client must present (the Hazelcast OSS auth gate).
+    pub cluster_name: String,
+    /// Optional username/password; when set, clients must match.
+    pub username: Option<String>,
+    pub password: Option<String>,
 }
 
 impl Cfg {
@@ -146,7 +151,26 @@ impl Cfg {
             members: vec![Member { uuid: (1, 1), host: "127.0.0.1".into(), port: 5701 }],
             self_index: 0,
             tpc_ports: Vec::new(),
+            cluster_name: "dev".into(),
+            username: None,
+            password: None,
         }
+    }
+
+    /// Authentication status for a request (0 AUTHENTICATED, 1 CREDENTIALS_FAILED,
+    /// 3 NOT_ALLOWED_IN_CLUSTER).
+    fn auth_status(&self, req: &codecs::auth::AuthRequest) -> u8 {
+        if req.cluster_name != self.cluster_name {
+            return 3;
+        }
+        if let Some(user) = &self.username {
+            if req.username.as_deref() != Some(user.as_str())
+                || req.password.as_deref() != self.password.as_deref()
+            {
+                return 1;
+            }
+        }
+        0
     }
 
     fn member_tuples(&self) -> Vec<MemberTuple> {
@@ -174,7 +198,7 @@ impl Cfg {
     }
 }
 
-fn auth_response(cfg: &Cfg) -> Vec<Frame> {
+fn auth_response(cfg: &Cfg, status: u8) -> Vec<Frame> {
     let mem = cfg.member_tuples();
     let parts = cfg.partition_table();
     let me = cfg.self_member();
@@ -184,7 +208,7 @@ fn auth_response(cfg: &Cfg) -> Vec<Frame> {
         (Some(cfg.tpc_ports.as_slice()), Some(TPC_TOKEN))
     };
     auth::encode_response(&AuthResponse {
-        status: 0, // AUTHENTICATED
+        status,
         member_uuid: me.uuid,
         serialization_version: 1,
         partition_count: PARTITION_COUNT,
@@ -239,7 +263,10 @@ pub fn dispatch(
 ) -> Vec<Vec<Frame>> {
     let corr = correlation_id(&req);
     let mut replies: Vec<Vec<Frame>> = match msg_type(&req) {
-        256 => vec![auth_response(cfg)],
+        256 => {
+            let areq = codecs::auth::decode_request(&req);
+            vec![auth_response(cfg, cfg.auth_status(&areq))]
+        }
         // MapAddNearCacheInvalidationListener: register + registration id.
         81664 => {
             let name = map::decode_name(&req);
@@ -684,6 +711,20 @@ mod tests {
         f
     }
 
+    fn auth_request(corr: i64) -> Vec<Frame> {
+        let mut c = vec![0u8; 36];
+        write_i32_le(&mut c, 0, 256);
+        let mut f = vec![
+            Frame { flags: UNFRAGMENTED, content: c },
+            protocol::primitives::string_frame("dev"), // clusterName matches default
+            protocol::primitives::null_frame(),        // username
+            protocol::primitives::null_frame(),        // password
+            protocol::primitives::string_frame("rust-test"),
+        ];
+        set_correlation_id(&mut f, corr);
+        f
+    }
+
     fn cluster_cfg(n: usize, self_index: usize) -> Cfg {
         Cfg {
             members: (0..n)
@@ -695,6 +736,9 @@ mod tests {
                 .collect(),
             self_index,
             tpc_ports: Vec::new(),
+            cluster_name: "dev".into(),
+            username: None,
+            password: None,
         }
     }
 
@@ -716,7 +760,7 @@ mod tests {
     fn auth_reports_self_member_identity() {
         // member index 2 should report its own uuid (1,3) in the response header.
         let cfg = cluster_cfg(3, 2);
-        let out = dispatch(request(256, 1), 0, &Store::new(), &cfg, &EventBroker::new((1, 1)));
+        let out = dispatch(auth_request(1), 0, &Store::new(), &cfg, &EventBroker::new((1, 1)));
         assert_eq!(msg_type(&out[0]), 257);
         // member_uuid lives at offset 14 (after backupAcks@12 + status@13).
         assert_eq!(protocol::fixed::read_uuid(&out[0][0].content, 14), Some((1, 3)));
@@ -739,7 +783,7 @@ mod tests {
     #[test]
     fn auth_replies_257_with_echoed_correlation() {
         let store = Store::new();
-        let out = dispatch(request(256, 99), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)));
+        let out = dispatch(auth_request(99), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)));
         assert_eq!(out.len(), 1);
         assert_eq!(msg_type(&out[0]), 257);
         assert_eq!(correlation_id(&out[0]), 99);
