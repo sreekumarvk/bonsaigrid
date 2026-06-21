@@ -127,7 +127,7 @@ const TPC_TOKEN: &[u8] = b"bonsaigrid-tpc-token";
 pub const REGISTRATION_UUID: (i64, i64) = (3, 3);
 
 /// One cluster member.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Member {
     pub uuid: (i64, i64),
     pub host: String,
