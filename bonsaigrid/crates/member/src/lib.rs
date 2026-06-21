@@ -4,4 +4,5 @@
 //! is BonsaiGrid-internal and may change freely.
 
 pub mod replication;
+pub mod transport;
 pub mod wire;
