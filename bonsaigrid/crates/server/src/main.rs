@@ -10,8 +10,11 @@
 //!     index, to form the cluster; a stock smart client routes keys to owners.
 
 use server::handlers::{Cfg, Member};
+use server::membership::Cluster;
 use socket2::{Domain, Protocol, Socket, Type};
+use std::cell::RefCell;
 use std::net::{SocketAddr, TcpListener};
+use std::rc::Rc;
 use std::sync::Arc;
 
 const TPC_BASE: i32 = 12000;
@@ -60,12 +63,15 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
         username,
         password,
     });
+    // Synchronous backup count K (default 1, capped at N-1).
+    let backups = env_usize("BONSAI_BACKUPS", 1).min(members.saturating_sub(1));
+    let cluster = Rc::new(RefCell::new(Cluster::new(cluster_members(members), backups)));
     let store = Arc::new(store::Store::with_shards(1));
     let broker = Arc::new(server::events::EventBroker::new(cfg.members[cfg.self_index].uuid));
     let schemas = Arc::new(serialization::schema::SchemaService::new());
     let listener = reuseport_listener(format!("127.0.0.1:{port}").parse().unwrap())?;
     eprintln!(
-        "BonsaiGrid member {self_index}/{members} listening on 127.0.0.1:{port} (single core)"
+        "BonsaiGrid member {self_index}/{members} listening on 127.0.0.1:{port} (single core, K={backups} backups)"
     );
     if let Some(id) = core_affinity::get_core_ids().and_then(|v| v.get(self_index % 64).copied()) {
         core_affinity::set_for_current(id);
@@ -74,11 +80,13 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
     let (eb, cb) = (broker.clone(), broker.clone());
     let metrics = Arc::new(server::metrics::Metrics::new());
     let (md, mh) = (metrics.clone(), metrics.clone());
+    let cl = cluster.clone();
     server::reactor::run(
         vec![listener],
         move |msg, conn_id, out| {
             md.inc_request();
-            server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, &schemas, out)
+            let cluster = cl.borrow();
+            server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, &schemas, &cluster, out)
         },
         move |path| http_route(path, n, &mh),
         move |conn_id, out| {
@@ -115,6 +123,8 @@ fn run_single_node() -> std::io::Result<()> {
         password,
     });
     let store = Arc::new(store::Store::with_shards(cores));
+    // Single-member cluster, no backups; shared read-only across cores.
+    let cluster = Arc::new(Cluster::new(cfg.members.clone(), 0));
     // One broker + metrics registry shared across this member's cores.
     let broker = Arc::new(server::events::EventBroker::new(cfg.members[0].uuid));
     let metrics = Arc::new(server::metrics::Metrics::new());
@@ -132,6 +142,7 @@ fn run_single_node() -> std::io::Result<()> {
         let broker = broker.clone();
         let metrics = metrics.clone();
         let schemas = schemas.clone();
+        let cluster = cluster.clone();
         let main_listener = reuseport_listener(addr)?;
         let tpc_addr: SocketAddr = format!("127.0.0.1:{}", TPC_BASE + i as i32).parse().unwrap();
         let tpc_listener = reuseport_listener(tpc_addr)?;
@@ -146,7 +157,7 @@ fn run_single_node() -> std::io::Result<()> {
                 vec![main_listener, tpc_listener],
                 move |msg, conn_id, out| {
                     md.inc_request();
-                    server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, &schemas, out)
+                    server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, &schemas, &cluster, out)
                 },
                 move |path| http_route(path, 1, &mh),
                 move |conn_id, out| {
