@@ -96,20 +96,40 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
     } else {
         None
     };
+    // Shared by the dispatch closure (replicate) and the http closure (promote);
+    // both run on this single reactor thread, so Rc is sufficient.
+    let replicator = Rc::new(replicator);
 
     let n = members;
     let (eb, cb) = (broker.clone(), broker.clone());
     let metrics = Arc::new(server::metrics::Metrics::new());
     let (md, mh) = (metrics.clone(), metrics.clone());
-    let cl = cluster.clone();
+    let cl_d = cluster.clone();
+    let rep_d = replicator.clone();
+    let cl_h = cluster.clone();
+    let rep_h = replicator.clone();
     server::reactor::run(
         vec![listener],
         move |msg, conn_id, out| {
             md.inc_request();
-            let cluster = cl.borrow();
-            server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, &schemas, &cluster, replicator.as_ref(), out)
+            let cluster = cl_d.borrow();
+            server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, &schemas, &cluster, rep_d.as_ref().as_ref(), out)
         },
-        move |path| http_route(path, n, &mh),
+        move |path| {
+            if let Some(dead) = parse_promote(path) {
+                cl_h.borrow_mut().promote(dead);
+                if let Some(r) = rep_h.as_ref() {
+                    r.send_membership(cl_h.borrow().clone());
+                }
+                let plist = cl_h.borrow().partition_list_version;
+                return (
+                    200,
+                    "application/json",
+                    format!("{{\"promoted\":{dead},\"partitionListVersion\":{plist}}}"),
+                );
+            }
+            http_route(path, n, &mh)
+        },
         move |conn_id, out| {
             for ev in eb.drain(conn_id) {
                 out.extend_from_slice(&ev);
@@ -117,6 +137,14 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
         },
         move |conn_id| cb.drop_conn(conn_id),
     )
+}
+
+/// Parse `/cluster/promote?dead=<index>` (the manual failover trigger; Phase D's
+/// detector will call the same `Cluster::promote`).
+fn parse_promote(path: &str) -> Option<usize> {
+    let rest = path.strip_prefix("/cluster/promote")?;
+    let q = rest.strip_prefix("?dead=").or_else(|| rest.strip_prefix("/?dead="))?;
+    q.parse().ok()
 }
 
 /// HTTP routing on the main port: health endpoints + a Prometheus `/metrics`.
