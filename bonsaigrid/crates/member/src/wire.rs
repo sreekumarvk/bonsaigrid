@@ -36,6 +36,10 @@ pub enum Msg {
     MigrateChunk { generation: u64, partition: i32, entries: Vec<(String, Vec<u8>, Vec<u8>, u64)> },
     /// Migration of `partition` is complete.
     MigrateEnd { generation: u64, partition: i32 },
+    /// Synchronous backup of a partition's auxiliary-structure state.
+    BackupState { op_id: u64, partition: i32, payload: Vec<u8> },
+    /// Auxiliary-structure state for `partition` during migration.
+    MigrateAux { generation: u64, partition: i32, payload: Vec<u8> },
 }
 
 const KIND_HELLO: u8 = 0;
@@ -48,6 +52,8 @@ const KIND_VIEW: u8 = 6;
 const KIND_MIG_START: u8 = 7;
 const KIND_MIG_CHUNK: u8 = 8;
 const KIND_MIG_END: u8 = 9;
+const KIND_BACKUP_STATE: u8 = 10;
+const KIND_MIG_AUX: u8 = 11;
 
 fn put_u32(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_be_bytes());
@@ -142,6 +148,18 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             body.push(KIND_MIG_END);
             put_u64(&mut body, *generation);
             put_u32(&mut body, *partition as u32);
+        }
+        Msg::BackupState { op_id, partition, payload } => {
+            body.push(KIND_BACKUP_STATE);
+            put_u64(&mut body, *op_id);
+            put_u32(&mut body, *partition as u32);
+            put_blob(&mut body, payload);
+        }
+        Msg::MigrateAux { generation, partition, payload } => {
+            body.push(KIND_MIG_AUX);
+            put_u64(&mut body, *generation);
+            put_u32(&mut body, *partition as u32);
+            put_blob(&mut body, payload);
         }
     }
     let mut frame = Vec::with_capacity(4 + body.len());
@@ -253,6 +271,12 @@ pub fn decode(buf: &[u8]) -> Option<(Msg, usize)> {
             Msg::MigrateChunk { generation, partition, entries }
         }
         KIND_MIG_END => Msg::MigrateEnd { generation: r.u64()?, partition: r.u32()? as i32 },
+        KIND_BACKUP_STATE => {
+            Msg::BackupState { op_id: r.u64()?, partition: r.u32()? as i32, payload: r.blob()? }
+        }
+        KIND_MIG_AUX => {
+            Msg::MigrateAux { generation: r.u64()?, partition: r.u32()? as i32, payload: r.blob()? }
+        }
         _ => return None,
     };
     Some((msg, total))
@@ -291,6 +315,8 @@ mod tests {
                 entries: vec![("people".into(), b"k".to_vec(), b"v".to_vec(), 42)],
             },
             Msg::MigrateEnd { generation: 4, partition: 17 },
+            Msg::BackupState { op_id: 8, partition: 5, payload: vec![1, 2, 3] },
+            Msg::MigrateAux { generation: 4, partition: 5, payload: vec![9, 9] },
         ];
         for m in msgs {
             let b = encode(&m);

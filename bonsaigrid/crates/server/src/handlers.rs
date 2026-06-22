@@ -249,9 +249,63 @@ fn error_response(error_code: i32, class_name: &str, message: &str) -> Vec<Frame
     ]
 }
 
-/// IMap write ops gated by quorum (reject below the minimum cluster size).
+/// Write ops gated by quorum (reject below the minimum cluster size): IMap +
+/// auxiliary-structure mutations.
 fn is_quorum_gated_write(msg_type: i32) -> bool {
-    matches!(msg_type, 65792 | 66304 | 67840 | 76800) // put, remove, delete, putAll
+    matches!(
+        msg_type,
+        65792 | 66304 | 67840 | 76800        // IMap: put, remove, delete, putAll
+            | 328704 | 328960 | 329984       // list: add, remove, clear
+            | 394240 | 394496 | 395520       // set: add, remove, clear
+            | 196864 | 197888 | 197632 | 200448 // queue: offer, poll, remove, clear
+            | 131328 | 131840                // multimap: put, remove
+            | 1508864                        // ringbuffer: add
+            | 1901056                        // pncounter: add
+    )
+}
+
+/// Synchronously replicate a partition's auxiliary-structure `payload` to its
+/// backups, deferring the client reply until they ack (mirrors `replicate_write`
+/// but ships a `BackupState`). `resp` must already carry the correlation id.
+fn replicate_state(
+    replicator: Option<&Replicator>,
+    cluster: &Cluster,
+    conn_id: u64,
+    resp: &[Frame],
+    partition: i32,
+    payload: Vec<u8>,
+) -> bool {
+    let Some(rep) = replicator else { return false };
+    if !rep.has_backups() || cluster.backups_of(partition).is_empty() {
+        return false;
+    }
+    rep.replicate(partition, conn_id, write_message(resp), move |op| Msg::BackupState {
+        op_id: op,
+        partition,
+        payload,
+    })
+}
+
+/// Finalize an auxiliary-structure mutation: set the correlation id, then either
+/// defer (replicate the structure's partition state to backups) or reply now.
+#[allow(clippy::too_many_arguments)]
+fn aux_reply(
+    name: &str,
+    mut resp: Vec<Frame>,
+    corr: i64,
+    store: &Store,
+    cluster: &Cluster,
+    replicator: Option<&Replicator>,
+    conn_id: u64,
+) -> Vec<Vec<Frame>> {
+    set_correlation_id(&mut resp, corr);
+    let partition = store::partition_for_name(name, PARTITION_COUNT);
+    let payload = store.aux_state_for_partition(partition, PARTITION_COUNT);
+    if replicate_state(replicator, cluster, conn_id, &resp, partition, payload) {
+        vec![] // deferred: delivered after the backup installs the state
+    } else {
+        vec![resp]
+    }
 }
 
 /// Hand a mutation to the member thread for synchronous backup replication.
@@ -611,11 +665,13 @@ pub fn dispatch(
         // ---- Distributed Set ----
         394240 => {
             let (name, value) = map::decode_name_value(&req);
-            vec![map::bool_response(394241, store.set_add(&name, value))]
+            let r = map::bool_response(394241, store.set_add(&name, value));
+            aux_reply(&name, r, corr, store, cluster, replicator, conn_id)
         }
         394496 => {
             let (name, value) = map::decode_name_value(&req);
-            vec![map::bool_response(394497, store.set_remove(&name, &value))]
+            let r = map::bool_response(394497, store.set_remove(&name, &value));
+            aux_reply(&name, r, corr, store, cluster, replicator, conn_id)
         }
         393728 => {
             let (name, value) = map::decode_name_value(&req);
@@ -632,14 +688,15 @@ pub fn dispatch(
         395520 => {
             let name = map::decode_name(&req);
             store.set_clear(&name);
-            vec![empty_response(395521)]
+            aux_reply(&name, empty_response(395521), corr, store, cluster, replicator, conn_id)
         }
         // ---- MultiMap (Set semantics) ----
         131328 => {
             let name = map::decode_name(&req);
             let key = req[2].content.clone();
             let value = req[3].content.clone();
-            vec![map::bool_response(131329, store.mm_put(&name, key, value))]
+            let r = map::bool_response(131329, store.mm_put(&name, key, value));
+            aux_reply(&name, r, corr, store, cluster, replicator, conn_id)
         }
         131584 => {
             let (name, key) = map::decode_name_key(&req);
@@ -647,7 +704,8 @@ pub fn dispatch(
         }
         131840 => {
             let (name, key) = map::decode_name_key(&req);
-            vec![map::encode_data_list_response(131841, &store.mm_remove(&name, &key))]
+            let r = map::encode_data_list_response(131841, &store.mm_remove(&name, &key));
+            aux_reply(&name, r, corr, store, cluster, replicator, conn_id)
         }
         133632 => {
             let name = map::decode_name(&req);
@@ -660,7 +718,8 @@ pub fn dispatch(
         // ---- Distributed List ----
         328704 => {
             let (name, value) = map::decode_name_value(&req);
-            vec![map::bool_response(328705, store.list_add(&name, value))]
+            let r = map::bool_response(328705, store.list_add(&name, value));
+            aux_reply(&name, r, corr, store, cluster, replicator, conn_id)
         }
         331520 => {
             let name = map::decode_name(&req);
@@ -677,7 +736,8 @@ pub fn dispatch(
         }
         328960 => {
             let (name, value) = map::decode_name_value(&req);
-            vec![map::bool_response(328961, store.list_remove(&name, &value))]
+            let r = map::bool_response(328961, store.list_remove(&name, &value));
+            aux_reply(&name, r, corr, store, cluster, replicator, conn_id)
         }
         330240 => {
             let name = map::decode_name(&req);
@@ -690,16 +750,18 @@ pub fn dispatch(
         329984 => {
             let name = map::decode_name(&req);
             store.list_clear(&name);
-            vec![empty_response(329985)]
+            aux_reply(&name, empty_response(329985), corr, store, cluster, replicator, conn_id)
         }
         // ---- Distributed Queue ----
         196864 => {
             let (name, value) = map::decode_name_value(&req);
-            vec![map::bool_response(196865, store.queue_offer(&name, value))]
+            let r = map::bool_response(196865, store.queue_offer(&name, value));
+            aux_reply(&name, r, corr, store, cluster, replicator, conn_id)
         }
         197888 => {
             let name = map::decode_name(&req);
-            vec![map::data_response(197889, store.queue_poll(&name).as_deref())]
+            let r = map::data_response(197889, store.queue_poll(&name).as_deref());
+            aux_reply(&name, r, corr, store, cluster, replicator, conn_id)
         }
         198400 => {
             let name = map::decode_name(&req);
@@ -711,7 +773,8 @@ pub fn dispatch(
         }
         197632 => {
             let (name, value) = map::decode_name_value(&req);
-            vec![map::bool_response(197633, store.queue_remove(&name, &value))]
+            let r = map::bool_response(197633, store.queue_remove(&name, &value));
+            aux_reply(&name, r, corr, store, cluster, replicator, conn_id)
         }
         199424 => {
             let (name, value) = map::decode_name_value(&req);
@@ -724,7 +787,7 @@ pub fn dispatch(
         200448 => {
             let name = map::decode_name(&req);
             store.queue_clear(&name);
-            vec![empty_response(200449)]
+            aux_reply(&name, empty_response(200449), corr, store, cluster, replicator, conn_id)
         }
         // ---- ReplicatedMap (single-node: an IMap in a private namespace) ----
         852224 => {
@@ -769,7 +832,8 @@ pub fn dispatch(
         // ---- Ringbuffer ----
         1508864 => {
             let (n, v) = map::decode_name_value(&req);
-            vec![map::long_response(1508865, store.rb_add(&n, v))]
+            let r = map::long_response(1508865, store.rb_add(&n, v));
+            aux_reply(&n, r, corr, store, cluster, replicator, conn_id)
         }
         1509120 => {
             let n = map::decode_name(&req);
@@ -794,7 +858,8 @@ pub fn dispatch(
             let get_before = req[0].content[24] == 1;
             let uuid = cfg.members[cfg.self_index].uuid;
             let v = store.pn_add(&n, delta, get_before);
-            vec![map::pncounter_response(1901057, v, 1, uuid, store.pn_tick())]
+            let r = map::pncounter_response(1901057, v, 1, uuid, store.pn_tick());
+            aux_reply(&n, r, corr, store, cluster, replicator, conn_id)
         }
         // ---- FlakeIdGenerator ----
         1835264 => {

@@ -175,6 +175,13 @@ impl Handler for MemberHandler {
                     self.store.put_merge(&map, &key, &val, 0, stamp, self.merge_latest);
                 }
             }
+            Msg::BackupState { op_id, payload, .. } => {
+                self.store.install_aux_state(&payload); // backup side: install aux state, then ack
+                outbox.push((src, Msg::Ack { op_id }));
+            }
+            Msg::MigrateAux { payload, .. } => {
+                self.store.install_aux_state(&payload);
+            }
             Msg::MigrateStart { .. } | Msg::MigrateEnd { .. } => {}
             Msg::Hello { .. } => {}
         }
