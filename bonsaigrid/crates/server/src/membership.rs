@@ -150,12 +150,17 @@ impl Cluster {
         }
     }
 
-    /// Add (or revive) a member. Returns the assigned join_id.
-    pub fn add_member(&mut self, mut info: MemberInfo) -> u64 {
+    /// Add (or revive) a member. Returns the assigned join_id, or `None` if the
+    /// member was already present and alive (no change — avoids churn on repeated
+    /// JoinRequests).
+    pub fn add_member(&mut self, mut info: MemberInfo) -> Option<u64> {
         if let Some(i) = self.index_of_uuid(info.uuid) {
+            if self.alive[i] {
+                return None; // already a live member
+            }
             self.alive[i] = true; // revive a rejoining member
             self.bump();
-            return self.members[i].join_id;
+            return Some(self.members[i].join_id);
         }
         if info.join_id == 0 || self.index_of_join(info.join_id).is_some() {
             info.join_id = self.max_join_id() + 1;
@@ -164,7 +169,7 @@ impl Cluster {
         self.members.push(info);
         self.alive.push(true);
         self.bump();
-        jid
+        Some(jid)
     }
 
     /// Apply a master's published view (members **with** alive flags / tombstones)
@@ -258,7 +263,7 @@ mod tests {
     fn add_member_appends_join_id() {
         let mut c = Cluster::new(vec![m(0), m(1)], 1, 1);
         let jid = c.add_member(MemberInfo::new((1, 99), "127.0.0.1".into(), 5799, 7799, 0));
-        assert_eq!(jid, 2); // max(0,1)+1
+        assert_eq!(jid, Some(2)); // max(0,1)+1
         assert_eq!(c.master(), Some(0));
     }
 

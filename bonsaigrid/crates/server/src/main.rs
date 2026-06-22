@@ -72,9 +72,13 @@ fn bootstrap_members(n: usize) -> Vec<server::membership::MemberInfo> {
 
 fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
     let port = BASE_PORT + self_index as i32;
+    // A joiner (index beyond the bootstrap set) asks the master to admit it at
+    // runtime; `total` slots cover the bootstrap members plus this joiner.
+    let joining = self_index >= members;
+    let total = members.max(self_index + 1);
     let (cluster_name, username, password) = auth_cfg();
     let cfg = Arc::new(Cfg {
-        members: cluster_members(members),
+        members: cluster_members(total),
         self_index,
         tpc_ports: Vec::new(), // single core per member in this mode
         cluster_name,
@@ -82,15 +86,17 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
         password,
     });
     // Synchronous backup count K (default 1, capped at N-1).
-    let backups = env_usize("BONSAI_BACKUPS", 1).min(members.saturating_sub(1));
+    let backups = env_usize("BONSAI_BACKUPS", 1).min(total.saturating_sub(1));
     let quorum = env_usize("BONSAI_QUORUM", 1);
-    let cluster = Rc::new(RefCell::new(Cluster::new(bootstrap_members(members), backups, quorum)));
-    let store = Arc::new(store::Store::with_shards(1));
-    let broker = Arc::new(server::events::EventBroker::new(cfg.members[cfg.self_index].uuid));
+    let cluster = Rc::new(RefCell::new(Cluster::new(bootstrap_members(total), backups, quorum)));
+    let self_uuid = cfg.members[self_index].uuid;
+    let join_as = if joining { Some(cluster.borrow().members[self_index].clone()) } else { None };
+    let store = Arc::new(store::Store::with_shards_seed(1, (self_index as u64) << 48));
+    let broker = Arc::new(server::events::EventBroker::new(self_uuid));
     let schemas = Arc::new(serialization::schema::SchemaService::new());
     let listener = reuseport_listener(format!("127.0.0.1:{port}").parse().unwrap())?;
     eprintln!(
-        "BonsaiGrid member {self_index}/{members} listening on 127.0.0.1:{port} (single core, K={backups} backups)"
+        "BonsaiGrid member {self_index} (bootstrap {members}) listening on 127.0.0.1:{port} (single core, K={backups}, joining={joining})"
     );
     if let Some(id) = core_affinity::get_core_ids().and_then(|v| v.get(self_index % 64).copied()) {
         core_affinity::set_for_current(id);
@@ -102,21 +108,22 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
     // (MemberJob) and learns membership changes over a reverse ring (ClusterEvent).
     let hb_interval = env_usize("BONSAI_HB_INTERVAL_MS", 500) as u64;
     let hb_timeout = env_usize("BONSAI_HB_TIMEOUT_MS", 3000) as u64;
-    let merge_latest = server::migration::MergePolicy::from_str(
+    let merge_latest = server::migration::MergePolicy::parse(
         &std::env::var("BONSAI_MERGE").unwrap_or_else(|_| "LatestUpdate".into()),
     )
     .latest_update();
-    let member_ports: Vec<i32> = (0..members).map(|i| MEMBER_BASE + i as i32).collect();
+    let member_ports: Vec<i32> = (0..total).map(|i| MEMBER_BASE + i as i32).collect();
     let (job_tx, job_rx) = spsc::channel::<server::member_thread::MemberJob>(8192);
     let (ev_tx, ev_rx) = spsc::channel::<server::member_thread::ClusterEvent>(1024);
     server::member_thread::spawn(
         self_index,
         member_ports,
         cluster.borrow().clone(),
-        self_index as u64,
+        self_uuid,
         hb_interval,
         hb_timeout,
         merge_latest,
+        join_as,
         store.clone(),
         broker.clone(),
         job_rx,

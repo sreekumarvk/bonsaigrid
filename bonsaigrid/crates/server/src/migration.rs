@@ -18,7 +18,7 @@ pub enum MergePolicy {
 }
 
 impl MergePolicy {
-    pub fn from_str(s: &str) -> MergePolicy {
+    pub fn parse(s: &str) -> MergePolicy {
         match s.to_ascii_lowercase().as_str() {
             "putifabsent" => MergePolicy::PutIfAbsent,
             _ => MergePolicy::LatestUpdate,
@@ -80,9 +80,9 @@ mod tests {
 
     #[test]
     fn merge_policy_from_str() {
-        assert_eq!(MergePolicy::from_str("PutIfAbsent"), MergePolicy::PutIfAbsent);
-        assert_eq!(MergePolicy::from_str("LatestUpdate"), MergePolicy::LatestUpdate);
-        assert_eq!(MergePolicy::from_str("garbage"), MergePolicy::LatestUpdate);
+        assert_eq!(MergePolicy::parse("PutIfAbsent"), MergePolicy::PutIfAbsent);
+        assert_eq!(MergePolicy::parse("LatestUpdate"), MergePolicy::LatestUpdate);
+        assert_eq!(MergePolicy::parse("garbage"), MergePolicy::LatestUpdate);
         assert!(MergePolicy::LatestUpdate.latest_update());
         assert!(!MergePolicy::PutIfAbsent.latest_update());
     }

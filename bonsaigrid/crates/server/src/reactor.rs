@@ -41,6 +41,9 @@ struct Conn {
     rbuf: Box<[u8]>,
     acc: Vec<u8>,
     out: Vec<u8>,
+    // Bytes currently being sent. Separate from `out` so appends to `out` can't
+    // reallocate the memory an in-flight io_uring Send still references.
+    sendbuf: Vec<u8>,
     inflight_send: usize, // bytes currently being sent (0 == no send in flight)
     mode: Mode,
     close_after_flush: bool,
@@ -52,12 +55,15 @@ impl Conn {
     fn new(fd: RawFd) -> Conn {
         let mut out = Vec::new();
         out.reserve_exact(OUT_CAP);
+        let mut sendbuf = Vec::new();
+        sendbuf.reserve_exact(OUT_CAP);
         Conn {
             fd,
             conn_id: CONN_SEQ.fetch_add(1, Ordering::Relaxed),
             rbuf: vec![0u8; RECV_BUF].into_boxed_slice(),
             acc: Vec::with_capacity(RECV_BUF),
             out,
+            sendbuf,
             inflight_send: 0,
             mode: Mode::Unknown,
             close_after_flush: false,
@@ -218,13 +224,22 @@ fn arm_recv(conns: &mut [Option<Conn>], id: usize, pending: &mut Vec<io_uring::s
 
 fn maybe_arm_send(conns: &mut [Option<Conn>], id: usize, pending: &mut Vec<io_uring::squeue::Entry>) {
     let c = conns[id].as_mut().unwrap();
-    if c.inflight_send == 0 && !c.out.is_empty() {
-        c.inflight_send = c.out.len();
-        let entry = opcode::Send::new(types::Fd(c.fd), c.out.as_ptr(), c.out.len() as u32)
-            .build()
-            .user_data(send_ud(id));
-        pending.push(entry);
+    if c.inflight_send > 0 {
+        return; // a send is already in flight on `sendbuf`
     }
+    if c.sendbuf.is_empty() {
+        if c.out.is_empty() {
+            return;
+        }
+        // Move queued bytes into the stable send buffer; `out` keeps taking
+        // appends without disturbing the in-flight send's memory.
+        std::mem::swap(&mut c.sendbuf, &mut c.out);
+    }
+    c.inflight_send = c.sendbuf.len();
+    let entry = opcode::Send::new(types::Fd(c.fd), c.sendbuf.as_ptr(), c.sendbuf.len() as u32)
+        .build()
+        .user_data(send_ud(id));
+    pending.push(entry);
 }
 
 fn on_recv(
@@ -342,9 +357,9 @@ fn on_send(conns: &mut [Option<Conn>], id: usize, res: i32, pending: &mut Vec<io
     }
     let c = conns[id].as_mut().unwrap();
     let sent = res as usize;
-    c.out.drain(0..sent);
+    c.sendbuf.drain(0..sent); // consume the acknowledged prefix (handles partial sends)
     c.inflight_send = 0;
-    if c.out.is_empty() && c.close_after_flush {
+    if c.sendbuf.is_empty() && c.out.is_empty() && c.close_after_flush {
         c.open = false; // HTTP response fully sent -> close
         return;
     }

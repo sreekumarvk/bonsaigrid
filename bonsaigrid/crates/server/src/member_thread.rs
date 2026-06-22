@@ -10,13 +10,17 @@
 
 use crate::cluster_coordinator::Coordinator;
 use crate::events::EventBroker;
-use crate::membership::Cluster;
+use crate::membership::{Cluster, MemberInfo};
 use member::replication::{apply, Pending};
-use member::transport::{Handler, Transport};
+use member::transport::{Handler, Peers, Transport};
 use member::wire::{MemberRec, Msg};
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::sync::Arc;
 use store::Store;
+
+/// Entries per MigrateChunk.
+const MIG_CHUNK: usize = 256;
 
 /// ~5 s at the transport's 1 ms tick: a write whose backups never ack is
 /// force-completed so a dead backup can't wedge the primary.
@@ -89,6 +93,8 @@ struct MemberHandler {
     events: spsc::Producer<ClusterEvent>,
     /// Merge policy for inbound migrated entries (true = LatestUpdate).
     merge_latest: bool,
+    /// Shared transport peer-address table; refreshed from the cluster on change.
+    peers: Peers,
 }
 
 impl MemberHandler {
@@ -96,6 +102,47 @@ impl MemberHandler {
     fn emit_view(&self) {
         let (generation, members) = self.coord.view_recs();
         let _ = self.events.push(ClusterEvent { generation, members });
+    }
+
+    /// Refresh the transport's peer addresses from the current cluster (so a
+    /// runtime-joined member becomes reachable).
+    fn sync_peers(&self) {
+        let mut p = self.peers.borrow_mut();
+        for (i, m) in self.coord.cluster.members.iter().enumerate() {
+            if let Ok(addr) = format!("{}:{}", m.host, m.member_port).parse() {
+                p.insert(i, addr);
+            }
+        }
+    }
+
+    /// React to a membership change: refresh peers, notify the reactor, and stream
+    /// out the partitions this member must migrate.
+    fn apply_change(&mut self, ch: crate::cluster_coordinator::Change, outbox: &mut Vec<(usize, Msg)>) {
+        if !ch.changed {
+            return;
+        }
+        self.sync_peers();
+        self.emit_view();
+        if ch.migrations.is_empty() {
+            return;
+        }
+        // Bucket this member's live entries by partition once, then stream each
+        // migrating partition to its new owner.
+        let generation = self.coord.cluster.generation;
+        let mut by_part: HashMap<i32, Vec<(String, Vec<u8>, Vec<u8>, u64)>> = HashMap::new();
+        for (map, key, val, stamp) in self.store.all_entries_stamped() {
+            let p = serialization::partition_id(&key, crate::handlers::PARTITION_COUNT);
+            by_part.entry(p).or_default().push((map, key, val, stamp));
+        }
+        for (partition, dest) in ch.migrations {
+            outbox.push((dest, Msg::MigrateStart { generation, partition }));
+            if let Some(entries) = by_part.get(&partition) {
+                for chunk in entries.chunks(MIG_CHUNK) {
+                    outbox.push((dest, Msg::MigrateChunk { generation, partition, entries: chunk.to_vec() }));
+                }
+            }
+            outbox.push((dest, Msg::MigrateEnd { generation, partition }));
+        }
     }
 }
 
@@ -115,9 +162,13 @@ impl Handler for MemberHandler {
                 self.coord.on_heartbeat(from_join_id, generation);
             }
             Msg::MemberView { generation, members } => {
-                if self.coord.on_view(generation, members) {
-                    self.emit_view();
-                }
+                let ch = self.coord.on_view(generation, members);
+                self.apply_change(ch, outbox);
+            }
+            Msg::JoinRequest { uuid, host, client_port, member_port } => {
+                let info = MemberInfo::new(uuid, host, client_port, member_port, 0);
+                let ch = self.coord.on_join(info, outbox);
+                self.apply_change(ch, outbox);
             }
             Msg::MigrateChunk { entries, .. } => {
                 for (map, key, val, stamp) in entries {
@@ -125,7 +176,7 @@ impl Handler for MemberHandler {
                 }
             }
             Msg::MigrateStart { .. } | Msg::MigrateEnd { .. } => {}
-            Msg::Hello { .. } | Msg::JoinRequest { .. } => {}
+            Msg::Hello { .. } => {}
         }
     }
 
@@ -153,9 +204,8 @@ impl Handler for MemberHandler {
         for (conn, resp) in self.pending.sweep_expired(ACK_TIMEOUT_TICKS) {
             self.broker.enqueue(conn, resp);
         }
-        if self.coord.on_tick(outbox) {
-            self.emit_view();
-        }
+        let ch = self.coord.on_tick(outbox);
+        self.apply_change(ch, outbox);
         true
     }
 }
@@ -167,10 +217,11 @@ pub fn spawn(
     self_index: usize,
     member_ports: Vec<i32>,
     cluster: Cluster,
-    self_join_id: u64,
+    self_uuid: (i64, i64),
     hb_interval_ticks: u64,
     hb_timeout_ticks: u64,
     merge_latest: bool,
+    join_as: Option<MemberInfo>,
     store: Arc<Store>,
     broker: Arc<EventBroker>,
     rx: spsc::Consumer<MemberJob>,
@@ -184,9 +235,13 @@ pub fn spawn(
                 return;
             }
         };
-        let coord = Coordinator::new(cluster, self_join_id, hb_interval_ticks, hb_timeout_ticks);
+        let peers = transport.peers();
+        let mut coord = Coordinator::new(cluster, self_uuid, hb_interval_ticks, hb_timeout_ticks);
+        if let Some(info) = join_as {
+            coord.set_pending_join(info);
+        }
         let handler =
-            MemberHandler { store, broker, rx, coord, pending: Pending::new(), events, merge_latest };
+            MemberHandler { store, broker, rx, coord, pending: Pending::new(), events, merge_latest, peers };
         let _ = transport.run(handler);
     })
 }

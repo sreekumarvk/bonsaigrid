@@ -30,14 +30,14 @@ fn sync_backup_applies_and_delivers_deferred_response() {
     let broker1 = Arc::new(EventBroker::new((1, 2)));
     let (_tx1, rx1) = spsc::channel::<MemberJob>(64);
     let (ev1, _evrx1) = spsc::channel::<ClusterEvent>(64);
-    spawn(1, ports.clone(), cluster.clone(), 1, hb_i, hb_t, true, store1.clone(), broker1, rx1, ev1);
+    spawn(1, ports.clone(), cluster.clone(), (1, 2), hb_i, hb_t, true, None, store1.clone(), broker1, rx1, ev1);
 
     // Primary (member 0): the deferred response is enqueued on broker0.
     let store0 = Arc::new(Store::new());
     let broker0 = Arc::new(EventBroker::new((1, 1)));
     let (tx0, rx0) = spsc::channel::<MemberJob>(64);
     let (ev0, _evrx0) = spsc::channel::<ClusterEvent>(64);
-    spawn(0, ports.clone(), cluster.clone(), 0, hb_i, hb_t, true, store0.clone(), broker0.clone(), rx0, ev0);
+    spawn(0, ports.clone(), cluster.clone(), (1, 1), hb_i, hb_t, true, None, store0.clone(), broker0.clone(), rx0, ev0);
 
     // Let both listeners come up.
     std::thread::sleep(Duration::from_millis(300));

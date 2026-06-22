@@ -15,9 +15,15 @@
 
 use crate::wire::{decode, encode, Msg};
 use io_uring::{opcode, types, IoUring};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
+use std::rc::Rc;
+
+/// Shared peer-address table (member index → member-port address). Updated by the
+/// handler as it learns members, read by the transport when dialing.
+pub type Peers = Rc<RefCell<HashMap<usize, SocketAddr>>>;
 
 const ACCEPT_UD: u64 = u64::MAX - 1;
 const TIMEOUT_UD: u64 = u64::MAX - 2;
@@ -37,7 +43,11 @@ struct MConn {
     peer: Option<usize>,
     rbuf: Box<[u8]>,
     acc: Vec<u8>,
+    /// Pending bytes to send (appended to freely).
     out: Vec<u8>,
+    /// Bytes currently being sent. A separate buffer so appends to `out` can't
+    /// reallocate the memory an in-flight io_uring Send still references.
+    sendbuf: Vec<u8>,
     inflight: usize,
     open: bool,
 }
@@ -50,6 +60,7 @@ impl MConn {
             rbuf: vec![0u8; RECV_BUF].into_boxed_slice(),
             acc: Vec::with_capacity(RECV_BUF),
             out: Vec::with_capacity(4096),
+            sendbuf: Vec::with_capacity(4096),
             inflight: 0,
             open: true,
         }
@@ -58,21 +69,31 @@ impl MConn {
 
 pub struct Transport {
     self_index: usize,
-    addrs: Vec<SocketAddr>,
+    peers: Peers,
     listener: TcpListener,
 }
 
 impl Transport {
-    /// Bind this member's inbound listener on `ports[self_index]`.
+    /// Bind this member's inbound listener on `ports[self_index]`; seed the peer
+    /// table from `ports` (index → 127.0.0.1:port).
     pub fn bind(self_index: usize, ports: &[i32]) -> std::io::Result<Transport> {
         let listener = TcpListener::bind(format!("127.0.0.1:{}", ports[self_index]))?;
-        let addrs = ports.iter().map(|p| format!("127.0.0.1:{p}").parse().unwrap()).collect();
-        Ok(Transport { self_index, addrs, listener })
+        let mut map = HashMap::new();
+        for (i, p) in ports.iter().enumerate() {
+            map.insert(i, format!("127.0.0.1:{p}").parse().unwrap());
+        }
+        Ok(Transport { self_index, peers: Rc::new(RefCell::new(map)), listener })
+    }
+
+    /// Handle to the shared peer table so the handler can register new members'
+    /// addresses (e.g. after a runtime join).
+    pub fn peers(&self) -> Peers {
+        self.peers.clone()
     }
 
     /// Run the loop, driving `handler`. Returns when `on_tick` returns `false`.
     pub fn run(self, mut handler: impl Handler) -> std::io::Result<()> {
-        let Transport { self_index, addrs, listener } = self;
+        let Transport { self_index, peers, listener } = self;
         let lfd = listener.as_raw_fd();
         let mut ring = IoUring::new(256)?;
         let mut conns: Vec<Option<MConn>> = Vec::new();
@@ -119,7 +140,7 @@ impl Transport {
                     on_send(&mut conns, slot, res, &mut pending);
                 } else {
                     on_recv(&mut conns, slot, res, &mut handler, &mut outbox, &mut pending);
-                    deliver(&mut outbox, &mut conns, &mut free, &mut outbound, self_index, &addrs, &mut pending);
+                    deliver(&mut outbox, &mut conns, &mut free, &mut outbound, self_index, &peers, &mut pending);
                 }
                 if !conns[slot].as_ref().map(|c| c.open).unwrap_or(false) {
                     if let Some(c) = conns[slot].take() {
@@ -136,7 +157,7 @@ impl Transport {
 
             if do_tick {
                 let cont = handler.on_tick(&mut outbox);
-                deliver(&mut outbox, &mut conns, &mut free, &mut outbound, self_index, &addrs, &mut pending);
+                deliver(&mut outbox, &mut conns, &mut free, &mut outbound, self_index, &peers, &mut pending);
                 if !cont {
                     return Ok(());
                 }
@@ -181,14 +202,23 @@ fn arm_recv(conns: &mut [Option<MConn>], slot: usize, pending: &mut Vec<io_uring
 
 fn arm_send(conns: &mut [Option<MConn>], slot: usize, pending: &mut Vec<io_uring::squeue::Entry>) {
     let c = conns[slot].as_mut().unwrap();
-    if c.inflight == 0 && !c.out.is_empty() {
-        c.inflight = c.out.len();
-        pending.push(
-            opcode::Send::new(types::Fd(c.fd), c.out.as_ptr(), c.out.len() as u32)
-                .build()
-                .user_data(((slot as u64) << 1) | 1),
-        );
+    if c.inflight > 0 {
+        return; // a send is already in flight on `sendbuf`
     }
+    if c.sendbuf.is_empty() {
+        if c.out.is_empty() {
+            return;
+        }
+        // Move queued bytes into the stable send buffer; `out` keeps taking
+        // appends without disturbing the in-flight send's memory.
+        std::mem::swap(&mut c.sendbuf, &mut c.out);
+    }
+    c.inflight = c.sendbuf.len();
+    pending.push(
+        opcode::Send::new(types::Fd(c.fd), c.sendbuf.as_ptr(), c.sendbuf.len() as u32)
+            .build()
+            .user_data(((slot as u64) << 1) | 1),
+    );
 }
 
 fn on_send(conns: &mut [Option<MConn>], slot: usize, res: i32, pending: &mut Vec<io_uring::squeue::Entry>) {
@@ -197,9 +227,9 @@ fn on_send(conns: &mut [Option<MConn>], slot: usize, res: i32, pending: &mut Vec
         return;
     }
     let c = conns[slot].as_mut().unwrap();
-    c.out.drain(0..res as usize);
+    c.sendbuf.drain(0..res as usize); // consume the acknowledged prefix (handles partial sends)
     c.inflight = 0;
-    arm_send(conns, slot, pending);
+    arm_send(conns, slot, pending); // finish sendbuf, then swap in any newly-queued `out`
 }
 
 fn on_recv(
@@ -241,11 +271,11 @@ fn deliver(
     free: &mut Vec<usize>,
     outbound: &mut HashMap<usize, usize>,
     self_index: usize,
-    addrs: &[SocketAddr],
+    peers: &Peers,
     pending: &mut Vec<io_uring::squeue::Entry>,
 ) {
     for (dest, msg) in outbox.drain(..) {
-        let Some(slot) = ensure_outbound(dest, conns, free, outbound, self_index, addrs, pending) else {
+        let Some(slot) = ensure_outbound(dest, conns, free, outbound, self_index, peers, pending) else {
             continue; // peer not reachable yet; ack-timeout will cover the write
         };
         let bytes = encode(&msg);
@@ -260,7 +290,7 @@ fn ensure_outbound(
     free: &mut Vec<usize>,
     outbound: &mut HashMap<usize, usize>,
     self_index: usize,
-    addrs: &[SocketAddr],
+    peers: &Peers,
     pending: &mut Vec<io_uring::squeue::Entry>,
 ) -> Option<usize> {
     if let Some(&slot) = outbound.get(&dest) {
@@ -269,7 +299,8 @@ fn ensure_outbound(
         }
         outbound.remove(&dest);
     }
-    let stream = TcpStream::connect(addrs[dest]).ok()?;
+    let addr = *peers.borrow().get(&dest)?;
+    let stream = TcpStream::connect(addr).ok()?;
     let _ = stream.set_nodelay(true);
     let fd = stream.into_raw_fd();
     let slot = alloc(conns, free, fd);
