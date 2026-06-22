@@ -87,6 +87,8 @@ struct MemberHandler {
     coord: Coordinator,
     pending: Pending,
     events: spsc::Producer<ClusterEvent>,
+    /// Merge policy for inbound migrated entries (true = LatestUpdate).
+    merge_latest: bool,
 }
 
 impl MemberHandler {
@@ -117,6 +119,12 @@ impl Handler for MemberHandler {
                     self.emit_view();
                 }
             }
+            Msg::MigrateChunk { entries, .. } => {
+                for (map, key, val, stamp) in entries {
+                    self.store.put_merge(&map, &key, &val, 0, stamp, self.merge_latest);
+                }
+            }
+            Msg::MigrateStart { .. } | Msg::MigrateEnd { .. } => {}
             Msg::Hello { .. } | Msg::JoinRequest { .. } => {}
         }
     }
@@ -162,6 +170,7 @@ pub fn spawn(
     self_join_id: u64,
     hb_interval_ticks: u64,
     hb_timeout_ticks: u64,
+    merge_latest: bool,
     store: Arc<Store>,
     broker: Arc<EventBroker>,
     rx: spsc::Consumer<MemberJob>,
@@ -176,7 +185,8 @@ pub fn spawn(
             }
         };
         let coord = Coordinator::new(cluster, self_join_id, hb_interval_ticks, hb_timeout_ticks);
-        let handler = MemberHandler { store, broker, rx, coord, pending: Pending::new(), events };
+        let handler =
+            MemberHandler { store, broker, rx, coord, pending: Pending::new(), events, merge_latest };
         let _ = transport.run(handler);
     })
 }

@@ -102,6 +102,10 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
     // (MemberJob) and learns membership changes over a reverse ring (ClusterEvent).
     let hb_interval = env_usize("BONSAI_HB_INTERVAL_MS", 500) as u64;
     let hb_timeout = env_usize("BONSAI_HB_TIMEOUT_MS", 3000) as u64;
+    let merge_latest = server::migration::MergePolicy::from_str(
+        &std::env::var("BONSAI_MERGE").unwrap_or_else(|_| "LatestUpdate".into()),
+    )
+    .latest_update();
     let member_ports: Vec<i32> = (0..members).map(|i| MEMBER_BASE + i as i32).collect();
     let (job_tx, job_rx) = spsc::channel::<server::member_thread::MemberJob>(8192);
     let (ev_tx, ev_rx) = spsc::channel::<server::member_thread::ClusterEvent>(1024);
@@ -112,6 +116,7 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
         self_index as u64,
         hb_interval,
         hb_timeout,
+        merge_latest,
         store.clone(),
         broker.clone(),
         job_rx,

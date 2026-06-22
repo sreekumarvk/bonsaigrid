@@ -28,8 +28,14 @@ pub enum Msg {
     Heartbeat { from_join_id: u64, generation: u64 },
     /// A new member asks the master to admit it.
     JoinRequest { uuid: (i64, i64), host: String, client_port: i32, member_port: i32 },
-    /// The master's authoritative member list (only alive members) at `generation`.
+    /// The master's authoritative member list at `generation`.
     MemberView { generation: u64, members: Vec<MemberRec> },
+    /// Begin migrating `partition` (at `generation`) to the receiver.
+    MigrateStart { generation: u64, partition: i32 },
+    /// A batch of `(map, key, value, stamp)` entries for `partition`.
+    MigrateChunk { generation: u64, partition: i32, entries: Vec<(String, Vec<u8>, Vec<u8>, u64)> },
+    /// Migration of `partition` is complete.
+    MigrateEnd { generation: u64, partition: i32 },
 }
 
 const KIND_HELLO: u8 = 0;
@@ -39,6 +45,9 @@ const KIND_ACK: u8 = 3;
 const KIND_HEARTBEAT: u8 = 4;
 const KIND_JOIN: u8 = 5;
 const KIND_VIEW: u8 = 6;
+const KIND_MIG_START: u8 = 7;
+const KIND_MIG_CHUNK: u8 = 8;
+const KIND_MIG_END: u8 = 9;
 
 fn put_u32(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_be_bytes());
@@ -111,6 +120,28 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             for m in members {
                 put_member(&mut body, m);
             }
+        }
+        Msg::MigrateStart { generation, partition } => {
+            body.push(KIND_MIG_START);
+            put_u64(&mut body, *generation);
+            put_u32(&mut body, *partition as u32);
+        }
+        Msg::MigrateChunk { generation, partition, entries } => {
+            body.push(KIND_MIG_CHUNK);
+            put_u64(&mut body, *generation);
+            put_u32(&mut body, *partition as u32);
+            put_u32(&mut body, entries.len() as u32);
+            for (map, key, val, stamp) in entries {
+                put_blob(&mut body, map.as_bytes());
+                put_blob(&mut body, key);
+                put_blob(&mut body, val);
+                put_u64(&mut body, *stamp);
+            }
+        }
+        Msg::MigrateEnd { generation, partition } => {
+            body.push(KIND_MIG_END);
+            put_u64(&mut body, *generation);
+            put_u32(&mut body, *partition as u32);
         }
     }
     let mut frame = Vec::with_capacity(4 + body.len());
@@ -210,6 +241,18 @@ pub fn decode(buf: &[u8]) -> Option<(Msg, usize)> {
             }
             Msg::MemberView { generation, members }
         }
+        KIND_MIG_START => Msg::MigrateStart { generation: r.u64()?, partition: r.u32()? as i32 },
+        KIND_MIG_CHUNK => {
+            let generation = r.u64()?;
+            let partition = r.u32()? as i32;
+            let count = r.u32()? as usize;
+            let mut entries = Vec::with_capacity(count);
+            for _ in 0..count {
+                entries.push((r.string()?, r.blob()?, r.blob()?, r.u64()?));
+            }
+            Msg::MigrateChunk { generation, partition, entries }
+        }
+        KIND_MIG_END => Msg::MigrateEnd { generation: r.u64()?, partition: r.u32()? as i32 },
         _ => return None,
     };
     Some((msg, total))
@@ -241,6 +284,13 @@ mod tests {
                     MemberRec { uuid: (1, 2), host: "10.0.0.2".into(), client_port: 5701, member_port: 7701, join_id: 1, alive: true },
                 ],
             },
+            Msg::MigrateStart { generation: 4, partition: 17 },
+            Msg::MigrateChunk {
+                generation: 4,
+                partition: 17,
+                entries: vec![("people".into(), b"k".to_vec(), b"v".to_vec(), 42)],
+            },
+            Msg::MigrateEnd { generation: 4, partition: 17 },
         ];
         for m in msgs {
             let b = encode(&m);
