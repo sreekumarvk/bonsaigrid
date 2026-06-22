@@ -141,6 +141,9 @@ impl MemberHandler {
                     outbox.push((dest, Msg::MigrateChunk { generation, partition, entries: chunk.to_vec() }));
                 }
             }
+            // Auxiliary-structure state for this partition (queues/lists/sets/...).
+            let aux = self.store.aux_state_for_partition(partition, crate::handlers::PARTITION_COUNT);
+            outbox.push((dest, Msg::MigrateAux { generation, partition, payload: aux }));
             outbox.push((dest, Msg::MigrateEnd { generation, partition }));
         }
     }

@@ -104,9 +104,9 @@ impl Coordinator {
     }
 
     /// Migrations this member must send after a change from `old` to the current
-    /// cluster.
+    /// cluster (covers join, death-rebalance, and restore-K).
     fn outgoing(&self, old: &Cluster) -> Vec<(i32, usize)> {
-        migration::outgoing(old, &self.cluster, PARTITION_COUNT, self.self_uuid)
+        migration::plan(old, &self.cluster, PARTITION_COUNT, self.self_uuid)
     }
 
     pub fn on_heartbeat(&mut self, from_join_id: u64, _generation: u64) {
@@ -201,17 +201,18 @@ impl Coordinator {
         if self.master_after_removing(&suspects) != Some(self.self_uuid) {
             return Change::default();
         }
+        let old = self.cluster.clone();
         let mut changed = false;
         for uuid in &suspects {
             changed |= self.cluster.remove_member_by_uuid(*uuid);
         }
-        if changed {
-            self.broadcast_view(outbox);
+        if !changed {
+            return Change::default();
         }
-        // Death rebalances to existing backups (which already hold the data), so
-        // no data migration is scheduled here (re-replication to restore K is a
-        // documented follow-up).
-        Change { changed, migrations: Vec::new() }
+        self.broadcast_view(outbox);
+        // Restore-K: re-replicate so every partition again has its backups (the
+        // generalized plan emits owner→fresh-backup sends after a death).
+        Change { changed: true, migrations: self.outgoing(&old) }
     }
 
     /// The uuid that would be master if `dead` were removed.
