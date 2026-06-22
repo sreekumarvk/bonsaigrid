@@ -52,6 +52,11 @@ This epic closes both, behind the unmodified Hazelcast client protocol.
 - Quorum gate extends to auxiliary writes.
 
 **Non-goals (documented)**
+- **MultiMap HA.** Discovered during implementation: MultiMap is **key-partitioned**
+  (the client routes `mm.put(name,key,val)` to the *key's* partition, like IMap),
+  not name-partitioned like IList/ISet/IQueue. So the name-based state mechanism
+  is wrong for it. MultiMap HA needs IMap-style op-based replication (or storing
+  its entries in the partitioned slab table) — a follow-up. It is excluded here.
 - Per-op auxiliary backups (chose state-based; fine for these small structures).
 - ReplicatedMap "replicate to all members" CRDT semantics (it is stored as a
   namespaced IMap and is HA as an IMap; full all-member replication is separate).

@@ -258,7 +258,6 @@ fn is_quorum_gated_write(msg_type: i32) -> bool {
             | 328704 | 328960 | 329984       // list: add, remove, clear
             | 394240 | 394496 | 395520       // set: add, remove, clear
             | 196864 | 197888 | 197632 | 200448 // queue: offer, poll, remove, clear
-            | 131328 | 131840                // multimap: put, remove
             | 1508864                        // ringbuffer: add
             | 1901056                        // pncounter: add
     )
@@ -692,11 +691,12 @@ pub fn dispatch(
         }
         // ---- MultiMap (Set semantics) ----
         131328 => {
+            // MultiMap is key-partitioned (like IMap), not name-partitioned, so it
+            // is not covered by the name-based aux HA mechanism — see spec follow-up.
             let name = map::decode_name(&req);
             let key = req[2].content.clone();
             let value = req[3].content.clone();
-            let r = map::bool_response(131329, store.mm_put(&name, key, value));
-            aux_reply(&name, r, corr, store, cluster, replicator, conn_id)
+            vec![map::bool_response(131329, store.mm_put(&name, key, value))]
         }
         131584 => {
             let (name, key) = map::decode_name_key(&req);
@@ -704,8 +704,7 @@ pub fn dispatch(
         }
         131840 => {
             let (name, key) = map::decode_name_key(&req);
-            let r = map::encode_data_list_response(131841, &store.mm_remove(&name, &key));
-            aux_reply(&name, r, corr, store, cluster, replicator, conn_id)
+            vec![map::encode_data_list_response(131841, &store.mm_remove(&name, &key))]
         }
         133632 => {
             let name = map::decode_name(&req);

@@ -837,19 +837,8 @@ impl Store {
             sec_seq(&mut secs, AUX_QUEUE, name, items.iter());
             n += 1;
         }
-        for (name, mm) in self.multimaps.lock().unwrap().iter().filter(|(k, _)| on(k)) {
-            secs.push(AUX_MULTIMAP);
-            put_blob(&mut secs, name.as_bytes());
-            put_u32(&mut secs, mm.len() as u32);
-            for (k, vs) in mm.iter() {
-                put_blob(&mut secs, k);
-                put_u32(&mut secs, vs.len() as u32);
-                for v in vs {
-                    put_blob(&mut secs, v);
-                }
-            }
-            n += 1;
-        }
+        // NOTE: MultiMap is key-partitioned (like IMap), not name-partitioned, so
+        // it is intentionally excluded from this name-based snapshot.
         for (name, r) in self.ringbuffers.lock().unwrap().iter().filter(|(k, _)| on(k)) {
             secs.push(AUX_RINGBUFFER);
             put_blob(&mut secs, name.as_bytes());
@@ -1139,8 +1128,6 @@ mod tests {
         s.set_add("S", b"x".to_vec());
         s.queue_offer("Q", b"q1".to_vec());
         s.queue_offer("Q", b"q2".to_vec());
-        s.mm_put("M", b"k".to_vec(), b"v1".to_vec());
-        s.mm_put("M", b"k".to_vec(), b"v2".to_vec());
         s.rb_add("R", b"r1".to_vec());
         s.pn_add("P", 7, false);
 
@@ -1154,9 +1141,6 @@ mod tests {
         assert!(dst.set_contains("S", b"x"));
         assert_eq!(dst.queue_poll("Q"), Some(b"q1".to_vec()));
         assert_eq!(dst.queue_poll("Q"), Some(b"q2".to_vec()));
-        let mut mv = dst.mm_get("M", b"k");
-        mv.sort();
-        assert_eq!(mv, vec![b"v1".to_vec(), b"v2".to_vec()]);
         assert_eq!(dst.rb_read_one("R", 0), Some(b"r1".to_vec()));
         assert_eq!(dst.pn_get("P"), 7);
     }
