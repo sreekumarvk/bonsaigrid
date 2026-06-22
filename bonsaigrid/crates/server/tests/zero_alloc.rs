@@ -29,7 +29,7 @@ use protocol::frame::{write_message, Frame, UNFRAGMENTED};
 use protocol::primitives::{data_frame, string_frame};
 use server::events::EventBroker;
 use server::handlers::{dispatch_bytes, Cfg};
-use server::membership::Cluster;
+use server::membership::{Cluster, MemberInfo};
 use store::Store;
 
 fn build_get_msg(name: &str, key: &[u8]) -> Vec<u8> {
@@ -48,7 +48,7 @@ fn map_get_hot_path_is_zero_alloc() {
     let store = Store::new();
     store.put("m", b"k".to_vec(), b"value".to_vec());
     let cfg = Cfg::single();
-    let cluster = Cluster::new(cfg.members.clone(), 0);
+    let cluster = Cluster::new(vec![MemberInfo::new((1, 1), "127.0.0.1".into(), 5701, 7701, 0)], 0, 1);
     let broker = EventBroker::new((1, 1));
     let schemas = serialization::schema::SchemaService::new();
     let msg = build_get_msg("m", b"k");

@@ -54,6 +54,22 @@ fn cluster_members(n: usize) -> Vec<Member> {
         .collect()
 }
 
+/// Bootstrap members as `MemberInfo` (join_id = bootstrap index; member port =
+/// MEMBER_BASE + index).
+fn bootstrap_members(n: usize) -> Vec<server::membership::MemberInfo> {
+    (0..n)
+        .map(|i| {
+            server::membership::MemberInfo::new(
+                (1, (i + 1) as i64),
+                "127.0.0.1".into(),
+                BASE_PORT + i as i32,
+                MEMBER_BASE + i as i32,
+                i as u64,
+            )
+        })
+        .collect()
+}
+
 fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
     let port = BASE_PORT + self_index as i32;
     let (cluster_name, username, password) = auth_cfg();
@@ -67,7 +83,8 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
     });
     // Synchronous backup count K (default 1, capped at N-1).
     let backups = env_usize("BONSAI_BACKUPS", 1).min(members.saturating_sub(1));
-    let cluster = Rc::new(RefCell::new(Cluster::new(cluster_members(members), backups)));
+    let quorum = env_usize("BONSAI_QUORUM", 1);
+    let cluster = Rc::new(RefCell::new(Cluster::new(bootstrap_members(members), backups, quorum)));
     let store = Arc::new(store::Store::with_shards(1));
     let broker = Arc::new(server::events::EventBroker::new(cfg.members[cfg.self_index].uuid));
     let schemas = Arc::new(serialization::schema::SchemaService::new());
@@ -117,7 +134,7 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
         },
         move |path| {
             if let Some(dead) = parse_promote(path) {
-                cl_h.borrow_mut().promote(dead);
+                cl_h.borrow_mut().promote(dead as u64);
                 if let Some(r) = rep_h.as_ref() {
                     r.send_membership(cl_h.borrow().clone());
                 }
@@ -173,7 +190,7 @@ fn run_single_node() -> std::io::Result<()> {
     });
     let store = Arc::new(store::Store::with_shards(cores));
     // Single-member cluster, no backups; shared read-only across cores.
-    let cluster = Arc::new(Cluster::new(cfg.members.clone(), 0));
+    let cluster = Arc::new(Cluster::new(bootstrap_members(1), 0, 1));
     // One broker + metrics registry shared across this member's cores.
     let broker = Arc::new(server::events::EventBroker::new(cfg.members[0].uuid));
     let metrics = Arc::new(server::metrics::Metrics::new());

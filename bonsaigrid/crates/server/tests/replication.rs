@@ -4,22 +4,21 @@
 
 use member::wire::Msg;
 use server::events::EventBroker;
-use server::handlers::Member;
 use server::member_thread::{spawn, MemberJob, Replicator};
-use server::membership::Cluster;
+use server::membership::{Cluster, MemberInfo};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use store::Store;
 
 const PORTS: [i32; 2] = [17811, 17812];
 
-fn member(i: i32, port: i32) -> Member {
-    Member { uuid: (1, i as i64 + 1), host: "127.0.0.1".into(), port }
+fn member(i: u64, member_port: i32) -> MemberInfo {
+    MemberInfo::new((1, i as i64 + 1), "127.0.0.1".into(), 5901 + i as i32, member_port, i)
 }
 
 #[test]
 fn sync_backup_applies_and_delivers_deferred_response() {
-    let cluster = Cluster::new(vec![member(0, 5901), member(1, 5902)], 1);
+    let cluster = Cluster::new(vec![member(0, PORTS[0]), member(1, PORTS[1])], 1, 1);
     let ports: Vec<i32> = PORTS.to_vec();
 
     // Backup (member 1): its own store; we assert the replicated value lands here.

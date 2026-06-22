@@ -203,7 +203,7 @@ fn auth_response(cfg: &Cfg, cluster: &Cluster, status: u8) -> Vec<Frame> {
         cluster_id: CLUSTER_ID,
         server_version: SERVER_VERSION,
         address_host: me.host.as_str(),
-        address_port: me.port,
+        address_port: me.client_port,
         member_list_version: cluster.member_list_version,
         members: &mem,
         partition_list_version: cluster.partition_list_version,
@@ -822,21 +822,22 @@ mod tests {
 
     /// A Cluster mirroring `cluster_cfg`'s members (1 backup).
     fn cluster_of(n: usize) -> Cluster {
+        use crate::membership::MemberInfo;
         Cluster::new(
             (0..n)
-                .map(|i| Member {
-                    uuid: (1, (i + 1) as i64),
-                    host: "127.0.0.1".into(),
-                    port: 5701 + i as i32,
+                .map(|i| {
+                    MemberInfo::new((1, (i + 1) as i64), "127.0.0.1".into(), 5701 + i as i32, 7701 + i as i32, i as u64)
                 })
                 .collect(),
+            1,
             1,
         )
     }
 
     /// Single-member cluster matching `Cfg::single()`.
     fn single_cluster() -> Cluster {
-        Cluster::new(vec![Member { uuid: (1, 1), host: "127.0.0.1".into(), port: 5701 }], 0)
+        use crate::membership::MemberInfo;
+        Cluster::new(vec![MemberInfo::new((1, 1), "127.0.0.1".into(), 5701, 7701, 0)], 0, 1)
     }
 
     #[test]

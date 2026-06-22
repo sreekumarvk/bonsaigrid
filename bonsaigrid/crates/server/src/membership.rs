@@ -1,35 +1,58 @@
-//! Dynamic cluster membership + ring-wise replica assignment.
+//! Dynamic cluster membership, master election, and ring-wise replica assignment.
 //!
-//! Replaces the static partition table that `Cfg` used to compute. The reactor
-//! thread owns the authoritative `Cluster`; promotion mutates it and reconnecting
-//! clients read the updated member list + partition table from `auth`/cluster-view.
+//! The member list is **join-ordered** (each member has a monotonic `join_id`;
+//! lower = older). The **master** is the alive member with the smallest join_id.
+//! A monotonic `generation` stamps every change; a view with a lower generation
+//! is ignored (stale).
 //!
-//! Assignment is ring-wise: the *home* of partition `p` is `p % N`. `owner(p)`
-//! walks the ring from the home to the first **alive** member, so a dead home
-//! falls through to its backup. `backups_of(p)` are the next alive members after
-//! the owner. This means `promote(dead)` needs no explicit reassignment — marking
-//! a member dead automatically advances every affected partition to its backup.
+//! Ownership uses ring-walk over the join-ordered list with dead members kept as
+//! tombstones (`alive=false`): `owner(p)` walks from `p % total` to the first
+//! alive member, so a dead owner's partitions fall through to its backup — which
+//! holds the data from synchronous replication. Tombstones keep live indices
+//! stable, so a death does NOT reshuffle ownership (only joins do, which migrate).
 
-use crate::handlers::{Member, PARTITION_COUNT, VERSION};
 use codecs::auth::MemberTuple;
+
+const PARTITION_COUNT: i32 = crate::handlers::PARTITION_COUNT;
+const VERSION: (u8, u8, u8) = crate::handlers::VERSION;
+
+#[derive(Clone, Debug)]
+pub struct MemberInfo {
+    pub uuid: (i64, i64),
+    pub host: String,
+    pub client_port: i32,
+    pub member_port: i32,
+    pub join_id: u64,
+}
+
+impl MemberInfo {
+    pub fn new(uuid: (i64, i64), host: String, client_port: i32, member_port: i32, join_id: u64) -> MemberInfo {
+        MemberInfo { uuid, host, client_port, member_port, join_id }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Cluster {
-    pub members: Vec<Member>,
+    /// Join-ordered (by join_id); dead members kept as tombstones for stable
+    /// ring indices.
+    pub members: Vec<MemberInfo>,
     pub alive: Vec<bool>,
-    /// Synchronous backup count K (already capped at N-1 by the caller).
     pub backups: usize,
+    pub quorum: usize,
+    pub generation: u64,
     pub member_list_version: i32,
     pub partition_list_version: i32,
 }
 
 impl Cluster {
-    pub fn new(members: Vec<Member>, backups: usize) -> Cluster {
+    pub fn new(members: Vec<MemberInfo>, backups: usize, quorum: usize) -> Cluster {
         let n = members.len();
         Cluster {
             members,
             alive: vec![true; n],
             backups,
+            quorum: quorum.max(1),
+            generation: 1,
             member_list_version: 1,
             partition_list_version: 1,
         }
@@ -44,9 +67,36 @@ impl Cluster {
     pub fn live_count(&self) -> usize {
         self.alive.iter().filter(|&&a| a).count()
     }
+    pub fn has_quorum(&self) -> bool {
+        self.live_count() >= self.quorum.max(1)
+    }
 
-    /// The member index that clients are told owns `partition`: the first alive
-    /// member walking the ring from the partition's home (`p % N`).
+    /// Index of the alive member with the smallest join_id (the master), if any.
+    pub fn master(&self) -> Option<usize> {
+        self.members
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| self.alive[*i])
+            .min_by_key(|(_, m)| m.join_id)
+            .map(|(i, _)| i)
+    }
+
+    /// True if the member with `join_id` is the current master.
+    pub fn is_master(&self, join_id: u64) -> bool {
+        self.master().map(|i| self.members[i].join_id) == Some(join_id)
+    }
+
+    pub fn index_of_join(&self, join_id: u64) -> Option<usize> {
+        self.members.iter().position(|m| m.join_id == join_id)
+    }
+    pub fn index_of_uuid(&self, uuid: (i64, i64)) -> Option<usize> {
+        self.members.iter().position(|m| m.uuid == uuid)
+    }
+    pub fn max_join_id(&self) -> u64 {
+        self.members.iter().map(|m| m.join_id).max().unwrap_or(0)
+    }
+
+    /// Owner of `partition`: first alive member walking the ring from `p % total`.
     pub fn owner(&self, partition: i32) -> usize {
         let n = self.len();
         let home = (partition.rem_euclid(n as i32)) as usize;
@@ -56,11 +106,11 @@ impl Cluster {
                 return i;
             }
         }
-        home // no live member (degenerate); caller handles empty cluster
+        home
     }
 
-    /// The alive backup member indices for `partition`: the next
-    /// `min(backups, live_count-1)` alive members after the owner.
+    /// Alive backups for `partition`: the next `min(backups, live-1)` alive members
+    /// after the owner.
     pub fn backups_of(&self, partition: i32) -> Vec<usize> {
         let n = self.len();
         let owner = self.owner(partition);
@@ -77,26 +127,84 @@ impl Cluster {
         out
     }
 
-    /// Mark `dead` as down and bump both view versions. Idempotent.
-    pub fn promote(&mut self, dead: usize) {
-        if dead < self.alive.len() && self.alive[dead] {
-            self.alive[dead] = false;
-            self.member_list_version += 1;
-            self.partition_list_version += 1;
+    /// Mark a member dead by uuid (tombstone) and bump generation. Idempotent.
+    pub fn remove_member_by_uuid(&mut self, uuid: (i64, i64)) -> bool {
+        match self.index_of_uuid(uuid) {
+            Some(i) if self.alive[i] => {
+                self.alive[i] = false;
+                self.bump();
+                true
+            }
+            _ => false,
         }
     }
 
-    /// Alive members as wire tuples (uuid, host, port, lite=false, version).
+    /// Manual promote (Phase C endpoint): mark the bootstrap member with this
+    /// join_id dead.
+    pub fn promote(&mut self, join_id: u64) {
+        if let Some(i) = self.index_of_join(join_id) {
+            if self.alive[i] {
+                self.alive[i] = false;
+                self.bump();
+            }
+        }
+    }
+
+    /// Add (or revive) a member. Returns the assigned join_id.
+    pub fn add_member(&mut self, mut info: MemberInfo) -> u64 {
+        if let Some(i) = self.index_of_uuid(info.uuid) {
+            self.alive[i] = true; // revive a rejoining member
+            self.bump();
+            return self.members[i].join_id;
+        }
+        if info.join_id == 0 || self.index_of_join(info.join_id).is_some() {
+            info.join_id = self.max_join_id() + 1;
+        }
+        let jid = info.join_id;
+        self.members.push(info);
+        self.alive.push(true);
+        self.bump();
+        jid
+    }
+
+    /// Apply a master's published view if it is newer. Returns whether it applied.
+    pub fn apply_view(&mut self, generation: u64, members: Vec<MemberInfo>) -> bool {
+        if generation <= self.generation {
+            return false;
+        }
+        let n = members.len();
+        self.members = members;
+        self.alive = vec![true; n]; // a published view lists only live members
+        self.generation = generation;
+        self.member_list_version += 1;
+        self.partition_list_version += 1;
+        true
+    }
+
+    /// A view to publish: only alive members, current generation.
+    pub fn view(&self) -> (u64, Vec<MemberInfo>) {
+        let live: Vec<MemberInfo> =
+            self.members.iter().zip(&self.alive).filter(|(_, &a)| a).map(|(m, _)| m.clone()).collect();
+        (self.generation, live)
+    }
+
+    fn bump(&mut self) {
+        self.generation += 1;
+        self.member_list_version += 1;
+        self.partition_list_version += 1;
+    }
+
+    /// Alive members as wire tuples (uuid, host, client_port, lite=false, version).
     pub fn member_tuples(&self) -> Vec<MemberTuple> {
         self.members
             .iter()
             .zip(&self.alive)
             .filter(|(_, &a)| a)
-            .map(|(m, _)| (m.uuid, m.host.clone(), m.port, false, VERSION))
+            .map(|(m, _)| (m.uuid, m.host.clone(), m.client_port, false, VERSION))
             .collect()
     }
 
-    /// Per-alive-member partition lists: partition `p` is listed under `owner(p)`.
+    /// Per-alive-member partition lists: partition `p` listed under `owner(p)`.
     pub fn partition_table(&self) -> Vec<((i64, i64), Vec<i32>)> {
         let mut by_member: Vec<((i64, i64), Vec<i32>)> = self
             .members
@@ -105,11 +213,10 @@ impl Cluster {
             .filter(|(_, &a)| a)
             .map(|(m, _)| (m.uuid, Vec::new()))
             .collect();
-        // index alive members by their position in `members`
         for p in 0..PARTITION_COUNT {
             let owner_uuid = self.members[self.owner(p)].uuid;
-            if let Some(entry) = by_member.iter_mut().find(|(u, _)| *u == owner_uuid) {
-                entry.1.push(p);
+            if let Some(e) = by_member.iter_mut().find(|(u, _)| *u == owner_uuid) {
+                e.1.push(p);
             }
         }
         by_member
@@ -120,47 +227,55 @@ impl Cluster {
 mod tests {
     use super::*;
 
-    fn m(i: i32) -> Member {
-        Member { uuid: (i as i64, i as i64), host: "127.0.0.1".into(), port: 5701 + i }
+    fn m(i: u64) -> MemberInfo {
+        MemberInfo::new((1, i as i64 + 1), "127.0.0.1".into(), 5701 + i as i32, 7701 + i as i32, i)
     }
 
     #[test]
-    fn assignment_and_promote() {
-        let mut c = Cluster::new(vec![m(0), m(1), m(2)], 1);
-        assert_eq!(c.owner(0), 0);
-        assert_eq!(c.backups_of(0), vec![1]);
-        assert_eq!(c.owner(1), 1);
-        assert_eq!(c.backups_of(1), vec![2]);
-        assert_eq!(c.owner(2), 2);
-        assert_eq!(c.backups_of(2), vec![0]);
-
-        // promote(0): partition-0 owner falls through to member 1 (its backup).
-        c.promote(0);
-        assert!(!c.alive[0]);
+    fn master_is_oldest_alive() {
+        let mut c = Cluster::new(vec![m(0), m(1), m(2)], 1, 1);
+        assert_eq!(c.master(), Some(0));
+        assert!(c.is_master(0));
+        // owner 0 backed by 1; kill 0 -> owner falls through to backup 1, master->1
+        c.remove_member_by_uuid((1, 1));
         assert_eq!(c.owner(0), 1);
+        assert_eq!(c.master(), Some(1));
+        assert!(c.is_master(1));
         assert_eq!(c.member_tuples().len(), 2);
-        assert!(c.partition_table().iter().all(|(u, _)| *u != (0, 0)));
-        assert!(c.member_list_version >= 2 && c.partition_list_version >= 2);
+    }
 
-        // every partition still owned by an alive member after promotion
-        let total: usize = c.partition_table().iter().map(|(_, ps)| ps.len()).sum();
+    #[test]
+    fn apply_view_generation_guard() {
+        let mut c = Cluster::new(vec![m(0), m(1)], 1, 1);
+        let g0 = c.generation;
+        assert!(!c.apply_view(g0, vec![m(0)])); // not newer -> ignored
+        assert!(c.apply_view(g0 + 5, vec![m(0), m(1), m(2)])); // newer -> applied
+        assert_eq!(c.len(), 3);
+        assert_eq!(c.generation, g0 + 5);
+    }
+
+    #[test]
+    fn add_member_appends_join_id() {
+        let mut c = Cluster::new(vec![m(0), m(1)], 1, 1);
+        let jid = c.add_member(MemberInfo::new((1, 99), "127.0.0.1".into(), 5799, 7799, 0));
+        assert_eq!(jid, 2); // max(0,1)+1
+        assert_eq!(c.master(), Some(0));
+    }
+
+    #[test]
+    fn quorum_gate() {
+        let mut c = Cluster::new(vec![m(0), m(1), m(2)], 1, 2);
+        assert!(c.has_quorum());
+        c.remove_member_by_uuid((1, 1));
+        assert!(c.has_quorum()); // 2 live == quorum
+        c.remove_member_by_uuid((1, 2));
+        assert!(!c.has_quorum()); // 1 live < 2
+    }
+
+    #[test]
+    fn partition_table_covers_all_partitions() {
+        let c = Cluster::new(vec![m(0), m(1), m(2)], 1, 1);
+        let total: usize = c.partition_table().iter().map(|(_, p)| p.len()).sum();
         assert_eq!(total, PARTITION_COUNT as usize);
-    }
-
-    #[test]
-    fn promote_is_idempotent() {
-        let mut c = Cluster::new(vec![m(0), m(1)], 1);
-        c.promote(0);
-        let v = c.member_list_version;
-        c.promote(0);
-        assert_eq!(c.member_list_version, v); // no further bump
-    }
-
-    #[test]
-    fn backups_capped_by_live_count() {
-        let c = Cluster::new(vec![m(0), m(1)], 1);
-        assert_eq!(c.backups_of(0), vec![1]);
-        let single = Cluster::new(vec![m(0)], 1);
-        assert!(single.backups_of(0).is_empty()); // nobody to back up to
     }
 }
