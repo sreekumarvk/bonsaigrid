@@ -815,6 +815,204 @@ impl Store {
             self.put(map, k, v);
         }
     }
+
+    // ---- Auxiliary-structure HA: per-partition state snapshot / install ----
+
+    /// Serialize every auxiliary structure whose name maps to `partition` into a
+    /// single self-describing blob (for synchronous backup or migration).
+    pub fn aux_state_for_partition(&self, partition: i32, count: i32) -> Vec<u8> {
+        let mut secs: Vec<u8> = Vec::new();
+        let mut n: u32 = 0;
+        let on = |name: &str| partition_for_name(name, count) == partition;
+
+        for (name, items) in self.lists.lock().unwrap().iter().filter(|(k, _)| on(k)) {
+            sec_seq(&mut secs, AUX_LIST, name, items.iter());
+            n += 1;
+        }
+        for (name, items) in self.sets.lock().unwrap().iter().filter(|(k, _)| on(k)) {
+            sec_seq(&mut secs, AUX_SET, name, items.iter());
+            n += 1;
+        }
+        for (name, items) in self.queues.lock().unwrap().iter().filter(|(k, _)| on(k)) {
+            sec_seq(&mut secs, AUX_QUEUE, name, items.iter());
+            n += 1;
+        }
+        for (name, mm) in self.multimaps.lock().unwrap().iter().filter(|(k, _)| on(k)) {
+            secs.push(AUX_MULTIMAP);
+            put_blob(&mut secs, name.as_bytes());
+            put_u32(&mut secs, mm.len() as u32);
+            for (k, vs) in mm.iter() {
+                put_blob(&mut secs, k);
+                put_u32(&mut secs, vs.len() as u32);
+                for v in vs {
+                    put_blob(&mut secs, v);
+                }
+            }
+            n += 1;
+        }
+        for (name, r) in self.ringbuffers.lock().unwrap().iter().filter(|(k, _)| on(k)) {
+            secs.push(AUX_RINGBUFFER);
+            put_blob(&mut secs, name.as_bytes());
+            secs.extend_from_slice(&r.head.to_le_bytes());
+            secs.extend_from_slice(&r.tail.to_le_bytes());
+            secs.extend_from_slice(&r.cap.to_le_bytes());
+            put_u32(&mut secs, r.items.len() as u32);
+            for v in &r.items {
+                put_blob(&mut secs, v);
+            }
+            n += 1;
+        }
+        for (name, v) in self.pncounters.lock().unwrap().iter().filter(|(k, _)| on(k)) {
+            secs.push(AUX_PNCOUNTER);
+            put_blob(&mut secs, name.as_bytes());
+            secs.extend_from_slice(&v.to_le_bytes());
+            n += 1;
+        }
+        for (name, v) in self.flake.lock().unwrap().iter().filter(|(k, _)| on(k)) {
+            secs.push(AUX_FLAKE);
+            put_blob(&mut secs, name.as_bytes());
+            secs.extend_from_slice(&v.to_le_bytes());
+            n += 1;
+        }
+
+        let mut out = Vec::with_capacity(4 + secs.len());
+        put_u32(&mut out, n);
+        out.extend_from_slice(&secs);
+        out
+    }
+
+    /// Install auxiliary structures from a blob produced by `aux_state_for_partition`,
+    /// replacing each named structure.
+    pub fn install_aux_state(&self, bytes: &[u8]) {
+        let mut r = AuxReader { b: bytes, pos: 0 };
+        let Some(n) = r.u32() else { return };
+        for _ in 0..n {
+            let Some(kind) = r.u8() else { return };
+            let Some(name) = r.string() else { return };
+            match kind {
+                AUX_LIST => {
+                    let items = r.seq().unwrap_or_default();
+                    self.lists.lock().unwrap().insert(name, items);
+                }
+                AUX_SET => {
+                    let items = r.seq().unwrap_or_default();
+                    self.sets.lock().unwrap().insert(name, items.into_iter().collect());
+                }
+                AUX_QUEUE => {
+                    let items = r.seq().unwrap_or_default();
+                    self.queues.lock().unwrap().insert(name, items.into_iter().collect());
+                }
+                AUX_MULTIMAP => {
+                    let Some(kc) = r.u32() else { return };
+                    let mut mm: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
+                    for _ in 0..kc {
+                        let Some(key) = r.blob() else { return };
+                        let Some(vc) = r.u32() else { return };
+                        let mut vs = Vec::with_capacity(vc as usize);
+                        for _ in 0..vc {
+                            let Some(v) = r.blob() else { return };
+                            vs.push(v);
+                        }
+                        mm.insert(key, vs);
+                    }
+                    self.multimaps.lock().unwrap().insert(name, mm);
+                }
+                AUX_RINGBUFFER => {
+                    let (Some(head), Some(tail), Some(cap)) = (r.i64(), r.i64(), r.i64()) else { return };
+                    let items = r.seq().map(|v| v.into_iter().collect()).unwrap_or_default();
+                    self.ringbuffers.lock().unwrap().insert(name, Ring { items, head, tail, cap });
+                }
+                AUX_PNCOUNTER => {
+                    let Some(v) = r.i64() else { return };
+                    self.pncounters.lock().unwrap().insert(name, v);
+                }
+                AUX_FLAKE => {
+                    let Some(v) = r.i64() else { return };
+                    self.flake.lock().unwrap().insert(name, v);
+                }
+                _ => return,
+            }
+        }
+    }
+}
+
+// ---- Auxiliary-state blob codec ----
+const AUX_LIST: u8 = 1;
+const AUX_SET: u8 = 2;
+const AUX_QUEUE: u8 = 3;
+const AUX_MULTIMAP: u8 = 4;
+const AUX_RINGBUFFER: u8 = 5;
+const AUX_PNCOUNTER: u8 = 6;
+const AUX_FLAKE: u8 = 7;
+
+/// The partition a distributed object's name maps to — matching the client, which
+/// hashes the name's String `Data` (`[partitionHash=0][type=-11][len][utf8]`).
+pub fn partition_for_name(name: &str, count: i32) -> i32 {
+    let mut data = Vec::with_capacity(12 + name.len());
+    data.extend_from_slice(&0i32.to_be_bytes()); // partitionHash (0 -> murmur of payload)
+    data.extend_from_slice(&(-11i32).to_be_bytes()); // STRING serializer type
+    data.extend_from_slice(&(name.len() as i32).to_be_bytes());
+    data.extend_from_slice(name.as_bytes());
+    serialization::partition_id(&data, count)
+}
+
+fn put_u32(out: &mut Vec<u8>, v: u32) {
+    out.extend_from_slice(&v.to_le_bytes());
+}
+fn put_blob(out: &mut Vec<u8>, b: &[u8]) {
+    put_u32(out, b.len() as u32);
+    out.extend_from_slice(b);
+}
+fn sec_seq<'a>(out: &mut Vec<u8>, kind: u8, name: &str, items: impl Iterator<Item = &'a Vec<u8>>) {
+    out.push(kind);
+    put_blob(out, name.as_bytes());
+    let start = out.len();
+    put_u32(out, 0); // count placeholder
+    let mut n = 0u32;
+    for it in items {
+        put_blob(out, it);
+        n += 1;
+    }
+    out[start..start + 4].copy_from_slice(&n.to_le_bytes());
+}
+
+struct AuxReader<'a> {
+    b: &'a [u8],
+    pos: usize,
+}
+impl AuxReader<'_> {
+    fn u8(&mut self) -> Option<u8> {
+        let v = *self.b.get(self.pos)?;
+        self.pos += 1;
+        Some(v)
+    }
+    fn u32(&mut self) -> Option<u32> {
+        let s = self.b.get(self.pos..self.pos + 4)?;
+        self.pos += 4;
+        Some(u32::from_le_bytes(s.try_into().unwrap()))
+    }
+    fn i64(&mut self) -> Option<i64> {
+        let s = self.b.get(self.pos..self.pos + 8)?;
+        self.pos += 8;
+        Some(i64::from_le_bytes(s.try_into().unwrap()))
+    }
+    fn blob(&mut self) -> Option<Vec<u8>> {
+        let len = self.u32()? as usize;
+        let s = self.b.get(self.pos..self.pos + len)?;
+        self.pos += len;
+        Some(s.to_vec())
+    }
+    fn string(&mut self) -> Option<String> {
+        Some(String::from_utf8_lossy(&self.blob()?).into_owned())
+    }
+    fn seq(&mut self) -> Option<Vec<Vec<u8>>> {
+        let c = self.u32()?;
+        let mut out = Vec::with_capacity(c as usize);
+        for _ in 0..c {
+            out.push(self.blob()?);
+        }
+        Some(out)
+    }
 }
 
 #[cfg(test)]
@@ -922,6 +1120,45 @@ mod tests {
         assert_eq!(s.get("m", &[1]), Some(b"old".to_vec()));
         s.put_merge("m", &[2], b"fresh", 0, 1, false); // absent -> insert
         assert_eq!(s.get("m", &[2]), Some(b"fresh".to_vec()));
+    }
+
+    #[test]
+    fn partition_for_name_matches_client() {
+        // Captured from a stock client: "q"->229, "mylist"->62, "myset"->170 (271 partitions).
+        assert_eq!(partition_for_name("q", 271), 229);
+        assert_eq!(partition_for_name("mylist", 271), 62);
+        assert_eq!(partition_for_name("myset", 271), 170);
+    }
+
+    #[test]
+    fn aux_state_roundtrips_all_structures() {
+        let s = Store::new();
+        // Place a few structures; compute the partition each lands on.
+        s.list_add("L", b"a".to_vec());
+        s.list_add("L", b"b".to_vec());
+        s.set_add("S", b"x".to_vec());
+        s.queue_offer("Q", b"q1".to_vec());
+        s.queue_offer("Q", b"q2".to_vec());
+        s.mm_put("M", b"k".to_vec(), b"v1".to_vec());
+        s.mm_put("M", b"k".to_vec(), b"v2".to_vec());
+        s.rb_add("R", b"r1".to_vec());
+        s.pn_add("P", 7, false);
+
+        // Snapshot every partition, install into a fresh store, compare.
+        let dst = Store::new();
+        for p in 0..271 {
+            let blob = s.aux_state_for_partition(p, 271);
+            dst.install_aux_state(&blob);
+        }
+        assert_eq!(dst.list_get_all("L"), vec![b"a".to_vec(), b"b".to_vec()]);
+        assert!(dst.set_contains("S", b"x"));
+        assert_eq!(dst.queue_poll("Q"), Some(b"q1".to_vec()));
+        assert_eq!(dst.queue_poll("Q"), Some(b"q2".to_vec()));
+        let mut mv = dst.mm_get("M", b"k");
+        mv.sort();
+        assert_eq!(mv, vec![b"v1".to_vec(), b"v2".to_vec()]);
+        assert_eq!(dst.rb_read_one("R", 0), Some(b"r1".to_vec()));
+        assert_eq!(dst.pn_get("P"), 7);
     }
 
     #[test]

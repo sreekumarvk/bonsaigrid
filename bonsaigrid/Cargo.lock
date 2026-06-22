@@ -124,6 +124,9 @@ version = "0.0.0"
 [[package]]
 name = "store"
 version = "0.0.0"
+dependencies = [
+ "serialization",
+]
 
 [[package]]
 name = "winapi"

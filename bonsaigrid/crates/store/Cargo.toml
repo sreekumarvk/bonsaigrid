@@ -2,3 +2,6 @@
 name = "store"
 edition.workspace = true
 version.workspace = true
+
+[dependencies]
+serialization = { path = "../serialization" }
