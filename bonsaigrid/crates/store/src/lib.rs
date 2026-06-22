@@ -925,6 +925,21 @@ mod tests {
     }
 
     #[test]
+    fn merge_converges_regardless_of_order() {
+        // Two members' versions of the same key heal: whichever order they merge,
+        // LatestUpdate converges on the higher-stamp value (split-brain heal).
+        let a = Store::new();
+        a.put_merge("m", &[1], b"from-A", 0, 10, true);
+        a.put_merge("m", &[1], b"from-B", 0, 20, true); // B's write is newer
+        let b = Store::new();
+        b.put_merge("m", &[1], b"from-B", 0, 20, true);
+        b.put_merge("m", &[1], b"from-A", 0, 10, true); // reverse order
+        assert_eq!(a.get("m", &[1]), Some(b"from-B".to_vec()));
+        assert_eq!(b.get("m", &[1]), b.get("m", &[1]));
+        assert_eq!(a.get("m", &[1]), b.get("m", &[1]), "convergent");
+    }
+
+    #[test]
     fn all_entries_stamped_spans_maps() {
         let s = Store::new();
         s.put("a", vec![1], b"x".to_vec());

@@ -226,6 +226,34 @@ fn empty_response(msg_type: i32) -> Vec<Frame> {
     vec![Frame { flags: UNFRAGMENTED, content: c }]
 }
 
+/// A Hazelcast exception response (message type 0 carrying one ErrorHolder). The
+/// client raises the mapped error (code 42 = SplitBrainProtectionError).
+fn error_response(error_code: i32, class_name: &str, message: &str) -> Vec<Frame> {
+    use codecs::{begin_frame, end_frame};
+    use protocol::primitives::string_frame;
+    let mut hdr = vec![0u8; 13]; // type=0, corr@4, backupAcks@12
+    write_i32_le(&mut hdr, 0, 0);
+    let mut code = vec![0u8; 4];
+    write_i32_le(&mut code, 0, error_code);
+    vec![
+        Frame { flags: UNFRAGMENTED, content: hdr },
+        begin_frame(),                              // List<ErrorHolder> BEGIN
+        begin_frame(),                              // ErrorHolder BEGIN
+        Frame { flags: 0, content: code },          // error_code @0
+        string_frame(class_name),
+        string_frame(message),                      // non-null message
+        begin_frame(),                              // stack-trace list BEGIN
+        end_frame(),                                // stack-trace list END (empty)
+        end_frame(),                                // ErrorHolder END
+        end_frame(),                                // List END
+    ]
+}
+
+/// IMap write ops gated by quorum (reject below the minimum cluster size).
+fn is_quorum_gated_write(msg_type: i32) -> bool {
+    matches!(msg_type, 65792 | 66304 | 67840 | 76800) // put, remove, delete, putAll
+}
+
 /// Hand a mutation to the member thread for synchronous backup replication.
 /// Returns `true` if the client reply was deferred (the member thread will
 /// deliver `resp` once backups ack); `false` if the caller should reply now
@@ -285,6 +313,17 @@ pub fn dispatch(
     replicator: Option<&Replicator>,
 ) -> Vec<Vec<Frame>> {
     let corr = correlation_id(&req);
+    // Quorum gate: below the minimum live cluster size, reject writes so a
+    // minority partition can't accept divergent updates (reads still allowed).
+    if is_quorum_gated_write(msg_type(&req)) && !cluster.has_quorum() {
+        let mut e = error_response(
+            42,
+            "com.hazelcast.splitbrainprotection.SplitBrainProtectionException",
+            "Cluster does not have the minimum quorum to accept writes",
+        );
+        set_correlation_id(&mut e, corr);
+        return vec![e];
+    }
     let mut replies: Vec<Vec<Frame>> = match msg_type(&req) {
         // ---- Compact schema service ----
         // ClientSendSchema -> replicated members (single node: just us)
@@ -906,6 +945,29 @@ mod tests {
         for m in &out {
             assert_eq!(correlation_id(m), 5);
         }
+    }
+
+    #[test]
+    fn put_below_quorum_returns_error() {
+        use crate::membership::MemberInfo;
+        // 3 members, quorum 2; kill two so only one is live.
+        let mut cluster = Cluster::new(
+            (0..3)
+                .map(|i| MemberInfo::new((1, i + 1), "127.0.0.1".into(), 5701 + i as i32, 7701 + i as i32, i as u64))
+                .collect(),
+            1,
+            2,
+        );
+        cluster.remove_member_by_uuid((1, 2));
+        cluster.remove_member_by_uuid((1, 3));
+        assert!(!cluster.has_quorum());
+        let store = Store::new();
+        let out = dispatch(put_request("m", &[1], &[9], 7), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &cluster, None);
+        assert_eq!(out.len(), 1);
+        assert_eq!(msg_type(&out[0]), 0, "below quorum -> exception (type 0)");
+        assert_eq!(correlation_id(&out[0]), 7);
+        // The write must NOT have been applied.
+        assert_eq!(store.get("m", &[1]), None);
     }
 
     fn put_request(name: &str, key: &[u8], value: &[u8], corr: i64) -> Vec<Frame> {
