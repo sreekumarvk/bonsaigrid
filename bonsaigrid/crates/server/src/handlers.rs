@@ -189,7 +189,14 @@ impl Cfg {
 fn auth_response(cfg: &Cfg, cluster: &Cluster, status: u8) -> Vec<Frame> {
     let mem = cluster.member_tuples();
     let parts = cluster.partition_table();
-    let me = &cluster.members[cfg.self_index];
+    // Locate self by its stable uuid — the cluster member list is dynamic
+    // (live-only, reordered after a failover), so `cfg.self_index` can't index it.
+    let my_uuid = cfg.members[cfg.self_index].uuid;
+    let me = cluster
+        .members
+        .iter()
+        .find(|m| m.uuid == my_uuid)
+        .unwrap_or(&cluster.members[0]);
     let tpc = if cfg.tpc_ports.is_empty() {
         (None, None)
     } else {
@@ -315,6 +322,8 @@ pub fn dispatch(
         // channel with the token from the main auth. Response is an empty ack.
         5632 => vec![empty_response(5633)],
         768 => {
+            // Register this connection so membership changes are pushed to it live.
+            broker.register_cluster_view(conn_id, corr);
             let mem = cluster.member_tuples();
             let parts = cluster.partition_table();
             vec![

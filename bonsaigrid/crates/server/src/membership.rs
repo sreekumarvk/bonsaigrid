@@ -167,25 +167,25 @@ impl Cluster {
         jid
     }
 
-    /// Apply a master's published view if it is newer. Returns whether it applied.
-    pub fn apply_view(&mut self, generation: u64, members: Vec<MemberInfo>) -> bool {
+    /// Apply a master's published view (members **with** alive flags / tombstones)
+    /// if it is newer. Preserving tombstones is essential: ring ownership must
+    /// shift a dead member's partitions to its backup, not reshuffle by modulo.
+    pub fn set_view(&mut self, generation: u64, members: Vec<MemberInfo>, alive: Vec<bool>) -> bool {
         if generation <= self.generation {
             return false;
         }
-        let n = members.len();
         self.members = members;
-        self.alive = vec![true; n]; // a published view lists only live members
+        self.alive = alive;
         self.generation = generation;
         self.member_list_version += 1;
         self.partition_list_version += 1;
         true
     }
 
-    /// A view to publish: only alive members, current generation.
-    pub fn view(&self) -> (u64, Vec<MemberInfo>) {
-        let live: Vec<MemberInfo> =
-            self.members.iter().zip(&self.alive).filter(|(_, &a)| a).map(|(m, _)| m.clone()).collect();
-        (self.generation, live)
+    /// Convenience for tests: apply a view of all-alive members.
+    pub fn apply_view(&mut self, generation: u64, members: Vec<MemberInfo>) -> bool {
+        let n = members.len();
+        self.set_view(generation, members, vec![true; n])
     }
 
     fn bump(&mut self) {

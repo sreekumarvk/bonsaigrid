@@ -4,7 +4,7 @@
 
 use member::wire::Msg;
 use server::events::EventBroker;
-use server::member_thread::{spawn, MemberJob, Replicator};
+use server::member_thread::{spawn, ClusterEvent, MemberJob, Replicator};
 use server::membership::{Cluster, MemberInfo};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,17 +21,23 @@ fn sync_backup_applies_and_delivers_deferred_response() {
     let cluster = Cluster::new(vec![member(0, PORTS[0]), member(1, PORTS[1])], 1, 1);
     let ports: Vec<i32> = PORTS.to_vec();
 
+    // Large heartbeat timeout so failure detection doesn't interfere with this
+    // replication-focused test.
+    let (hb_i, hb_t) = (500u64, 1_000_000u64);
+
     // Backup (member 1): its own store; we assert the replicated value lands here.
     let store1 = Arc::new(Store::new());
     let broker1 = Arc::new(EventBroker::new((1, 2)));
     let (_tx1, rx1) = spsc::channel::<MemberJob>(64);
-    spawn(1, ports.clone(), cluster.clone(), store1.clone(), broker1, rx1);
+    let (ev1, _evrx1) = spsc::channel::<ClusterEvent>(64);
+    spawn(1, ports.clone(), cluster.clone(), 1, hb_i, hb_t, store1.clone(), broker1, rx1, ev1);
 
     // Primary (member 0): the deferred response is enqueued on broker0.
     let store0 = Arc::new(Store::new());
     let broker0 = Arc::new(EventBroker::new((1, 1)));
     let (tx0, rx0) = spsc::channel::<MemberJob>(64);
-    spawn(0, ports.clone(), cluster.clone(), store0.clone(), broker0.clone(), rx0);
+    let (ev0, _evrx0) = spsc::channel::<ClusterEvent>(64);
+    spawn(0, ports.clone(), cluster.clone(), 0, hb_i, hb_t, store0.clone(), broker0.clone(), rx0, ev0);
 
     // Let both listeners come up.
     std::thread::sleep(Duration::from_millis(300));

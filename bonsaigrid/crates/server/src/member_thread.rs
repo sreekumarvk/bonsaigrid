@@ -8,11 +8,12 @@
 //! last ack calls `broker.enqueue(conn_id, response)` — the reactor flushes it on
 //! its next event tick (same path as a deferred lock grant).
 
+use crate::cluster_coordinator::Coordinator;
 use crate::events::EventBroker;
 use crate::membership::Cluster;
 use member::replication::{apply, Pending};
 use member::transport::{Handler, Transport};
-use member::wire::Msg;
+use member::wire::{MemberRec, Msg};
 use std::cell::Cell;
 use std::sync::Arc;
 use store::Store;
@@ -24,8 +25,15 @@ const ACK_TIMEOUT_TICKS: u32 = 5000;
 pub enum MemberJob {
     /// Replicate a write; deliver `response` to `conn_id` once backups ack.
     Replicate { partition: i32, op_id: u64, msg: Msg, conn_id: u64, response: Vec<u8> },
-    /// Replace the member thread's membership view (after a promotion).
+    /// Replace the member thread's membership view (after a manual promotion).
     Membership(Cluster),
+}
+
+/// Member → reactor signal: the coordinator changed the membership; the reactor
+/// updates its authoritative `Cluster` and pushes cluster-view events to clients.
+pub struct ClusterEvent {
+    pub generation: u64,
+    pub members: Vec<MemberRec>,
 }
 
 /// Reactor-thread handle that hands replicated writes to the member thread.
@@ -76,8 +84,17 @@ struct MemberHandler {
     store: Arc<Store>,
     broker: Arc<EventBroker>,
     rx: spsc::Consumer<MemberJob>,
-    cluster: Cluster,
+    coord: Coordinator,
     pending: Pending,
+    events: spsc::Producer<ClusterEvent>,
+}
+
+impl MemberHandler {
+    /// Forward the current membership view to the reactor.
+    fn emit_view(&self) {
+        let (generation, members) = self.coord.view_recs();
+        let _ = self.events.push(ClusterEvent { generation, members });
+    }
 }
 
 impl Handler for MemberHandler {
@@ -92,7 +109,15 @@ impl Handler for MemberHandler {
                     self.broker.enqueue(conn, resp);
                 }
             }
-            Msg::Hello { .. } => {}
+            Msg::Heartbeat { from_join_id, generation } => {
+                self.coord.on_heartbeat(from_join_id, generation);
+            }
+            Msg::MemberView { generation, members } => {
+                if self.coord.on_view(generation, members) {
+                    self.emit_view();
+                }
+            }
+            Msg::Hello { .. } | Msg::JoinRequest { .. } => {}
         }
     }
 
@@ -100,7 +125,7 @@ impl Handler for MemberHandler {
         while let Some(job) = self.rx.pop() {
             match job {
                 MemberJob::Replicate { partition, op_id, msg, conn_id, response } => {
-                    let backups = self.cluster.backups_of(partition);
+                    let backups = self.coord.cluster.backups_of(partition);
                     if backups.is_empty() {
                         self.broker.enqueue(conn_id, response); // nobody to wait on
                     } else {
@@ -114,11 +139,14 @@ impl Handler for MemberHandler {
                         }
                     }
                 }
-                MemberJob::Membership(c) => self.cluster = c,
+                MemberJob::Membership(c) => self.coord.cluster = c,
             }
         }
         for (conn, resp) in self.pending.sweep_expired(ACK_TIMEOUT_TICKS) {
             self.broker.enqueue(conn, resp);
+        }
+        if self.coord.on_tick(outbox) {
+            self.emit_view();
         }
         true
     }
@@ -126,13 +154,18 @@ impl Handler for MemberHandler {
 
 /// Spawn the member thread. `member_ports[self_index]` is this member's inbound
 /// member port; the others are dialed on demand.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn(
     self_index: usize,
     member_ports: Vec<i32>,
     cluster: Cluster,
+    self_join_id: u64,
+    hb_interval_ticks: u64,
+    hb_timeout_ticks: u64,
     store: Arc<Store>,
     broker: Arc<EventBroker>,
     rx: spsc::Consumer<MemberJob>,
+    events: spsc::Producer<ClusterEvent>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let transport = match Transport::bind(self_index, &member_ports) {
@@ -142,7 +175,8 @@ pub fn spawn(
                 return;
             }
         };
-        let handler = MemberHandler { store, broker, rx, cluster, pending: Pending::new() };
+        let coord = Coordinator::new(cluster, self_join_id, hb_interval_ticks, hb_timeout_ticks);
+        let handler = MemberHandler { store, broker, rx, coord, pending: Pending::new(), events };
         let _ = transport.run(handler);
     })
 }

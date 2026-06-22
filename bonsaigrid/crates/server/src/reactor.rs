@@ -80,12 +80,14 @@ fn send_ud(id: usize) -> u64 {
 /// `dispatch(msg, out)` receives one complete binary request message and appends
 /// framed reply bytes to `out`. `http(path, out)` handles a REST request line
 /// (target path) and appends a full HTTP response to `out`.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     listeners: Vec<std::net::TcpListener>,
     mut dispatch: impl FnMut(&[u8], u64, &mut Vec<u8>),
     http: impl Fn(&str) -> (u16, &'static str, String),
     drain_events: impl Fn(u64, &mut Vec<u8>),
     on_close: impl Fn(u64),
+    mut on_tick: impl FnMut(),
 ) -> std::io::Result<()> {
     let fds: Vec<RawFd> = listeners.iter().map(|l| l.as_raw_fd()).collect();
     let mut ring = IoUring::new(4096)?;
@@ -174,6 +176,9 @@ pub fn run(
         // (covers events published by *other* connections).
         if flush_events {
             flush_events = false;
+            // Membership maintenance: drain the member→reactor signal, update the
+            // authoritative cluster, and enqueue cluster-view events to listeners.
+            on_tick();
             for id in 0..conns.len() {
                 let ready = matches!(conns.get(id), Some(Some(c)) if c.open && c.mode == Mode::Binary);
                 if !ready {

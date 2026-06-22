@@ -2,7 +2,8 @@
 //! big-endian. `len` covers `kind + body`. Strings and blobs are `[u32 len][bytes]`.
 //! Custom/BonsaiGrid-only — not the Hazelcast client format.
 
-/// One member's identity in a published view.
+/// One member's identity in a published view. `alive=false` is a tombstone:
+/// kept so ring ownership shifts to the backup rather than reshuffling.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemberRec {
     pub uuid: (i64, i64),
@@ -10,6 +11,7 @@ pub struct MemberRec {
     pub client_port: i32,
     pub member_port: i32,
     pub join_id: u64,
+    pub alive: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -61,6 +63,7 @@ fn put_member(out: &mut Vec<u8>, m: &MemberRec) {
     put_u32(out, m.client_port as u32);
     put_u32(out, m.member_port as u32);
     put_u64(out, m.join_id);
+    out.push(m.alive as u8);
 }
 
 /// Encode a message into a complete `[u32 len][kind][body]` frame.
@@ -121,6 +124,11 @@ struct Reader<'a> {
     pos: usize,
 }
 impl Reader<'_> {
+    fn u8(&mut self) -> Option<u8> {
+        let v = *self.b.get(self.pos)?;
+        self.pos += 1;
+        Some(v)
+    }
     fn u32(&mut self) -> Option<u32> {
         let s = self.b.get(self.pos..self.pos + 4)?;
         self.pos += 4;
@@ -155,6 +163,7 @@ impl Reader<'_> {
             client_port: self.u32()? as i32,
             member_port: self.u32()? as i32,
             join_id: self.u64()?,
+            alive: self.u8()? != 0,
         })
     }
 }
@@ -228,8 +237,8 @@ mod tests {
             Msg::MemberView {
                 generation: 9,
                 members: vec![
-                    MemberRec { uuid: (1, 1), host: "127.0.0.1".into(), client_port: 5701, member_port: 7701, join_id: 0 },
-                    MemberRec { uuid: (1, 2), host: "10.0.0.2".into(), client_port: 5701, member_port: 7701, join_id: 1 },
+                    MemberRec { uuid: (1, 1), host: "127.0.0.1".into(), client_port: 5701, member_port: 7701, join_id: 0, alive: false },
+                    MemberRec { uuid: (1, 2), host: "10.0.0.2".into(), client_port: 5701, member_port: 7701, join_id: 1, alive: true },
                 ],
             },
         ];

@@ -10,7 +10,7 @@
 //!     index, to form the cluster; a stock smart client routes keys to owners.
 
 use server::handlers::{Cfg, Member};
-use server::membership::Cluster;
+use server::membership::{Cluster, MemberInfo};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::cell::RefCell;
 use std::net::{SocketAddr, TcpListener};
@@ -96,26 +96,29 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
         core_affinity::set_for_current(id);
     }
 
-    // Spawn the member thread when this cluster keeps backups; the reactor hands
-    // it replicated writes over an SPSC ring and gets a Replicator handle.
-    let replicator = if backups > 0 {
-        let member_ports: Vec<i32> = (0..members).map(|i| MEMBER_BASE + i as i32).collect();
-        let (tx, rx) = spsc::channel::<server::member_thread::MemberJob>(8192);
-        server::member_thread::spawn(
-            self_index,
-            member_ports,
-            cluster.borrow().clone(),
-            store.clone(),
-            broker.clone(),
-            rx,
-        );
-        Some(server::member_thread::Replicator::new(tx, backups))
-    } else {
-        None
-    };
-    // Shared by the dispatch closure (replicate) and the http closure (promote);
-    // both run on this single reactor thread, so Rc is sufficient.
-    let replicator = Rc::new(replicator);
+    // The member thread runs whenever this is a real cluster (members > 1): it
+    // drives heartbeats / failure detection / migration and, when backups > 0,
+    // synchronous replication. The reactor talks to it over a forward ring
+    // (MemberJob) and learns membership changes over a reverse ring (ClusterEvent).
+    let hb_interval = env_usize("BONSAI_HB_INTERVAL_MS", 500) as u64;
+    let hb_timeout = env_usize("BONSAI_HB_TIMEOUT_MS", 3000) as u64;
+    let member_ports: Vec<i32> = (0..members).map(|i| MEMBER_BASE + i as i32).collect();
+    let (job_tx, job_rx) = spsc::channel::<server::member_thread::MemberJob>(8192);
+    let (ev_tx, ev_rx) = spsc::channel::<server::member_thread::ClusterEvent>(1024);
+    server::member_thread::spawn(
+        self_index,
+        member_ports,
+        cluster.borrow().clone(),
+        self_index as u64,
+        hb_interval,
+        hb_timeout,
+        store.clone(),
+        broker.clone(),
+        job_rx,
+        ev_tx,
+    );
+    let replicator =
+        Rc::new(if backups > 0 { Some(server::member_thread::Replicator::new(job_tx, backups)) } else { None });
 
     let n = members;
     let (eb, cb) = (broker.clone(), broker.clone());
@@ -125,6 +128,32 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
     let rep_d = replicator.clone();
     let cl_h = cluster.clone();
     let rep_h = replicator.clone();
+    // on_cluster: drain the reverse ring, apply to the authoritative Cluster, and
+    // push members/partitions view events to every registered cluster-view client.
+    let cl_e = cluster.clone();
+    let eb_e = broker.clone();
+    let on_cluster = move || {
+        let mut applied = false;
+        while let Some(ev) = ev_rx.pop() {
+            let alive: Vec<bool> = ev.members.iter().map(|m| m.alive).collect();
+            let infos: Vec<MemberInfo> = ev
+                .members
+                .into_iter()
+                .map(|m| MemberInfo::new(m.uuid, m.host, m.client_port, m.member_port, m.join_id))
+                .collect();
+            if cl_e.borrow_mut().set_view(ev.generation, infos, alive) {
+                applied = true;
+            }
+        }
+        if applied {
+            let c = cl_e.borrow();
+            for (conn, corr) in eb_e.cluster_view_listeners() {
+                for bytes in cluster_view_push(&c, corr) {
+                    eb_e.enqueue(conn, bytes);
+                }
+            }
+        }
+    };
     server::reactor::run(
         vec![listener],
         move |msg, conn_id, out| {
@@ -153,7 +182,21 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
             }
         },
         move |conn_id| cb.drop_conn(conn_id),
+        on_cluster,
     )
+}
+
+/// Build the (correlation-stamped) members + partitions view event messages to
+/// push to a cluster-view listener on a membership change.
+fn cluster_view_push(cluster: &Cluster, corr: i64) -> Vec<Vec<u8>> {
+    use protocol::frame::write_message;
+    use protocol::message::set_correlation_id;
+    let mut mv = codecs::cluster_view::members_view_event(cluster.member_list_version, &cluster.member_tuples());
+    set_correlation_id(&mut mv, corr);
+    let mut pv =
+        codecs::cluster_view::partitions_view_event(cluster.partition_list_version, &cluster.partition_table());
+    set_correlation_id(&mut pv, corr);
+    vec![write_message(&mv), write_message(&pv)]
 }
 
 /// Parse `/cluster/promote?dead=<index>` (the manual failover trigger; Phase D's
@@ -232,6 +275,7 @@ fn run_single_node() -> std::io::Result<()> {
                     }
                 },
                 move |conn_id| cb.drop_conn(conn_id),
+                || {}, // single node: no membership changes
             );
         }));
     }

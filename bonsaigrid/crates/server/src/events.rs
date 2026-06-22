@@ -31,6 +31,7 @@ struct Inner {
     topics: HashMap<String, Vec<TopicSub>>,     // topic name -> subscribers
     near_caches: HashMap<String, Vec<TopicSub>>, // map name -> near-cache invalidation listeners
     queues: HashMap<u64, Vec<Vec<u8>>>,         // conn id -> pending event messages
+    cluster_view: HashMap<u64, i64>,            // conn id -> cluster-view listener correlation id
 }
 
 pub struct EventBroker {
@@ -47,6 +48,7 @@ impl EventBroker {
                 topics: HashMap::new(),
                 near_caches: HashMap::new(),
                 queues: HashMap::new(),
+                cluster_view: HashMap::new(),
             }),
             member_uuid,
             nc_seq: AtomicI64::new(1),
@@ -152,6 +154,18 @@ impl EventBroker {
         self.inner.lock().unwrap().queues.entry(conn_id).or_default().push(bytes);
     }
 
+    // ---- Cluster-view listeners (membership-change push) ----
+    /// Register a connection's cluster-view listener (its `corr` is echoed on
+    /// every pushed members/partitions view event).
+    pub fn register_cluster_view(&self, conn_id: u64, corr: i64) {
+        self.inner.lock().unwrap().cluster_view.insert(conn_id, corr);
+    }
+
+    /// All current cluster-view listeners as `(conn_id, corr)`.
+    pub fn cluster_view_listeners(&self) -> Vec<(u64, i64)> {
+        self.inner.lock().unwrap().cluster_view.iter().map(|(&c, &k)| (c, k)).collect()
+    }
+
     /// Take all pending event-message bytes for a connection.
     pub fn drain(&self, conn_id: u64) -> Vec<Vec<u8>> {
         self.inner.lock().unwrap().queues.remove(&conn_id).unwrap_or_default()
@@ -169,5 +183,6 @@ impl EventBroker {
         for v in g.near_caches.values_mut() {
             v.retain(|s| s.conn_id != conn_id);
         }
+        g.cluster_view.remove(&conn_id);
     }
 }
