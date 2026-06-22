@@ -33,6 +33,7 @@ struct Entry {
     key_len: u32,
     val_len: u32,
     expire_at: u64, // 0 == never
+    stamp: u64,     // monotonic update stamp (for split-brain LatestUpdate merge)
 }
 
 impl Entry {
@@ -43,6 +44,7 @@ impl Entry {
         key_len: 0,
         val_len: 0,
         expire_at: 0,
+        stamp: 0,
     };
     fn occupied(&self) -> bool {
         self.hash > TOMBSTONE
@@ -132,7 +134,7 @@ impl Inner {
         self.tombstones = 0;
     }
 
-    fn put(&mut self, map: &str, key: &[u8], val: &[u8], ttl_ms: u64) -> Option<Vec<u8>> {
+    fn put(&mut self, map: &str, key: &[u8], val: &[u8], ttl_ms: u64, stamp: u64) -> Option<Vec<u8>> {
         let map_id = self.intern(map);
         let h = hash(map_id, key);
         let expire_at = if ttl_ms > 0 { now_ms() + ttl_ms } else { 0 };
@@ -154,6 +156,7 @@ impl Inner {
                     key_len: key.len() as u32,
                     val_len: val.len() as u32,
                     expire_at,
+                    stamp,
                 };
                 self.len += 1;
                 self.counts[map_id as usize] += 1;
@@ -177,6 +180,7 @@ impl Inner {
                     key_len: key.len() as u32,
                     val_len: val.len() as u32,
                     expire_at,
+                    stamp,
                 };
                 if old.is_none() && e.expired(now_ms()) {
                     // previously-expired slot becomes live again
@@ -239,12 +243,45 @@ impl Inner {
         Some(old)
     }
 
-    fn put_if_absent(&mut self, map: &str, key: &[u8], val: &[u8], ttl_ms: u64) -> Option<Vec<u8>> {
+    fn put_if_absent(&mut self, map: &str, key: &[u8], val: &[u8], ttl_ms: u64, stamp: u64) -> Option<Vec<u8>> {
         if let Some(i) = self.find(map, key) {
             return Some(self.val_bytes(&self.table[i]));
         }
-        self.put(map, key, val, ttl_ms);
+        self.put(map, key, val, ttl_ms, stamp);
         None
+    }
+
+    /// Merge an inbound (key,value,stamp): absent → insert; present → keep the
+    /// higher stamp when `latest_update`, else keep the existing (PutIfAbsent).
+    fn put_merge(&mut self, map: &str, key: &[u8], val: &[u8], ttl_ms: u64, stamp: u64, latest_update: bool) {
+        match self.find(map, key) {
+            None => {
+                self.put(map, key, val, ttl_ms, stamp);
+            }
+            Some(i) => {
+                if latest_update && stamp > self.table[i].stamp {
+                    self.put(map, key, val, ttl_ms, stamp);
+                }
+                // PutIfAbsent (or lower stamp): keep the existing entry.
+            }
+        }
+    }
+
+    /// All live entries across every map as (map, key, value, stamp).
+    fn collect_all_stamped(&self, out: &mut Vec<(String, Vec<u8>, Vec<u8>, u64)>) {
+        let now = now_ms();
+        for e in self.table.iter() {
+            if e.occupied() && !e.expired(now) {
+                let total = (e.key_len + e.val_len) as usize;
+                let bytes = self.slab.get(e.handle, total);
+                out.push((
+                    self.map_names[e.map_id as usize].clone(),
+                    bytes[..e.key_len as usize].to_vec(),
+                    bytes[e.key_len as usize..].to_vec(),
+                    e.stamp,
+                ));
+            }
+        }
     }
 
     fn replace(&mut self, map: &str, key: &[u8], val: &[u8]) -> Option<Vec<u8>> {
@@ -322,6 +359,9 @@ fn shard_of(map: &str, key: &[u8], n: usize) -> usize {
 }
 
 pub struct Store {
+    /// Monotonic per-member update-stamp source (seeded so different members'
+    /// stamps differ); used for split-brain LatestUpdate merge.
+    stamp_seq: std::sync::atomic::AtomicU64,
     shards: Vec<Mutex<Inner>>,
     // Distributed Queue backing: each queue is single-partition, so the owning
     // member holds it locally. Keyed by queue name.
@@ -362,8 +402,15 @@ impl Store {
     }
 
     pub fn with_shards(n: usize) -> Store {
+        Self::with_shards_seed(n, 0)
+    }
+
+    /// Like `with_shards`, but seed the stamp counter (member-specific) so stamps
+    /// from different members are distinguishable for merge.
+    pub fn with_shards_seed(n: usize, stamp_seed: u64) -> Store {
         assert!(n >= 1);
         Store {
+            stamp_seq: std::sync::atomic::AtomicU64::new(stamp_seed),
             shards: (0..n).map(|_| Mutex::new(Inner::new())).collect(),
             queues: Mutex::new(HashMap::new()),
             sets: Mutex::new(HashMap::new()),
@@ -652,13 +699,42 @@ impl Store {
         &self.shards[shard_of(map, key, self.shards.len())]
     }
 
+    /// A fresh monotonic update stamp.
+    pub fn next_stamp(&self) -> u64 {
+        self.stamp_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+    }
+
     pub fn put(&self, map: &str, key: Vec<u8>, val: Vec<u8>) -> Option<Vec<u8>> {
-        self.shard(map, &key).lock().unwrap().put(map, &key, &val, 0)
+        let stamp = self.next_stamp();
+        self.shard(map, &key).lock().unwrap().put(map, &key, &val, 0, stamp)
     }
 
     /// Put with TTL in milliseconds (0 == no expiry).
     pub fn put_ttl(&self, map: &str, key: Vec<u8>, val: Vec<u8>, ttl_ms: u64) -> Option<Vec<u8>> {
-        self.shard(map, &key).lock().unwrap().put(map, &key, &val, ttl_ms)
+        let stamp = self.next_stamp();
+        self.shard(map, &key).lock().unwrap().put(map, &key, &val, ttl_ms, stamp)
+    }
+
+    /// Put with an explicit stamp (used when applying a migrated/replicated entry
+    /// to preserve the originating member's stamp).
+    pub fn put_stamped(&self, map: &str, key: Vec<u8>, val: Vec<u8>, ttl_ms: u64, stamp: u64) -> Option<Vec<u8>> {
+        self.shard(map, &key).lock().unwrap().put(map, &key, &val, ttl_ms, stamp)
+    }
+
+    /// Merge an inbound entry under the given policy (`latest_update` keeps the
+    /// higher stamp; otherwise PutIfAbsent keeps any existing entry).
+    pub fn put_merge(&self, map: &str, key: &[u8], val: &[u8], ttl_ms: u64, stamp: u64, latest_update: bool) {
+        self.shard(map, key).lock().unwrap().put_merge(map, key, val, ttl_ms, stamp, latest_update);
+    }
+
+    /// Every live entry across all maps as (map, key, value, stamp) — the source
+    /// side of a partition migration filters this by partition.
+    pub fn all_entries_stamped(&self) -> Vec<(String, Vec<u8>, Vec<u8>, u64)> {
+        let mut out = Vec::new();
+        for s in &self.shards {
+            s.lock().unwrap().collect_all_stamped(&mut out);
+        }
+        out
     }
 
     pub fn get(&self, map: &str, key: &[u8]) -> Option<Vec<u8>> {
@@ -686,7 +762,8 @@ impl Store {
 
     /// Insert only if absent; returns the existing value if present.
     pub fn put_if_absent(&self, map: &str, key: Vec<u8>, val: Vec<u8>, ttl_ms: u64) -> Option<Vec<u8>> {
-        self.shard(map, &key).lock().unwrap().put_if_absent(map, &key, &val, ttl_ms)
+        let stamp = self.next_stamp();
+        self.shard(map, &key).lock().unwrap().put_if_absent(map, &key, &val, ttl_ms, stamp)
     }
 
     /// Replace only if present; returns the old value, or None if absent.
@@ -820,5 +897,42 @@ mod tests {
         let big = vec![3u8; 20_000];
         s.put("m", vec![1], big.clone());
         assert_eq!(s.get("m", &[1]), Some(big));
+    }
+
+    #[test]
+    fn put_merge_latest_update_keeps_higher_stamp() {
+        let s = Store::new();
+        s.put_stamped("m", vec![1], b"v5".to_vec(), 0, 5);
+        // lower stamp loses
+        s.put_merge("m", &[1], b"v3", 0, 3, true);
+        assert_eq!(s.get("m", &[1]), Some(b"v5".to_vec()));
+        // higher stamp wins
+        s.put_merge("m", &[1], b"v9", 0, 9, true);
+        assert_eq!(s.get("m", &[1]), Some(b"v9".to_vec()));
+        // absent key inserts
+        s.put_merge("m", &[2], b"new", 0, 1, true);
+        assert_eq!(s.get("m", &[2]), Some(b"new".to_vec()));
+    }
+
+    #[test]
+    fn put_merge_put_if_absent_keeps_existing() {
+        let s = Store::new();
+        s.put_stamped("m", vec![1], b"old".to_vec(), 0, 1);
+        s.put_merge("m", &[1], b"new", 0, 99, false); // PutIfAbsent: keep existing
+        assert_eq!(s.get("m", &[1]), Some(b"old".to_vec()));
+        s.put_merge("m", &[2], b"fresh", 0, 1, false); // absent -> insert
+        assert_eq!(s.get("m", &[2]), Some(b"fresh".to_vec()));
+    }
+
+    #[test]
+    fn all_entries_stamped_spans_maps() {
+        let s = Store::new();
+        s.put("a", vec![1], b"x".to_vec());
+        s.put("b", vec![2], b"y".to_vec());
+        let mut all = s.all_entries_stamped();
+        all.sort_by(|p, q| p.0.cmp(&q.0));
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].0, "a");
+        assert!(all[0].3 >= 1 && all[1].3 >= 1); // monotonic stamps assigned
     }
 }
