@@ -13,6 +13,7 @@ pub mod map;
 pub mod member_info;
 pub mod partition_table;
 pub mod schema;
+pub mod sql;
 
 use protocol::frame::{Frame, BEGIN_DS, END_DS};
 

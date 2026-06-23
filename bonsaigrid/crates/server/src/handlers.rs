@@ -906,6 +906,20 @@ pub fn dispatch(
             let (base, inc, size) = store.flake_batch(&n, batch);
             vec![map::flakeid_response(1835265, base, inc, size)]
         }
+        // ---- SQL (SELECT ... FROM map [WHERE ...]) over Compact IMap values ----
+        2163712 => {
+            let sql = codecs::sql::decode_execute_sql(&req);
+            match query::sql::parse(&sql) {
+                Some(sel) => {
+                    let entries = store.entries(&sel.map);
+                    let (cols, rows) = query::sql::execute(&sel, &entries, schemas);
+                    vec![codecs::sql::encode_execute_response(&cols, &rows)]
+                }
+                None => vec![codecs::sql::encode_execute_response(&[], &[])], // unsupported -> empty result
+            }
+        }
+        2163456 => vec![codecs::sql::encode_close_response()],
+        2163968 => vec![codecs::sql::encode_fetch_response()],
         // ClientLocalBackupListener: smart clients register it; response is a
         // UUID registration id at offset 13. We never push backup events.
         3840 => vec![uuid_response(3841, REGISTRATION_UUID)],
