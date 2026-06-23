@@ -262,34 +262,60 @@ fn parse_cond(t: &mut Tokenizer) -> Option<Predicate> {
     Some(Predicate::Compare { field, op, value })
 }
 
-/// Execute `select` over `(key, value)` IMap entries. Returns the column names and
-/// the rows (each cell is text or NULL).
+/// Execute `select` over `(key, value)` IMap entries with the given field
+/// extractor (Compact or JSON). `star_cols` supplies column names for `SELECT *`
+/// (e.g. a mapping's declared columns); empty falls back to the Compact schema.
+/// Returns the column names and the rows (each cell is text or NULL).
+pub fn execute_with(
+    select: &Select,
+    entries: &[(Vec<u8>, Vec<u8>)],
+    schemas: &SchemaService,
+    ex: &dyn FieldExtractor,
+    star_cols: &[String],
+    key_col: Option<&str>,
+) -> (Vec<String>, Vec<Vec<Option<String>>>) {
+    let matchall = Predicate::And(vec![]); // empty AND matches everything
+    let filter = select.filter.as_ref().unwrap_or(&matchall);
+
+    let matched: Vec<&(Vec<u8>, Vec<u8>)> =
+        entries.iter().filter(|(_, v)| eval(filter, v, schemas, ex)).collect();
+
+    let columns: Vec<String> = match &select.cols {
+        Cols::Named(names) => names.iter().map(|n| bare_col(n)).collect(),
+        Cols::Star if !star_cols.is_empty() => star_cols.to_vec(),
+        Cols::Star => matched.first().and_then(|(_, v)| schema_fields(v, schemas)).unwrap_or_default(),
+    };
+
+    let rows = matched
+        .iter()
+        .map(|(k, v)| {
+            columns
+                .iter()
+                .map(|c| {
+                    if Some(c.as_str()) == key_col {
+                        fmt(crate::json::decode_key_data(k)) // key column projected from the key
+                    } else {
+                        fmt(ex.extract(v, schemas, c))
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    (columns, rows)
+}
+
+/// Convenience: execute a Compact SELECT (no mapping).
 pub fn execute(
     select: &Select,
     entries: &[(Vec<u8>, Vec<u8>)],
     schemas: &SchemaService,
 ) -> (Vec<String>, Vec<Vec<Option<String>>>) {
-    let ex = CompactExtractor;
-    let matchall = Predicate::And(vec![]); // empty AND matches everything
-    let filter = select.filter.as_ref().unwrap_or(&matchall);
+    execute_with(select, entries, schemas, &CompactExtractor, &[], None)
+}
 
-    let matched: Vec<&Vec<u8>> =
-        entries.iter().filter(|(_, v)| eval(filter, v, schemas, &ex)).map(|(_, v)| v).collect();
-
-    // Resolve column names: explicit, or the schema fields of the first match.
-    let columns: Vec<String> = match &select.cols {
-        Cols::Named(names) => names.clone(),
-        Cols::Star => matched
-            .first()
-            .and_then(|v| schema_fields(v, schemas))
-            .unwrap_or_default(),
-    };
-
-    let rows = matched
-        .iter()
-        .map(|v| columns.iter().map(|c| fmt(ex.extract(v, schemas, c))).collect())
-        .collect();
-    (columns, rows)
+/// Strip a `table.` qualifier from a column reference.
+pub fn bare_col(c: &str) -> String {
+    c.rsplit('.').next().unwrap_or(c).to_string()
 }
 
 fn schema_fields(value: &[u8], schemas: &SchemaService) -> Option<Vec<String>> {

@@ -226,6 +226,33 @@ fn empty_response(msg_type: i32) -> Vec<Frame> {
     vec![Frame { flags: UNFRAGMENTED, content: c }]
 }
 
+/// Build an IMap (key, value) `Data` pair from an INSERT row against `mapping`.
+/// Convention: the first column is the key; the remaining columns form a json-flat
+/// value object. Returns None if the row doesn't match the column count.
+fn sql_insert_entry(
+    mapping: &query::sql::Mapping,
+    row: &[serialization::compact::FieldValue],
+) -> Option<(Vec<u8>, Vec<u8>)> {
+    use query::sql::ColType;
+    use serialization::compact::FieldValue;
+    if mapping.columns.is_empty() || row.len() != mapping.columns.len() {
+        return None;
+    }
+    let key = match (mapping.columns[0].1, &row[0]) {
+        (ColType::Int | ColType::Bigint, FieldValue::I64(i)) => query::json::int_data(*i as i32),
+        (_, FieldValue::Str(s)) => query::json::string_data(s),
+        (_, FieldValue::I64(i)) => query::json::string_data(&i.to_string()),
+        (_, v) => query::json::string_data(&format!("{v:?}")),
+    };
+    let fields: Vec<(String, FieldValue)> = mapping.columns[1..]
+        .iter()
+        .zip(&row[1..])
+        .map(|((name, _), v)| (name.clone(), v.clone()))
+        .collect();
+    let value = query::json::json_value_data(&query::json::json_object(&fields));
+    Some((key, value))
+}
+
 /// A Hazelcast exception response (message type 0 carrying one ErrorHolder). The
 /// client raises the mapped error (code 42 = SplitBrainProtectionError).
 fn error_response(error_code: i32, class_name: &str, message: &str) -> Vec<Frame> {
@@ -913,14 +940,34 @@ pub fn dispatch(
             match query::sql::parse(&sql) {
                 Some(Statement::Select(sel)) => {
                     let entries = store.entries(&sel.map);
-                    let (cols, rows) = query::sql::execute(&sel, &entries, schemas);
+                    let mapping = crate::catalog::get_mapping(&sel.map);
+                    let star_cols: Vec<String> =
+                        mapping.as_ref().map(|m| m.columns.iter().map(|(n, _)| n.clone()).collect()).unwrap_or_default();
+                    // First mapping column is the key (our INSERT convention).
+                    let key_col = mapping.as_ref().and_then(|m| m.columns.first().map(|(n, _)| n.clone()));
+                    let json = mapping.as_ref().map(|m| m.value_format() == "json-flat").unwrap_or(false);
+                    let (cols, rows) = if json {
+                        query::sql::execute_with(&sel, &entries, schemas, &query::json::JsonExtractor, &star_cols, key_col.as_deref())
+                    } else {
+                        query::sql::execute_with(&sel, &entries, schemas, &CompactExtractor, &star_cols, key_col.as_deref())
+                    };
                     vec![codecs::sql::encode_execute_response(&cols, &rows)]
                 }
                 Some(Statement::CreateMapping(m)) => {
                     crate::catalog::put_mapping(m);
                     vec![codecs::sql::encode_void_response()]
                 }
-                // INSERT / CREATE JOB land in later demo chunks.
+                Some(Statement::Insert(ins)) => {
+                    if let Some(m) = crate::catalog::get_mapping(&ins.mapping) {
+                        for row in &ins.rows {
+                            if let Some((key, value)) = sql_insert_entry(&m, row) {
+                                store.put_ttl(&ins.mapping, key, value, 0);
+                            }
+                        }
+                    }
+                    vec![codecs::sql::encode_void_response()]
+                }
+                // CREATE JOB lands in a later demo chunk.
                 Some(_) | None => vec![codecs::sql::encode_void_response()],
             }
         }

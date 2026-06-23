@@ -19,6 +19,7 @@
 //! `01 ffffffec 00000003 00000003 616765 fffffff9 0000001e`).
 
 mod eval;
+pub mod json;
 pub mod sql;
 pub use eval::eval;
 
