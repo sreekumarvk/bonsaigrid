@@ -6,41 +6,241 @@
 use crate::{eval, Op, Predicate};
 use serialization::compact::{CompactExtractor, FieldExtractor, FieldValue};
 use serialization::schema::SchemaService;
+use std::collections::HashMap;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColType {
+    Varchar,
+    Int,
+    Bigint,
+    Double,
+    Boolean,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MappingKind {
+    Imap,
+    Kafka,
+}
+
+/// A `CREATE MAPPING` definition (catalog entry).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mapping {
+    pub name: String,
+    pub kind: MappingKind,
+    pub columns: Vec<(String, ColType)>,
+    pub options: HashMap<String, String>,
+}
+
+impl Mapping {
+    pub fn option(&self, k: &str) -> Option<&str> {
+        self.options.get(k).map(|s| s.as_str())
+    }
+    pub fn value_format(&self) -> &str {
+        self.option("valueFormat").unwrap_or("compact")
+    }
+}
+
+/// An `INSERT INTO <mapping> VALUES (..),(..)`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Insert {
+    pub mapping: String,
+    pub rows: Vec<Vec<FieldValue>>,
+}
+
+/// A `CREATE JOB <name> AS SINK INTO <sink> <select>`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Job {
+    pub name: String,
+    pub sink: String,
+    pub select: Select,
+}
 
 #[derive(Debug, PartialEq)]
+pub enum Statement {
+    Select(Select),
+    CreateMapping(Mapping),
+    Insert(Insert),
+    CreateJob(Job),
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Cols {
     Star,
     Named(Vec<String>),
 }
 
-#[derive(Debug, PartialEq)]
+/// A join clause: `JOIN <right> ON <left_col> = <right_col>`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Join {
+    pub right: String,
+    pub left_col: String,
+    pub right_col: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Select {
     pub cols: Cols,
     pub map: String,
+    pub join: Option<Join>,
     pub filter: Option<Predicate>,
 }
 
-/// Parse a `SELECT` statement. Returns None if it isn't a supported SELECT.
-pub fn parse(sql: &str) -> Option<Select> {
+/// Parse any supported statement.
+pub fn parse(sql: &str) -> Option<Statement> {
     let mut t = Tokenizer::new(sql);
-    t.keyword("select")?;
+    if t.keyword("select").is_some() {
+        return Some(Statement::Select(parse_select_body(&mut t)?));
+    }
+    if t.keyword("insert").is_some() {
+        return Some(Statement::Insert(parse_insert(&mut t)?));
+    }
+    if t.keyword("create").is_some() {
+        if t.keyword("mapping").is_some() {
+            return Some(Statement::CreateMapping(parse_create_mapping(&mut t)?));
+        }
+        if t.keyword("job").is_some() {
+            return Some(Statement::CreateJob(parse_create_job(&mut t)?));
+        }
+    }
+    None
+}
+
+/// Convenience for callers/tests that only want a SELECT.
+pub fn parse_select(sql: &str) -> Option<Select> {
+    match parse(sql)? {
+        Statement::Select(s) => Some(s),
+        _ => None,
+    }
+}
+
+fn parse_select_body(t: &mut Tokenizer) -> Option<Select> {
     let cols = if t.symbol("*") {
         Cols::Star
     } else {
-        let mut names = vec![t.ident()?];
+        let mut names = vec![t.col_ref()?];
         while t.symbol(",") {
-            names.push(t.ident()?);
+            names.push(t.col_ref()?);
         }
         Cols::Named(names)
     };
     t.keyword("from")?;
     let map = t.ident()?;
-    let filter = if t.keyword("where").is_some() {
-        Some(parse_conds(&mut t)?)
+    let join = if t.keyword("join").is_some() {
+        let right = t.ident()?;
+        t.keyword("on")?;
+        let a = t.col_ref()?;
+        t.op()?; // '=' (only equi-join supported)
+        let b = t.col_ref()?;
+        // Normalize: left col belongs to `map`, right col to `right`.
+        let (left_col, right_col) = split_join_cols(&map, &right, &a, &b);
+        Some(Join { right, left_col, right_col })
     } else {
         None
     };
-    Some(Select { cols, map, filter })
+    let filter = if t.keyword("where").is_some() { Some(parse_conds(t)?) } else { None };
+    Some(Select { cols, map, join, filter })
+}
+
+/// Given `a` and `b` from `ON a = b`, return (col-on-left, col-on-right) using the
+/// `table.` qualifier when present.
+fn split_join_cols(left: &str, right: &str, a: &str, b: &str) -> (String, String) {
+    let bare = |c: &str| c.rsplit('.').next().unwrap_or(c).to_string();
+    let on = |c: &str, tbl: &str| c.starts_with(&format!("{tbl}."));
+    if on(a, right) || on(b, left) {
+        (bare(b), bare(a))
+    } else {
+        (bare(a), bare(b))
+    }
+}
+
+fn parse_create_mapping(t: &mut Tokenizer) -> Option<Mapping> {
+    let name = t.ident()?;
+    let mut columns = Vec::new();
+    if t.symbol("(") {
+        loop {
+            let col = t.ident()?;
+            let ty = parse_coltype(t)?;
+            columns.push((col, ty));
+            if t.symbol(")") {
+                break;
+            }
+            t.symbol(",");
+        }
+    }
+    t.keyword("type")?;
+    let kind = match t.ident()?.to_ascii_lowercase().as_str() {
+        "kafka" => MappingKind::Kafka,
+        _ => MappingKind::Imap,
+    };
+    let mut options = HashMap::new();
+    if t.keyword("options").is_some() && t.symbol("(") {
+        loop {
+            let k = t.string_lit()?;
+            t.op(); // '='
+            let v = t.string_lit()?;
+            options.insert(k, v);
+            if t.symbol(")") {
+                break;
+            }
+            t.symbol(",");
+        }
+    }
+    Some(Mapping { name, kind, columns, options })
+}
+
+fn parse_coltype(t: &mut Tokenizer) -> Option<ColType> {
+    let id = t.ident()?.to_ascii_lowercase();
+    Some(match id.as_str() {
+        "int" | "integer" => ColType::Int,
+        "bigint" => ColType::Bigint,
+        "double" => ColType::Double,
+        "boolean" => ColType::Boolean,
+        _ => ColType::Varchar,
+    })
+}
+
+fn parse_insert(t: &mut Tokenizer) -> Option<Insert> {
+    t.keyword("into")?;
+    let mapping = t.ident()?;
+    // optional column list — ignored (positional)
+    if t.symbol("(") {
+        loop {
+            t.ident()?;
+            if t.symbol(")") {
+                break;
+            }
+            t.symbol(",");
+        }
+    }
+    t.keyword("values")?;
+    let mut rows = Vec::new();
+    loop {
+        if !t.symbol("(") {
+            break;
+        }
+        let mut row = vec![t.literal()?];
+        while t.symbol(",") {
+            row.push(t.literal()?);
+        }
+        t.symbol(")");
+        rows.push(row);
+        if !t.symbol(",") {
+            break;
+        }
+    }
+    Some(Insert { mapping, rows })
+}
+
+fn parse_create_job(t: &mut Tokenizer) -> Option<Job> {
+    let name = t.ident()?;
+    t.keyword("as")?;
+    t.keyword("sink")?;
+    t.keyword("into")?;
+    let sink = t.ident()?;
+    t.keyword("select")?;
+    let select = parse_select_body(t)?;
+    Some(Job { name, sink, select })
 }
 
 fn parse_conds(t: &mut Tokenizer) -> Option<Predicate> {
@@ -162,6 +362,34 @@ impl<'a> Tokenizer<'a> {
             None
         }
     }
+    /// An identifier possibly qualified with `table.col`.
+    fn col_ref(&mut self) -> Option<String> {
+        self.skip_ws();
+        let start = self.i;
+        while self.i < self.s.len() && (is_ident(self.s[self.i]) || self.s[self.i] == b'.') {
+            self.i += 1;
+        }
+        if self.i > start {
+            Some(String::from_utf8_lossy(&self.s[start..self.i]).into_owned())
+        } else {
+            None
+        }
+    }
+    fn string_lit(&mut self) -> Option<String> {
+        self.skip_ws();
+        if self.i < self.s.len() && self.s[self.i] == b'\'' {
+            self.i += 1;
+            let start = self.i;
+            while self.i < self.s.len() && self.s[self.i] != b'\'' {
+                self.i += 1;
+            }
+            let s = String::from_utf8_lossy(&self.s[start..self.i]).into_owned();
+            self.i += 1; // closing quote
+            Some(s)
+        } else {
+            None
+        }
+    }
     fn op(&mut self) -> Option<Op> {
         self.skip_ws();
         for (sym, op) in [(">=", Op::Ge), ("<=", Op::Le), ("=", Op::Eq), (">", Op::Gt), ("<", Op::Lt)] {
@@ -203,7 +431,7 @@ mod tests {
 
     #[test]
     fn parse_select_with_where() {
-        let s = parse("SELECT name, age FROM people WHERE age > 30 AND name = 'alice'").unwrap();
+        let s = parse_select("SELECT name, age FROM people WHERE age > 30 AND name = 'alice'").unwrap();
         assert_eq!(s.map, "people");
         assert_eq!(s.cols, Cols::Named(vec!["name".into(), "age".into()]));
         match s.filter.unwrap() {
@@ -214,9 +442,56 @@ mod tests {
 
     #[test]
     fn parse_star_no_where() {
-        let s = parse("select * from m").unwrap();
+        let s = parse_select("select * from m").unwrap();
         assert_eq!(s.cols, Cols::Star);
         assert!(s.filter.is_none());
+    }
+
+    #[test]
+    fn parse_create_mapping_stmt() {
+        let st = parse(
+            "CREATE MAPPING recommender (user_id VARCHAR, starter VARCHAR) TYPE IMap \
+             OPTIONS ('keyFormat'='varchar', 'valueFormat'='json-flat')",
+        )
+        .unwrap();
+        match st {
+            Statement::CreateMapping(m) => {
+                assert_eq!(m.name, "recommender");
+                assert_eq!(m.kind, MappingKind::Imap);
+                assert_eq!(m.columns, vec![("user_id".into(), ColType::Varchar), ("starter".into(), ColType::Varchar)]);
+                assert_eq!(m.value_format(), "json-flat");
+            }
+            _ => panic!("expected CreateMapping"),
+        }
+    }
+
+    #[test]
+    fn parse_insert_and_job() {
+        match parse("INSERT INTO recommender VALUES ('user_1','Soup'), ('user_2','Salad')").unwrap() {
+            Statement::Insert(i) => {
+                assert_eq!(i.mapping, "recommender");
+                assert_eq!(i.rows.len(), 2);
+                assert_eq!(i.rows[0][0], FieldValue::Str("user_1".into()));
+            }
+            _ => panic!("expected Insert"),
+        }
+        match parse(
+            "CREATE JOB enrich AS SINK INTO out SELECT * FROM pizzastream JOIN recommender \
+             ON pizzastream.user_id = recommender.user_id WHERE starter = 'Soup'",
+        )
+        .unwrap()
+        {
+            Statement::CreateJob(j) => {
+                assert_eq!(j.name, "enrich");
+                assert_eq!(j.sink, "out");
+                assert_eq!(j.select.map, "pizzastream");
+                let join = j.select.join.unwrap();
+                assert_eq!(join.right, "recommender");
+                assert_eq!(join.left_col, "user_id");
+                assert_eq!(join.right_col, "user_id");
+            }
+            _ => panic!("expected CreateJob"),
+        }
     }
 
     #[test]
@@ -236,13 +511,13 @@ mod tests {
         v.extend_from_slice(&payload);
         let entries = vec![(b"a".to_vec(), v)];
 
-        let sel = parse("SELECT name, age FROM people WHERE age > 30").unwrap();
+        let sel = parse_select("SELECT name, age FROM people WHERE age > 30").unwrap();
         let (cols, rows) = execute(&sel, &entries, &schemas);
         assert_eq!(cols, vec!["name", "age"]);
         assert_eq!(rows, vec![vec![Some("alice".into()), Some("35".into())]]);
 
         // filtered out
-        let sel2 = parse("SELECT name FROM people WHERE age > 40").unwrap();
+        let sel2 = parse_select("SELECT name FROM people WHERE age > 40").unwrap();
         assert!(execute(&sel2, &entries, &schemas).1.is_empty());
     }
 }

@@ -60,6 +60,15 @@ pub fn encode_execute_response(columns: &[String], rows: &[Vec<Option<String>>])
     out
 }
 
+/// A SqlExecute response for a non-row statement (DDL/DML/JOB): update_count=0,
+/// null metadata/page/error.
+pub fn encode_void_response() -> Vec<Frame> {
+    let mut hdr = vec![0u8; 21]; // type@0, corr@4, backupAcks@12, update_count i64 @13
+    write_i32_le(&mut hdr, 0, 2163713);
+    write_i64_le(&mut hdr, 13, 0);
+    vec![initial_frame(hdr), null_frame(), null_frame(), null_frame()]
+}
+
 /// SqlClose response (empty ack), type 2163457.
 pub fn encode_close_response() -> Vec<Frame> {
     let mut c = vec![0u8; 13];

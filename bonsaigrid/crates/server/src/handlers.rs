@@ -906,16 +906,22 @@ pub fn dispatch(
             let (base, inc, size) = store.flake_batch(&n, batch);
             vec![map::flakeid_response(1835265, base, inc, size)]
         }
-        // ---- SQL (SELECT ... FROM map [WHERE ...]) over Compact IMap values ----
+        // ---- SQL: SELECT / CREATE MAPPING / INSERT / CREATE JOB ----
         2163712 => {
+            use query::sql::Statement;
             let sql = codecs::sql::decode_execute_sql(&req);
             match query::sql::parse(&sql) {
-                Some(sel) => {
+                Some(Statement::Select(sel)) => {
                     let entries = store.entries(&sel.map);
                     let (cols, rows) = query::sql::execute(&sel, &entries, schemas);
                     vec![codecs::sql::encode_execute_response(&cols, &rows)]
                 }
-                None => vec![codecs::sql::encode_execute_response(&[], &[])], // unsupported -> empty result
+                Some(Statement::CreateMapping(m)) => {
+                    crate::catalog::put_mapping(m);
+                    vec![codecs::sql::encode_void_response()]
+                }
+                // INSERT / CREATE JOB land in later demo chunks.
+                Some(_) | None => vec![codecs::sql::encode_void_response()],
             }
         }
         2163456 => vec![codecs::sql::encode_close_response()],
