@@ -5,6 +5,7 @@ pub mod events;
 pub mod catalog;
 pub mod cluster_coordinator;
 pub mod handlers;
+pub mod jobs;
 pub mod kafka;
 pub mod member_thread;
 pub mod membership;

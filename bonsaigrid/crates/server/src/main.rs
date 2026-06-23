@@ -92,6 +92,7 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
     let self_uuid = cfg.members[self_index].uuid;
     let join_as = if joining { Some(cluster.borrow().members[self_index].clone()) } else { None };
     let store = Arc::new(store::Store::with_shards_seed(1, (self_index as u64) << 48));
+    server::jobs::set_store(store.clone()); // streaming SQL jobs look up the IMap here
     let broker = Arc::new(server::events::EventBroker::new(self_uuid));
     let schemas = Arc::new(serialization::schema::SchemaService::new());
     let listener = reuseport_listener(format!("127.0.0.1:{port}").parse().unwrap())?;
@@ -244,6 +245,7 @@ fn run_single_node() -> std::io::Result<()> {
         password,
     });
     let store = Arc::new(store::Store::with_shards(cores));
+    server::jobs::set_store(store.clone()); // streaming SQL jobs look up the IMap here
     // Single-member cluster, no backups; shared read-only across cores.
     let cluster = Arc::new(Cluster::new(bootstrap_members(1), 0, 1));
     // One broker + metrics registry shared across this member's cores.

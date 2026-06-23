@@ -1015,8 +1015,11 @@ pub fn dispatch(
                     }
                     vec![codecs::sql::encode_void_response()]
                 }
-                // CREATE JOB lands in a later demo chunk.
-                Some(_) | None => vec![codecs::sql::encode_void_response()],
+                Some(Statement::CreateJob(job)) => {
+                    crate::jobs::spawn(job);
+                    vec![codecs::sql::encode_void_response()]
+                }
+                None => vec![codecs::sql::encode_void_response()],
             }
         }
         2163456 => vec![codecs::sql::encode_close_response()],
