@@ -318,6 +318,57 @@ pub fn bare_col(c: &str) -> String {
     c.rsplit('.').next().unwrap_or(c).to_string()
 }
 
+/// Evaluate a predicate against a flat `(name, value)` field list (used by the
+/// JOIN / streaming path, where rows are field maps rather than Compact blobs).
+pub fn eval_fields(pred: &Predicate, fields: &[(String, FieldValue)]) -> bool {
+    use std::cmp::Ordering;
+    let get = |name: &str| {
+        let b = bare_col(name);
+        fields.iter().find(|(k, _)| *k == b).map(|(_, v)| v)
+    };
+    match pred {
+        Predicate::Compare { field, op, value } => match get(field) {
+            Some(fv) => match fv.compare(value) {
+                Some(o) => match op {
+                    Op::Eq => o == Ordering::Equal,
+                    Op::Lt => o == Ordering::Less,
+                    Op::Le => o != Ordering::Greater,
+                    Op::Gt => o == Ordering::Greater,
+                    Op::Ge => o != Ordering::Less,
+                },
+                None => false,
+            },
+            None => false,
+        },
+        Predicate::And(c) => c.iter().all(|p| eval_fields(p, fields)),
+        Predicate::Or(c) => c.iter().any(|p| eval_fields(p, fields)),
+        Predicate::MatchNone => false,
+    }
+}
+
+/// Apply `select`'s WHERE to a combined field row and project its output columns.
+/// Returns the output `(column, value)` row, or None if filtered out. `SELECT *`
+/// emits all fields in order.
+pub fn project_row(select: &Select, fields: &[(String, FieldValue)]) -> Option<Vec<(String, FieldValue)>> {
+    let matchall = Predicate::And(vec![]);
+    let filter = select.filter.as_ref().unwrap_or(&matchall);
+    if !eval_fields(filter, fields) {
+        return None;
+    }
+    let cols: Vec<String> = match &select.cols {
+        Cols::Named(n) => n.iter().map(|c| bare_col(c)).collect(),
+        Cols::Star => fields.iter().map(|(k, _)| k.clone()).collect(),
+    };
+    Some(
+        cols.iter()
+            .map(|c| {
+                let v = fields.iter().find(|(k, _)| k == c).map(|(_, v)| v.clone()).unwrap_or(FieldValue::Null);
+                (c.clone(), v)
+            })
+            .collect(),
+    )
+}
+
 fn schema_fields(value: &[u8], schemas: &SchemaService) -> Option<Vec<String>> {
     if value.len() < serialization::DATA_OFFSET + 8 {
         return None;
@@ -328,13 +379,18 @@ fn schema_fields(value: &[u8], schemas: &SchemaService) -> Option<Vec<String>> {
 }
 
 fn fmt(v: FieldValue) -> Option<String> {
+    fmt_value(&v)
+}
+
+/// Render a field value as result text (NULL → None).
+pub fn fmt_value(v: &FieldValue) -> Option<String> {
     match v {
         FieldValue::Null => None,
         FieldValue::Bool(b) => Some(b.to_string()),
         FieldValue::I32(i) => Some(i.to_string()),
         FieldValue::I64(i) => Some(i.to_string()),
         FieldValue::F64(f) => Some(f.to_string()),
-        FieldValue::Str(s) => Some(s),
+        FieldValue::Str(s) => Some(s.clone()),
     }
 }
 
@@ -518,6 +574,37 @@ mod tests {
             }
             _ => panic!("expected CreateJob"),
         }
+    }
+
+    #[test]
+    fn join_core_filters_and_projects() {
+        // Simulate a streamed order joined with a recommendation row.
+        let sel = match parse(
+            "CREATE JOB j AS SINK INTO out SELECT order_id, user_id, starter FROM orders \
+             JOIN recommender ON orders.user_id = recommender.user_id WHERE starter = 'Soup'",
+        )
+        .unwrap()
+        {
+            Statement::CreateJob(j) => j.select,
+            _ => panic!(),
+        };
+        let combined = vec![
+            ("order_id".to_string(), FieldValue::I64(7)),
+            ("user_id".to_string(), FieldValue::Str("user_1".into())),
+            ("starter".to_string(), FieldValue::Str("Soup".into())),
+        ];
+        let row = project_row(&sel, &combined).unwrap();
+        assert_eq!(
+            row,
+            vec![
+                ("order_id".into(), FieldValue::I64(7)),
+                ("user_id".into(), FieldValue::Str("user_1".into())),
+                ("starter".into(), FieldValue::Str("Soup".into())),
+            ]
+        );
+        // WHERE filters non-Soup out.
+        let salad = vec![("starter".to_string(), FieldValue::Str("Salad".into()))];
+        assert!(project_row(&sel, &salad).is_none());
     }
 
     #[test]

@@ -50,6 +50,40 @@ pub fn json_field_names(value: &[u8]) -> Option<Vec<String>> {
     parse_json_object(value).map(|o| o.keys().cloned().collect())
 }
 
+/// A serde JSON value as a `FieldValue`.
+pub fn json_to_fieldvalue(v: &serde_json::Value) -> FieldValue {
+    match v {
+        serde_json::Value::Null => FieldValue::Null,
+        serde_json::Value::Bool(b) => FieldValue::Bool(*b),
+        serde_json::Value::String(s) => FieldValue::Str(s.clone()),
+        serde_json::Value::Number(n) => {
+            n.as_i64().map(FieldValue::I64).unwrap_or_else(|| FieldValue::F64(n.as_f64().unwrap_or(0.0)))
+        }
+        other => FieldValue::Str(other.to_string()),
+    }
+}
+
+/// All fields of a json-flat IMap entry as `(name, value)`: the key column (from
+/// the key blob) plus every JSON value field.
+pub fn jsonflat_fields(key: &[u8], value: &[u8], key_col: &str) -> Vec<(String, FieldValue)> {
+    let mut out = vec![(key_col.to_string(), decode_key_data(key))];
+    if let Some(obj) = parse_json_object(value) {
+        for (k, v) in obj.iter() {
+            out.push((k.clone(), json_to_fieldvalue(v)));
+        }
+    }
+    out
+}
+
+/// A flat field map (e.g. a parsed Kafka record) as `(name, value)` pairs.
+pub fn json_record_fields(json: &str) -> Vec<(String, FieldValue)> {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| v.as_object().cloned())
+        .map(|o| o.iter().map(|(k, v)| (k.clone(), json_to_fieldvalue(v))).collect())
+        .unwrap_or_default()
+}
+
 fn data_blob(type_id: i32, payload: &[u8]) -> Vec<u8> {
     let mut d = Vec::with_capacity(DATA_OFFSET + payload.len());
     d.extend_from_slice(&0i32.to_be_bytes()); // partitionHash

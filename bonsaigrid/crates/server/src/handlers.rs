@@ -226,6 +226,50 @@ fn empty_response(msg_type: i32) -> Vec<Frame> {
     vec![Frame { flags: UNFRAGMENTED, content: c }]
 }
 
+/// Execute a `SELECT ... FROM left JOIN right ON l = r [WHERE ...]` over two
+/// json-flat IMaps: index the right side by its join column, probe with each left
+/// row, merge fields, filter + project. Returns (columns, rows-as-text).
+fn sql_join(sel: &query::sql::Select, store: &Store) -> (Vec<String>, Vec<Vec<Option<String>>>) {
+    use serialization::compact::FieldValue;
+    let join = sel.join.as_ref().unwrap();
+    let key_col = |name: &str| {
+        crate::catalog::get_mapping(name)
+            .and_then(|m| m.columns.first().map(|(n, _)| n.clone()))
+            .unwrap_or_else(|| "__key".into())
+    };
+    let lkc = key_col(&sel.map);
+    let rkc = key_col(&join.right);
+    let field_str = |fields: &[(String, FieldValue)], col: &str| {
+        fields.iter().find(|(c, _)| *c == col).and_then(|(_, v)| query::sql::fmt_value(v))
+    };
+
+    // Index right rows by their join-column value.
+    let mut index: std::collections::HashMap<String, Vec<(String, FieldValue)>> = std::collections::HashMap::new();
+    for (k, v) in store.entries(&join.right) {
+        let rf = query::json::jsonflat_fields(&k, &v, &rkc);
+        if let Some(j) = field_str(&rf, &join.right_col) {
+            index.insert(j, rf);
+        }
+    }
+
+    let mut cols: Vec<String> = Vec::new();
+    let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+    for (k, v) in store.entries(&sel.map) {
+        let lf = query::json::jsonflat_fields(&k, &v, &lkc);
+        let Some(j) = field_str(&lf, &join.left_col) else { continue };
+        let Some(rf) = index.get(&j) else { continue };
+        let mut combined = lf.clone();
+        combined.extend(rf.iter().cloned());
+        if let Some(row) = query::sql::project_row(sel, &combined) {
+            if cols.is_empty() {
+                cols = row.iter().map(|(c, _)| c.clone()).collect();
+            }
+            rows.push(row.iter().map(|(_, val)| query::sql::fmt_value(val)).collect());
+        }
+    }
+    (cols, rows)
+}
+
 /// Build an IMap (key, value) `Data` pair from an INSERT row against `mapping`.
 /// Convention: the first column is the key; the remaining columns form a json-flat
 /// value object. Returns None if the row doesn't match the column count.
@@ -938,6 +982,10 @@ pub fn dispatch(
             use query::sql::Statement;
             let sql = codecs::sql::decode_execute_sql(&req);
             match query::sql::parse(&sql) {
+                Some(Statement::Select(sel)) if sel.join.is_some() => {
+                    let (cols, rows) = sql_join(&sel, store);
+                    vec![codecs::sql::encode_execute_response(&cols, &rows)]
+                }
                 Some(Statement::Select(sel)) => {
                     let entries = store.entries(&sel.map);
                     let mapping = crate::catalog::get_mapping(&sel.map);
