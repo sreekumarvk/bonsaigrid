@@ -144,6 +144,11 @@ impl MemberHandler {
             // Auxiliary-structure state for this partition (queues/lists/sets/...).
             let aux = self.store.aux_state_for_partition(partition, crate::handlers::PARTITION_COUNT);
             outbox.push((dest, Msg::MigrateAux { generation, partition, payload: aux }));
+            // MultiMap entries (key-partitioned) for this partition.
+            let mm = self.store.mm_entries_for_partition(partition, crate::handlers::PARTITION_COUNT);
+            if !mm.is_empty() {
+                outbox.push((dest, Msg::MigrateMm { generation, partition, entries: mm }));
+            }
             outbox.push((dest, Msg::MigrateEnd { generation, partition }));
         }
     }
@@ -184,6 +189,15 @@ impl Handler for MemberHandler {
             }
             Msg::MigrateAux { payload, .. } => {
                 self.store.install_aux_state(&payload);
+            }
+            Msg::BackupMm { op_id, name, key, values } => {
+                self.store.mm_install(&name, key, values);
+                outbox.push((src, Msg::Ack { op_id }));
+            }
+            Msg::MigrateMm { entries, .. } => {
+                for (name, key, values) in entries {
+                    self.store.mm_install(&name, key, values);
+                }
             }
             Msg::MigrateStart { .. } | Msg::MigrateEnd { .. } => {}
             Msg::Hello { .. } => {}

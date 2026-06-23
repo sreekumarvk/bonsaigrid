@@ -1,10 +1,9 @@
-"""HA for the name-partitioned auxiliary structures: queues/lists/sets survive
-node loss.
+"""HA for the auxiliary structures: queues/lists/sets (name-partitioned) and
+MultiMap (key-partitioned) survive node loss.
 
-Fill many named IQueue/IList/ISet (spread across partitions, so several land on
-member 0), SIGKILL member 0, and after auto-failover a fresh client reads
+Fill many named IQueue/IList/ISet/MultiMap (spread across partitions, so several
+land on member 0), SIGKILL member 0, and after auto-failover a fresh client reads
 identical contents — the structures member 0 owned are served by their backups.
-(MultiMap is key-partitioned like IMap and is a documented follow-up.)
 """
 import os
 import signal
@@ -37,6 +36,9 @@ def main() -> int:
         q = a.get_queue(f"Q{i}").blocking()
         q.offer(f"q{i}_0")
         q.offer(f"q{i}_1")
+        mm = a.get_multi_map(f"MM{i}").blocking()
+        mm.put(f"k{i}", f"v{i}_0")
+        mm.put(f"k{i}", f"v{i}_1")
     a.shutdown()
 
     kill("/tmp/bonsai_ha0.pid")
@@ -55,12 +57,14 @@ def main() -> int:
             bad.append(f"S{i}")
         if b.get_queue(f"Q{i}").blocking().size() != 2:
             bad.append(f"Q{i}")
+        if sorted(b.get_multi_map(f"MM{i}").blocking().get(f"k{i}")) != [f"v{i}_0", f"v{i}_1"]:
+            bad.append(f"MM{i}")
     b.shutdown()
 
     if bad:
         print(f"STRUCTURE HA SMOKE FAILED — {len(bad)} structures lost data, e.g. {bad[:10]}")
         return 1
-    print(f"STRUCTURE HA SMOKE OK — all {M} of each (list/set/queue) survived member-0 loss")
+    print(f"STRUCTURE HA SMOKE OK — all {M} of each (list/set/queue/multimap) survived member-0 loss")
     return 0
 
 

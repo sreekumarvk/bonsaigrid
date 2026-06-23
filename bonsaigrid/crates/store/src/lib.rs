@@ -660,6 +660,36 @@ impl Store {
         self.multimaps.lock().unwrap().get(name).map_or(0, |m| m.values().map(|v| v.len()).sum())
     }
 
+    /// Install a `(name, key)` value-set (HA replication/migration). An empty set
+    /// removes the key (and the map if it becomes empty).
+    pub fn mm_install(&self, name: &str, key: Vec<u8>, values: Vec<Vec<u8>>) {
+        let mut g = self.multimaps.lock().unwrap();
+        if values.is_empty() {
+            if let Some(m) = g.get_mut(name) {
+                m.remove(&key);
+                if m.is_empty() {
+                    g.remove(name);
+                }
+            }
+        } else {
+            g.entry(name.to_string()).or_default().insert(key, values);
+        }
+    }
+
+    /// Every `(name, key, values)` whose key maps to `partition` — the migration
+    /// source for MultiMap (which is key-partitioned like IMap).
+    pub fn mm_entries_for_partition(&self, partition: i32, count: i32) -> Vec<(String, Vec<u8>, Vec<Vec<u8>>)> {
+        let mut out = Vec::new();
+        for (name, m) in self.multimaps.lock().unwrap().iter() {
+            for (key, values) in m.iter() {
+                if serialization::partition_id(key, count) == partition {
+                    out.push((name.clone(), key.clone(), values.clone()));
+                }
+            }
+        }
+        out
+    }
+
     // ---- Distributed Queue ----
     pub fn queue_offer(&self, q: &str, v: Vec<u8>) -> bool {
         self.queues.lock().unwrap().entry(q.to_string()).or_default().push_back(v);

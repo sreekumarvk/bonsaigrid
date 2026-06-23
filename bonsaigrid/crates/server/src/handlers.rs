@@ -258,6 +258,7 @@ fn is_quorum_gated_write(msg_type: i32) -> bool {
             | 328704 | 328960 | 329984       // list: add, remove, clear
             | 394240 | 394496 | 395520       // set: add, remove, clear
             | 196864 | 197888 | 197632 | 200448 // queue: offer, poll, remove, clear
+            | 131328 | 131840                // multimap: put, remove (key-partitioned)
             | 1508864                        // ringbuffer: add
             | 1901056                        // pncounter: add
     )
@@ -283,6 +284,41 @@ fn replicate_state(
         partition,
         payload,
     })
+}
+
+/// Finalize a MultiMap mutation: set corr, then synchronously replicate the
+/// `(name, key)` value-set to the backups of the **key's** partition (MultiMap is
+/// key-partitioned like IMap), deferring the reply until the backup acks.
+#[allow(clippy::too_many_arguments)]
+fn mm_reply(
+    name: String,
+    key: Vec<u8>,
+    mut resp: Vec<Frame>,
+    corr: i64,
+    store: &Store,
+    cluster: &Cluster,
+    replicator: Option<&Replicator>,
+    conn_id: u64,
+) -> Vec<Vec<Frame>> {
+    set_correlation_id(&mut resp, corr);
+    let partition = serialization::partition_id(&key, PARTITION_COUNT);
+    let deferred = match replicator {
+        Some(rep) if rep.has_backups() && !cluster.backups_of(partition).is_empty() => {
+            let values = store.mm_get(&name, &key);
+            rep.replicate(partition, conn_id, write_message(&resp), move |op| Msg::BackupMm {
+                op_id: op,
+                name,
+                key,
+                values,
+            })
+        }
+        _ => false,
+    };
+    if deferred {
+        vec![]
+    } else {
+        vec![resp]
+    }
 }
 
 /// Finalize an auxiliary-structure mutation: set the correlation id, then either
@@ -691,12 +727,11 @@ pub fn dispatch(
         }
         // ---- MultiMap (Set semantics) ----
         131328 => {
-            // MultiMap is key-partitioned (like IMap), not name-partitioned, so it
-            // is not covered by the name-based aux HA mechanism — see spec follow-up.
             let name = map::decode_name(&req);
             let key = req[2].content.clone();
             let value = req[3].content.clone();
-            vec![map::bool_response(131329, store.mm_put(&name, key, value))]
+            let ok = store.mm_put(&name, key.clone(), value);
+            mm_reply(name, key, map::bool_response(131329, ok), corr, store, cluster, replicator, conn_id)
         }
         131584 => {
             let (name, key) = map::decode_name_key(&req);
@@ -704,7 +739,11 @@ pub fn dispatch(
         }
         131840 => {
             let (name, key) = map::decode_name_key(&req);
-            vec![map::encode_data_list_response(131841, &store.mm_remove(&name, &key))]
+            let removed = store.mm_remove(&name, &key);
+            let r = map::encode_data_list_response(131841, &removed);
+            // After remove the value-set is empty, so replication installs an empty
+            // set on the backup (which drops the key).
+            mm_reply(name, key, r, corr, store, cluster, replicator, conn_id)
         }
         133632 => {
             let name = map::decode_name(&req);
