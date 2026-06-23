@@ -15,6 +15,9 @@ io-uring = "0.6"
 libc = "0.2"
 socket2 = { version = "0.5", features = ["all"] }
 core_affinity = "0.8"
+rskafka = "0.6.0"
+tokio = { version = "1.52.3", default-features = false, features = ["rt", "time", "net", "sync", "macros"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 protocol = { path = "../protocol" }
