@@ -5,3 +5,4 @@ version.workspace = true
 
 [dependencies]
 serialization = { path = "../serialization" }
+query = { path = "../query" }

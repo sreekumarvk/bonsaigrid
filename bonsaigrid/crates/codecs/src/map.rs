@@ -299,6 +299,35 @@ pub fn encode_get_response(val: Option<&[u8]>) -> Vec<Frame> {
     response(66049, val)
 }
 
+/// Decode MapAddIndex request. Returns (map_name, type, attributes).
+pub fn decode_add_index(frames: &[Frame]) -> (String, i32, Vec<String>) {
+    use protocol::fixed::read_i32_le;
+    let map_name = decode_string(&frames[1]);
+    let ty = if frames.len() > 3 && frames[3].content.len() >= 4 {
+        read_i32_le(&frames[3].content, 0)
+    } else {
+        0
+    };
+    let mut attributes = Vec::new();
+    let mut idx = 6;
+    while idx < frames.len() {
+        if frames[idx].is_end() {
+            break;
+        }
+        if !frames[idx].is_null() {
+            attributes.push(decode_string(&frames[idx]));
+        }
+        idx += 1;
+    }
+    (map_name, ty, attributes)
+}
+
+pub fn encode_add_index_response() -> Vec<Frame> {
+    let mut c = vec![0u8; 14];
+    write_i32_le(&mut c, 0, 76033);
+    vec![initial_frame(c)]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

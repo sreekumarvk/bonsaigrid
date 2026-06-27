@@ -472,6 +472,7 @@ pub fn dispatch(
     cluster: &Cluster,
     replicator: Option<&Replicator>,
 ) -> Vec<Vec<Frame>> {
+    store.set_schemas(schemas.clone());
     let corr = correlation_id(&req);
     // Quorum gate: below the minimum live cluster size, reject writes so a
     // minority partition can't accept divergent updates (reads still allowed).
@@ -736,25 +737,36 @@ pub fn dispatch(
             let entries = store.entries(&name);
             vec![map::encode_entry_list_response(75009, &entries)]
         }
+        // MapAddIndex -> Empty
+        76032 => {
+            let (name, ty, attrs) = map::decode_add_index(&req);
+            let config = query::index::IndexConfig {
+                name: None,
+                ty: query::index::IndexType::from_i32(ty),
+                attributes: attrs,
+            };
+            store.add_index(&name, config);
+            vec![map::encode_add_index_response()]
+        }
         // ---- Predicate queries (full scan; Compact values) ----
         // MapKeySetWithPredicate -> List<Data> (keys of matching entries)
         75264 => {
             let (name, pred) = map::decode_name_value(&req);
-            let matches = query::scan(&query::decode(&pred), store.entries(&name), schemas, &AutoExtractor);
+            let matches = store.query(&name, &query::decode(&pred), schemas);
             let keys: Vec<Vec<u8>> = matches.into_iter().map(|(k, _)| k).collect();
             vec![map::encode_data_list_response(75265, &keys)]
         }
         // MapValuesWithPredicate -> List<Data> (values of matching entries)
         75520 => {
             let (name, pred) = map::decode_name_value(&req);
-            let matches = query::scan(&query::decode(&pred), store.entries(&name), schemas, &AutoExtractor);
+            let matches = store.query(&name, &query::decode(&pred), schemas);
             let vals: Vec<Vec<u8>> = matches.into_iter().map(|(_, v)| v).collect();
             vec![map::encode_data_list_response(75521, &vals)]
         }
         // MapEntriesWithPredicate -> EntryList<Data,Data> (matching entries)
         75776 => {
             let (name, pred) = map::decode_name_value(&req);
-            let matches = query::scan(&query::decode(&pred), store.entries(&name), schemas, &AutoExtractor);
+            let matches = store.query(&name, &query::decode(&pred), schemas);
             vec![map::encode_entry_list_response(75777, &matches)]
         }
         // ---- Topic (pub/sub) ----

@@ -14,6 +14,7 @@ mod slab;
 use slab::{Handle, Slab};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Mutex, OnceLock};
+use serialization::compact::FieldExtractor;
 use std::time::Instant;
 
 const EMPTY: u64 = 0;
@@ -63,6 +64,8 @@ struct Inner {
     map_ids: HashMap<String, u32>,
     map_names: Vec<String>,
     counts: Vec<usize>, // live entries per map_id
+    index_configs: HashMap<String, Vec<query::index::IndexConfig>>,
+    indexes: HashMap<String, HashMap<String, query::index::Index>>,
 }
 
 /// FNV-1a over (map_id, key) with the MSB forced set, so real hashes are
@@ -92,6 +95,8 @@ impl Inner {
             map_ids: HashMap::new(),
             map_names: Vec::new(),
             counts: Vec::new(),
+            index_configs: HashMap::new(),
+            indexes: HashMap::new(),
         }
     }
 
@@ -104,6 +109,69 @@ impl Inner {
         self.map_ids.insert(map.to_string(), id);
         self.counts.push(0);
         id
+    }
+
+    fn update_indexes(
+        &mut self,
+        map: &str,
+        key: &[u8],
+        old_val: Option<&[u8]>,
+        new_val: Option<&[u8]>,
+        schemas: &serialization::schema::SchemaService,
+    ) {
+        if let Some(configs) = self.index_configs.get(map) {
+            let map_indexes = self.indexes.entry(map.to_string()).or_default();
+            for config in configs {
+                for attr in &config.attributes {
+                    let index = map_indexes.entry(attr.clone()).or_insert_with(|| {
+                        query::index::Index::new(config.ty)
+                    });
+                    if let Some(old) = old_val {
+                        let old_fv = serialization::compact::AutoExtractor.extract(old, schemas, attr);
+                        if old_fv != serialization::compact::FieldValue::Null {
+                            index.remove(&old_fv, key);
+                        }
+                    }
+                    if let Some(new) = new_val {
+                        let new_fv = serialization::compact::AutoExtractor.extract(new, schemas, attr);
+                        if new_fv != serialization::compact::FieldValue::Null {
+                            index.insert(new_fv, key.to_vec());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn add_index(&mut self, map: &str, config: query::index::IndexConfig, schemas: &serialization::schema::SchemaService) {
+        let configs = self.index_configs.entry(map.to_string()).or_default();
+        if configs.iter().any(|c| c.attributes == config.attributes) {
+            return;
+        }
+        configs.push(config.clone());
+        
+        let map_id = match self.map_ids.get(map) {
+            Some(&id) => id,
+            None => return,
+        };
+        
+        for attr in &config.attributes {
+            for idx in 0..self.table.len() {
+                let e = &self.table[idx];
+                if e.occupied() && e.map_id == map_id && !e.expired(now_ms()) {
+                    let key_vec = self.key_bytes(e).to_vec();
+                    let val_vec = self.val_bytes(e);
+                    let fv = serialization::compact::AutoExtractor.extract(&val_vec, schemas, attr);
+                    if fv != serialization::compact::FieldValue::Null {
+                        let map_indexes = self.indexes.entry(map.to_string()).or_default();
+                        let index = map_indexes.entry(attr.clone()).or_insert_with(|| {
+                            query::index::Index::new(config.ty)
+                        });
+                        index.insert(fv, key_vec);
+                    }
+                }
+            }
+        }
     }
 
     fn key_bytes(&self, e: &Entry) -> &[u8] {
@@ -134,7 +202,15 @@ impl Inner {
         self.tombstones = 0;
     }
 
-    fn put(&mut self, map: &str, key: &[u8], val: &[u8], ttl_ms: u64, stamp: u64) -> Option<Vec<u8>> {
+    fn put(
+        &mut self,
+        map: &str,
+        key: &[u8],
+        val: &[u8],
+        ttl_ms: u64,
+        stamp: u64,
+        schemas: &serialization::schema::SchemaService,
+    ) -> Option<Vec<u8>> {
         let map_id = self.intern(map);
         let h = hash(map_id, key);
         let expire_at = if ttl_ms > 0 { now_ms() + ttl_ms } else { 0 };
@@ -160,6 +236,9 @@ impl Inner {
                 };
                 self.len += 1;
                 self.counts[map_id as usize] += 1;
+                
+                self.update_indexes(map, key, None, Some(val), schemas);
+                
                 return None;
             }
             if e.hash == TOMBSTONE {
@@ -185,6 +264,9 @@ impl Inner {
                 if old.is_none() && e.expired(now_ms()) {
                     // previously-expired slot becomes live again
                 }
+                
+                self.update_indexes(map, key, old.as_deref(), Some(val), schemas);
+                
                 return old;
             }
             i = (i + 1) & self.mask;
@@ -231,10 +313,13 @@ impl Inner {
         self.find(map, key).is_some()
     }
 
-    fn remove(&mut self, map: &str, key: &[u8]) -> Option<Vec<u8>> {
+    fn remove(&mut self, map: &str, key: &[u8], schemas: &serialization::schema::SchemaService) -> Option<Vec<u8>> {
         let i = self.find(map, key)?;
         let e = self.table[i];
         let old = self.val_bytes(&e);
+        
+        self.update_indexes(map, key, Some(&old), None, schemas);
+
         self.slab.free(e.handle);
         self.table[i].hash = TOMBSTONE;
         self.len -= 1;
@@ -243,24 +328,41 @@ impl Inner {
         Some(old)
     }
 
-    fn put_if_absent(&mut self, map: &str, key: &[u8], val: &[u8], ttl_ms: u64, stamp: u64) -> Option<Vec<u8>> {
+    fn put_if_absent(
+        &mut self,
+        map: &str,
+        key: &[u8],
+        val: &[u8],
+        ttl_ms: u64,
+        stamp: u64,
+        schemas: &serialization::schema::SchemaService,
+    ) -> Option<Vec<u8>> {
         if let Some(i) = self.find(map, key) {
             return Some(self.val_bytes(&self.table[i]));
         }
-        self.put(map, key, val, ttl_ms, stamp);
+        self.put(map, key, val, ttl_ms, stamp, schemas);
         None
     }
 
     /// Merge an inbound (key,value,stamp): absent → insert; present → keep the
     /// higher stamp when `latest_update`, else keep the existing (PutIfAbsent).
-    fn put_merge(&mut self, map: &str, key: &[u8], val: &[u8], ttl_ms: u64, stamp: u64, latest_update: bool) {
+    fn put_merge(
+        &mut self,
+        map: &str,
+        key: &[u8],
+        val: &[u8],
+        ttl_ms: u64,
+        stamp: u64,
+        latest_update: bool,
+        schemas: &serialization::schema::SchemaService,
+    ) {
         match self.find(map, key) {
             None => {
-                self.put(map, key, val, ttl_ms, stamp);
+                self.put(map, key, val, ttl_ms, stamp, schemas);
             }
             Some(i) => {
                 if latest_update && stamp > self.table[i].stamp {
-                    self.put(map, key, val, ttl_ms, stamp);
+                    self.put(map, key, val, ttl_ms, stamp, schemas);
                 }
                 // PutIfAbsent (or lower stamp): keep the existing entry.
             }
@@ -284,10 +386,13 @@ impl Inner {
         }
     }
 
-    fn replace(&mut self, map: &str, key: &[u8], val: &[u8]) -> Option<Vec<u8>> {
+    fn replace(&mut self, map: &str, key: &[u8], val: &[u8], schemas: &serialization::schema::SchemaService) -> Option<Vec<u8>> {
         let i = self.find(map, key)?;
         let e = self.table[i];
         let old = self.val_bytes(&e);
+        
+        self.update_indexes(map, key, Some(&old), Some(val), schemas);
+
         self.slab.free(e.handle);
         let handle = self.slab.put_two(key, val);
         self.table[i] = Entry {
@@ -328,6 +433,45 @@ impl Inner {
                 let total = (e.key_len + e.val_len) as usize;
                 let bytes = self.slab.get(e.handle, total);
                 out.push((bytes[..e.key_len as usize].to_vec(), bytes[e.key_len as usize..].to_vec()));
+            }
+        }
+    }
+
+    fn query(
+        &mut self,
+        map: &str,
+        predicate: &query::Predicate,
+        schemas: &serialization::schema::SchemaService,
+        out: &mut Vec<(Vec<u8>, Vec<u8>)>,
+    ) {
+        let Some(&map_id) = self.map_ids.get(map) else { return };
+        let now = now_ms();
+        let ex = serialization::compact::AutoExtractor;
+        
+        if let Some(map_indexes) = self.indexes.get(map) {
+            if let Some(keys) = query::index::plan_and_resolve(predicate, map_indexes) {
+                for key in keys {
+                    if let Some(i) = self.find(map, &key) {
+                        let e = self.table[i];
+                        let val = self.val_bytes(&e);
+                        if query::eval(predicate, &val, schemas, &ex) {
+                            out.push((key, val));
+                        }
+                    }
+                }
+                return;
+            }
+        }
+        
+        for e in self.table.iter() {
+            if e.occupied() && e.map_id == map_id && !e.expired(now) {
+                let total = (e.key_len + e.val_len) as usize;
+                let bytes = self.slab.get(e.handle, total);
+                let key = bytes[..e.key_len as usize].to_vec();
+                let val = bytes[e.key_len as usize..].to_vec();
+                if query::eval(predicate, &val, schemas, &ex) {
+                    out.push((key, val));
+                }
             }
         }
     }
@@ -375,6 +519,7 @@ pub struct Store {
     ringbuffers: Mutex<HashMap<String, Ring>>,
     pncounters: Mutex<HashMap<String, i64>>,
     flake: Mutex<HashMap<String, i64>>,
+    schemas: std::sync::OnceLock<serialization::schema::SchemaService>,
 }
 
 struct Ring {
@@ -420,6 +565,21 @@ impl Store {
             ringbuffers: Mutex::new(HashMap::new()),
             pncounters: Mutex::new(HashMap::new()),
             flake: Mutex::new(HashMap::new()),
+            schemas: std::sync::OnceLock::new(),
+        }
+    }
+
+    pub fn set_schemas(&self, schemas: serialization::schema::SchemaService) {
+        let _ = self.schemas.set(schemas);
+    }
+
+    pub fn schemas(&self) -> &serialization::schema::SchemaService {
+        self.schemas.get_or_init(serialization::schema::SchemaService::new)
+    }
+
+    pub fn add_index(&self, map: &str, config: query::index::IndexConfig) {
+        for s in &self.shards {
+            s.lock().unwrap().add_index(map, config.clone(), self.schemas());
         }
     }
 
@@ -736,25 +896,29 @@ impl Store {
 
     pub fn put(&self, map: &str, key: Vec<u8>, val: Vec<u8>) -> Option<Vec<u8>> {
         let stamp = self.next_stamp();
-        self.shard(map, &key).lock().unwrap().put(map, &key, &val, 0, stamp)
+        let schemas = self.schemas();
+        self.shard(map, &key).lock().unwrap().put(map, &key, &val, 0, stamp, schemas)
     }
 
     /// Put with TTL in milliseconds (0 == no expiry).
     pub fn put_ttl(&self, map: &str, key: Vec<u8>, val: Vec<u8>, ttl_ms: u64) -> Option<Vec<u8>> {
         let stamp = self.next_stamp();
-        self.shard(map, &key).lock().unwrap().put(map, &key, &val, ttl_ms, stamp)
+        let schemas = self.schemas();
+        self.shard(map, &key).lock().unwrap().put(map, &key, &val, ttl_ms, stamp, schemas)
     }
 
     /// Put with an explicit stamp (used when applying a migrated/replicated entry
     /// to preserve the originating member's stamp).
     pub fn put_stamped(&self, map: &str, key: Vec<u8>, val: Vec<u8>, ttl_ms: u64, stamp: u64) -> Option<Vec<u8>> {
-        self.shard(map, &key).lock().unwrap().put(map, &key, &val, ttl_ms, stamp)
+        let schemas = self.schemas();
+        self.shard(map, &key).lock().unwrap().put(map, &key, &val, ttl_ms, stamp, schemas)
     }
 
     /// Merge an inbound entry under the given policy (`latest_update` keeps the
     /// higher stamp; otherwise PutIfAbsent keeps any existing entry).
     pub fn put_merge(&self, map: &str, key: &[u8], val: &[u8], ttl_ms: u64, stamp: u64, latest_update: bool) {
-        self.shard(map, key).lock().unwrap().put_merge(map, key, val, ttl_ms, stamp, latest_update);
+        let schemas = self.schemas();
+        self.shard(map, key).lock().unwrap().put_merge(map, key, val, ttl_ms, stamp, latest_update, schemas);
     }
 
     /// Every live entry across all maps as (map, key, value, stamp) — the source
@@ -786,19 +950,61 @@ impl Store {
         }
     }
 
+    pub fn query(
+        &self,
+        map: &str,
+        predicate: &query::Predicate,
+        schemas: &serialization::schema::SchemaService,
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
+        match predicate {
+            query::Predicate::Paging { inner, page, page_size, iteration_type: _ } => {
+                let mut matched = if let Some(inner_pred) = inner {
+                    self.query(map, inner_pred, schemas)
+                } else {
+                    self.entries(map)
+                };
+                
+                matched.sort_by(|a, b| a.0.cmp(&b.0));
+                
+                let start = (*page as usize * *page_size as usize).min(matched.len());
+                let end = (start + *page_size as usize).min(matched.len());
+                matched[start..end].to_vec()
+            }
+            query::Predicate::Partition { partition_id, target } => {
+                let results = self.query(map, target, schemas);
+                results
+                    .into_iter()
+                    .filter(|(k, _)| {
+                        serialization::partition_id(k, 271) == *partition_id
+                    })
+                    .collect()
+            }
+            other => {
+                let mut out = Vec::new();
+                for s in &self.shards {
+                    s.lock().unwrap().query(map, other, schemas, &mut out);
+                }
+                out
+            }
+        }
+    }
+
     pub fn remove(&self, map: &str, key: &[u8]) -> Option<Vec<u8>> {
-        self.shard(map, key).lock().unwrap().remove(map, key)
+        let schemas = self.schemas();
+        self.shard(map, key).lock().unwrap().remove(map, key, schemas)
     }
 
     /// Insert only if absent; returns the existing value if present.
     pub fn put_if_absent(&self, map: &str, key: Vec<u8>, val: Vec<u8>, ttl_ms: u64) -> Option<Vec<u8>> {
         let stamp = self.next_stamp();
-        self.shard(map, &key).lock().unwrap().put_if_absent(map, &key, &val, ttl_ms, stamp)
+        let schemas = self.schemas();
+        self.shard(map, &key).lock().unwrap().put_if_absent(map, &key, &val, ttl_ms, stamp, schemas)
     }
 
     /// Replace only if present; returns the old value, or None if absent.
     pub fn replace(&self, map: &str, key: Vec<u8>, val: Vec<u8>) -> Option<Vec<u8>> {
-        self.shard(map, &key).lock().unwrap().replace(map, &key, &val)
+        let schemas = self.schemas();
+        self.shard(map, &key).lock().unwrap().replace(map, &key, &val, schemas)
     }
 
     pub fn contains_key(&self, map: &str, key: &[u8]) -> bool {
@@ -1200,5 +1406,71 @@ mod tests {
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].0, "a");
         assert!(all[0].3 >= 1 && all[1].3 >= 1); // monotonic stamps assigned
+    }
+
+    #[test]
+    fn indexing_and_query_planning() {
+        use serialization::schema::{Schema, FieldDescriptor, STRING, INT32};
+        let s = Store::new();
+        let schemas = serialization::schema::SchemaService::new();
+        let schema = Schema::new(
+            "person".into(),
+            vec![
+                FieldDescriptor::new("name".into(), STRING),
+                FieldDescriptor::new("age".into(), INT32),
+            ],
+        );
+        let schema_id = schema.id;
+        schemas.put(schema);
+        s.set_schemas(schemas.clone());
+
+        // 1. Add sorted index on age
+        s.add_index("people", query::index::IndexConfig {
+            name: None,
+            ty: query::index::IndexType::Sorted,
+            attributes: vec!["age".to_string()],
+        });
+
+        // 2. Put entries
+        let helper = |name: &str, age: i32| {
+            let mut payload = Vec::new();
+            payload.extend_from_slice(&schema_id.to_be_bytes());
+            payload.extend_from_slice(&13u32.to_be_bytes());
+            payload.extend_from_slice(&age.to_be_bytes());
+            payload.extend_from_slice(&(name.len() as u32).to_be_bytes());
+            payload.extend_from_slice(name.as_bytes());
+            payload.push(4);
+            let mut v = vec![0u8; 8];
+            v.extend_from_slice(&payload);
+            v
+        };
+
+        s.put("people", b"k1".to_vec(), helper("Alice", 25));
+        s.put("people", b"k2".to_vec(), helper("Bob", 30));
+        s.put("people", b"k3".to_vec(), helper("Charlie", 35));
+
+        // 3. Query age > 28
+        let pred = query::Predicate::Compare {
+            field: "age".to_string(),
+            op: query::Op::Gt,
+            value: serialization::compact::FieldValue::I32(28),
+        };
+        let matches = s.query("people", &pred, &schemas);
+        assert_eq!(matches.len(), 2);
+        let mut keys: Vec<Vec<u8>> = matches.iter().map(|(k, _)| k.clone()).collect();
+        keys.sort();
+        assert_eq!(keys, vec![b"k2".to_vec(), b"k3".to_vec()]);
+
+        // 4. Query age between 20 and 32
+        let pred_between = query::Predicate::Between {
+            field: "age".to_string(),
+            from: serialization::compact::FieldValue::I32(20),
+            to: serialization::compact::FieldValue::I32(32),
+        };
+        let matches_between = s.query("people", &pred_between, &schemas);
+        assert_eq!(matches_between.len(), 2);
+        let mut keys_between: Vec<Vec<u8>> = matches_between.iter().map(|(k, _)| k.clone()).collect();
+        keys_between.sort();
+        assert_eq!(keys_between, vec![b"k1".to_vec(), b"k2".to_vec()]);
     }
 }

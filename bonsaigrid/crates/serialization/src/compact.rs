@@ -21,9 +21,45 @@ pub enum FieldValue {
     Str(String),
 }
 
+impl Eq for FieldValue {}
+
+impl PartialOrd for FieldValue {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for FieldValue {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use FieldValue::*;
+        match (self, other) {
+            (Null, Null) => std::cmp::Ordering::Equal,
+            (Null, _) => std::cmp::Ordering::Less,
+            (_, Null) => std::cmp::Ordering::Greater,
+            (Bool(a), Bool(b)) => a.cmp(b),
+            (Bool(_), _) => std::cmp::Ordering::Less,
+            (_, Bool(_)) => std::cmp::Ordering::Greater,
+            (I32(a), I32(b)) => a.cmp(b),
+            (I64(a), I64(b)) => a.cmp(b),
+            (I32(a), I64(b)) => (*a as i64).cmp(b),
+            (I64(a), I32(b)) => a.cmp(&(*b as i64)),
+            (I32(_), _) => std::cmp::Ordering::Less,
+            (_, I32(_)) => std::cmp::Ordering::Greater,
+            (I64(_), _) => std::cmp::Ordering::Less,
+            (_, I64(_)) => std::cmp::Ordering::Greater,
+            (F64(a), F64(b)) => {
+                let f1 = f64::from_bits(a.to_bits());
+                let f2 = f64::from_bits(b.to_bits());
+                f1.total_cmp(&f2)
+            }
+            (F64(_), _) => std::cmp::Ordering::Less,
+            (_, F64(_)) => std::cmp::Ordering::Greater,
+            (Str(a), Str(b)) => a.cmp(b),
+        }
+    }
+}
+
 impl FieldValue {
-    /// Type-aware ordering (numeric kinds compare across I32/I64); None if the
-    /// kinds aren't comparable.
     pub fn compare(&self, other: &FieldValue) -> Option<Ordering> {
         use FieldValue::*;
         match (self, other) {
@@ -39,6 +75,20 @@ impl FieldValue {
     }
     pub fn equals(&self, other: &FieldValue) -> bool {
         self.compare(other) == Some(Ordering::Equal)
+    }
+}
+
+impl std::hash::Hash for FieldValue {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        use FieldValue::*;
+        match self {
+            Null => 0.hash(state),
+            Bool(v) => (1, v).hash(state),
+            I32(v) => (2, v).hash(state),
+            I64(v) => (3, v).hash(state),
+            F64(v) => (4, v.to_bits()).hash(state),
+            Str(v) => (5, v).hash(state),
+        }
     }
 }
 

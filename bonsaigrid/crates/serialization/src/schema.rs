@@ -11,7 +11,7 @@
 //! index in name order.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 // FieldKind ids (== ordinal). Named: the kinds we lay out / read.
 pub const BOOLEAN: i32 = 1;
@@ -161,9 +161,9 @@ pub fn fingerprint(type_name: &str, fields: &[FieldDescriptor]) -> i64 {
 }
 
 /// Stores Compact schemas keyed by id (shared across reactor threads).
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct SchemaService {
-    schemas: Mutex<HashMap<i64, Schema>>,
+    schemas: Arc<Mutex<HashMap<i64, Schema>>>,
 }
 
 impl SchemaService {

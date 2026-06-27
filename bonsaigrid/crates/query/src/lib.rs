@@ -21,6 +21,7 @@
 mod eval;
 pub mod json;
 pub mod sql;
+pub mod index;
 pub use eval::eval;
 
 use serialization::compact::{FieldExtractor, FieldValue};
