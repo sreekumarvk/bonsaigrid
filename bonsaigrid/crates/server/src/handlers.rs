@@ -12,7 +12,7 @@ use crate::membership::Cluster;
 use member::wire::Msg;
 use codecs::auth::{self, AuthResponse};
 use codecs::{cluster_view, map};
-use serialization::compact::CompactExtractor;
+use serialization::compact::AutoExtractor;
 use serialization::schema::SchemaService;
 use protocol::fixed::{read_i32_le, read_i64_le, write_i32_le, write_i64_le, write_u16_le, write_uuid};
 use protocol::frame::{read_message, write_message, Frame, IS_FINAL, IS_NULL, UNFRAGMENTED};
@@ -740,21 +740,21 @@ pub fn dispatch(
         // MapKeySetWithPredicate -> List<Data> (keys of matching entries)
         75264 => {
             let (name, pred) = map::decode_name_value(&req);
-            let matches = query::scan(&query::decode(&pred), store.entries(&name), schemas, &CompactExtractor);
+            let matches = query::scan(&query::decode(&pred), store.entries(&name), schemas, &AutoExtractor);
             let keys: Vec<Vec<u8>> = matches.into_iter().map(|(k, _)| k).collect();
             vec![map::encode_data_list_response(75265, &keys)]
         }
         // MapValuesWithPredicate -> List<Data> (values of matching entries)
         75520 => {
             let (name, pred) = map::decode_name_value(&req);
-            let matches = query::scan(&query::decode(&pred), store.entries(&name), schemas, &CompactExtractor);
+            let matches = query::scan(&query::decode(&pred), store.entries(&name), schemas, &AutoExtractor);
             let vals: Vec<Vec<u8>> = matches.into_iter().map(|(_, v)| v).collect();
             vec![map::encode_data_list_response(75521, &vals)]
         }
         // MapEntriesWithPredicate -> EntryList<Data,Data> (matching entries)
         75776 => {
             let (name, pred) = map::decode_name_value(&req);
-            let matches = query::scan(&query::decode(&pred), store.entries(&name), schemas, &CompactExtractor);
+            let matches = query::scan(&query::decode(&pred), store.entries(&name), schemas, &AutoExtractor);
             vec![map::encode_entry_list_response(75777, &matches)]
         }
         // ---- Topic (pub/sub) ----
@@ -997,7 +997,7 @@ pub fn dispatch(
                     let (cols, rows) = if json {
                         query::sql::execute_with(&sel, &entries, schemas, &query::json::JsonExtractor, &star_cols, key_col.as_deref())
                     } else {
-                        query::sql::execute_with(&sel, &entries, schemas, &CompactExtractor, &star_cols, key_col.as_deref())
+                        query::sql::execute_with(&sel, &entries, schemas, &AutoExtractor, &star_cols, key_col.as_deref())
                     };
                     vec![codecs::sql::encode_execute_response(&cols, &rows)]
                 }

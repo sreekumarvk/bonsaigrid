@@ -6,3 +6,5 @@ edition = "2021"
 [dependencies]
 serde_json = "1.0.150"
 serialization = { path = "../serialization" }
+regex = "1.10"
+

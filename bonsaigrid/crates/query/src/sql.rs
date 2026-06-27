@@ -4,7 +4,7 @@
 //! typing/optimization/joins are out of scope.
 
 use crate::{eval, Op, Predicate};
-use serialization::compact::{CompactExtractor, FieldExtractor, FieldValue};
+use serialization::compact::{AutoExtractor, CompactExtractor, FieldExtractor, FieldValue};
 use serialization::schema::SchemaService;
 use std::collections::HashMap;
 
@@ -310,7 +310,7 @@ pub fn execute(
     entries: &[(Vec<u8>, Vec<u8>)],
     schemas: &SchemaService,
 ) -> (Vec<String>, Vec<Vec<Option<String>>>) {
-    execute_with(select, entries, schemas, &CompactExtractor, &[], None)
+    execute_with(select, entries, schemas, &AutoExtractor, &[], None)
 }
 
 /// Strip a `table.` qualifier from a column reference.
@@ -331,6 +331,7 @@ pub fn eval_fields(pred: &Predicate, fields: &[(String, FieldValue)]) -> bool {
             Some(fv) => match fv.compare(value) {
                 Some(o) => match op {
                     Op::Eq => o == Ordering::Equal,
+                    Op::NotEq => o != Ordering::Equal,
                     Op::Lt => o == Ordering::Less,
                     Op::Le => o != Ordering::Greater,
                     Op::Gt => o == Ordering::Greater,
@@ -342,6 +343,61 @@ pub fn eval_fields(pred: &Predicate, fields: &[(String, FieldValue)]) -> bool {
         },
         Predicate::And(c) => c.iter().all(|p| eval_fields(p, fields)),
         Predicate::Or(c) => c.iter().any(|p| eval_fields(p, fields)),
+        Predicate::Not(inner) => !eval_fields(inner, fields),
+        Predicate::Between { field, from, to } => match get(field) {
+            Some(fv) => match (fv.compare(from), fv.compare(to)) {
+                (Some(o_from), Some(o_to)) => {
+                    o_from != Ordering::Less && o_to != Ordering::Greater
+                }
+                _ => false,
+            },
+            None => false,
+        },
+        Predicate::In { field, values } => match get(field) {
+            Some(fv) => values.iter().any(|v| fv.equals(v)),
+            None => false,
+        },
+        Predicate::Like { field, expr } => match get(field) {
+            Some(FieldValue::Str(s)) => {
+                if let Ok(re) = crate::eval::like_to_regex(expr, false) {
+                    re.is_match(s)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        },
+        Predicate::ILike { field, expr } => match get(field) {
+            Some(FieldValue::Str(s)) => {
+                if let Ok(re) = crate::eval::like_to_regex(expr, true) {
+                    re.is_match(s)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        },
+        Predicate::Regex { field, regex } => match get(field) {
+            Some(FieldValue::Str(s)) => {
+                if let Ok(re) = crate::eval::compile_regex(regex) {
+                    re.is_match(s)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        },
+        Predicate::True => true,
+        Predicate::False => false,
+        Predicate::Sql(_) => false,
+        Predicate::Paging { inner, .. } => {
+            if let Some(inner_pred) = inner {
+                eval_fields(inner_pred, fields)
+            } else {
+                true
+            }
+        }
+        Predicate::Partition { target, .. } => eval_fields(target, fields),
         Predicate::MatchNone => false,
     }
 }
