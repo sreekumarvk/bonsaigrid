@@ -19,6 +19,7 @@ struct Listener {
     corr: i64,
     flags: i32,
     include_value: bool,
+    predicate: Option<query::Predicate>,
 }
 
 struct TopicSub {
@@ -91,7 +92,18 @@ impl EventBroker {
             .listeners
             .entry(map.to_string())
             .or_default()
-            .push(Listener { conn_id, corr, flags, include_value });
+            .push(Listener { conn_id, corr, flags, include_value, predicate: None });
+    }
+
+    pub fn register_with_predicate(&self, map: &str, conn_id: u64, corr: i64, flags: i32, include_value: bool, predicate_data: &[u8]) {
+        let predicate = query::decode(predicate_data);
+        self.inner
+            .lock()
+            .unwrap()
+            .listeners
+            .entry(map.to_string())
+            .or_default()
+            .push(Listener { conn_id, corr, flags, include_value, predicate: Some(predicate) });
     }
 
     pub fn has_listeners(&self, map: &str) -> bool {
@@ -105,7 +117,7 @@ impl EventBroker {
     }
 
     /// Publish an entry event to every matching listener's connection queue.
-    pub fn publish(&self, map: &str, event_type: i32, key: &[u8], value: Option<&[u8]>, old: Option<&[u8]>) {
+    pub fn publish(&self, map: &str, event_type: i32, key: &[u8], value: Option<&[u8]>, old: Option<&[u8]>, schemas: &serialization::schema::SchemaService) {
         let mut g = self.inner.lock().unwrap();
         let uuid = self.member_uuid;
         let Some(listeners) = g.listeners.get(map) else { return };
@@ -114,6 +126,18 @@ impl EventBroker {
         for l in listeners {
             if event_type & l.flags == 0 {
                 continue;
+            }
+            if let Some(pred) = &l.predicate {
+                // If the predicate doesn't match the new value (or old for remove), skip.
+                let val_to_check = if event_type == codecs::map::REMOVED { old } else { value };
+                if let Some(v) = val_to_check {
+                    let ex = serialization::compact::AutoExtractor;
+                    if !query::eval(pred, v, schemas, &ex) {
+                        continue;
+                    }
+                } else {
+                    continue; // can't evaluate without value
+                }
             }
             let (v, o) = if l.include_value { (value, old) } else { (None, None) };
             let bytes = encode_entry_event(l.corr, event_type, uuid, Some(key), v, o);

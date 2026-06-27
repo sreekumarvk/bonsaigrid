@@ -11,7 +11,7 @@ use crate::member_thread::Replicator;
 use crate::membership::Cluster;
 use member::wire::Msg;
 use codecs::auth::{self, AuthResponse};
-use codecs::{cluster_view, map};
+use codecs::{cache, cluster_view, map, mc};
 use serialization::compact::AutoExtractor;
 use serialization::schema::SchemaService;
 use protocol::fixed::{read_i32_le, read_i64_le, write_i32_le, write_i64_le, write_u16_le, write_uuid};
@@ -518,6 +518,19 @@ pub fn dispatch(
             broker.register(&name, conn_id, corr, flags, include_value);
             vec![uuid_response(71937, REGISTRATION_UUID)]
         }
+        // MapAddEntryListenerWithPredicate
+        71424 => {
+            let (name, flags, include_value, predicate_data) = map::decode_add_entry_listener_with_predicate(&req);
+            broker.register_with_predicate(&name, conn_id, corr, flags, include_value, predicate_data);
+            vec![uuid_response(71425, REGISTRATION_UUID)]
+        }
+        // MapAddPartitionLostListener
+        72448 => {
+            // We do not have partitions that get "lost" in the same sense, but we support the registration.
+            let (_name, _local_only) = map::decode_add_partition_lost_listener(&req);
+            // broker.register_partition_lost(...)
+            vec![uuid_response(72449, REGISTRATION_UUID)]
+        }
         // ClientTpcAuthentication: a TPC client authenticates each per-core
         // channel with the token from the main auth. Response is an empty ack.
         5632 => vec![empty_response(5633)],
@@ -551,7 +564,7 @@ pub fn dispatch(
                     if let Some(v) = new_val {
                         store.put_ttl(&name, key.to_vec(), v.clone(), 0);
                         if broker.has_listeners(&name) {
-                            broker.publish(&name, if old.is_some() { map::UPDATED } else { map::ADDED }, key, Some(&v), old.as_deref());
+                            broker.publish(&name, if old.is_some() { map::UPDATED } else { map::ADDED }, key, Some(&v), old.as_deref(), store.schemas());
                         }
                         if broker.has_near_cache(&name) {
                             broker.invalidate(&name, key);
@@ -605,7 +618,7 @@ pub fn dispatch(
             let old = store.put_ttl(&r.name, r.key.clone(), r.value.clone(), ttl);
             if el {
                 let etype = if old.is_some() { map::UPDATED } else { map::ADDED };
-                broker.publish(&r.name, etype, &r.key, Some(&r.value), old.as_deref());
+                broker.publish(&r.name, etype, &r.key, Some(&r.value), old.as_deref(), store.schemas());
             }
             if nc {
                 broker.invalidate(&r.name, &r.key);
@@ -636,7 +649,7 @@ pub fn dispatch(
             let old = store.remove(&r.name, &r.key);
             if old.is_some() {
                 if broker.has_listeners(&r.name) {
-                    broker.publish(&r.name, map::REMOVED, &r.key, None, old.as_deref());
+                    broker.publish(&r.name, map::REMOVED, &r.key, None, old.as_deref(), store.schemas());
                 }
                 if broker.has_near_cache(&r.name) {
                     broker.invalidate(&r.name, &r.key);
@@ -660,7 +673,7 @@ pub fn dispatch(
             let old = store.remove(&r.name, &r.key);
             if old.is_some() {
                 if broker.has_listeners(&r.name) {
-                    broker.publish(&r.name, map::REMOVED, &r.key, None, old.as_deref());
+                    broker.publish(&r.name, map::REMOVED, &r.key, None, old.as_deref(), store.schemas());
                 }
                 if broker.has_near_cache(&r.name) {
                     broker.invalidate(&r.name, &r.key);
@@ -873,6 +886,47 @@ pub fn dispatch(
             let (name, message) = map::decode_name_value(&req);
             broker.publish_topic(&name, &message); // no-ops if no subscribers
             vec![empty_response(262401)]
+        }
+        // MCGetTimedMemberState
+        2099968 => {
+            let json = format!(r#"{{
+                "memberState": {{
+                    "address": "127.0.0.1:5701",
+                    "uuid": "{}",
+                    "mapStats": {{}},
+                    "clients": []
+                }},
+                "clusterState": "ACTIVE",
+                "master": true
+            }}"#, format!("{:016x}{:016x}", cfg.members[cfg.self_index].uuid.0, cfg.members[cfg.self_index].uuid.1));
+            vec![mc::encode_get_timed_member_state_response(&json)]
+        }
+        // CacheGet
+        1248512 => {
+            let (name, key) = cache::decode_cache_get(&req);
+            let val = store.get(&name, &key);
+            vec![cache::encode_cache_get_response(val.as_deref())]
+        }
+        // CachePut
+        1250048 => {
+            let (name, key, value, get) = cache::decode_cache_put(&req);
+            let old = store.put(&name, key, value);
+            vec![cache::encode_cache_put_response(if get { old.as_deref() } else { None })]
+        }
+        // CacheRemove
+        1250816 => {
+            let (name, key, current_val) = cache::decode_cache_remove(&req);
+            let removed = if let Some(expected_val) = current_val {
+                if store.get(&name, &key) == Some(expected_val) {
+                    store.remove(&name, &key);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                store.remove(&name, &key).is_some()
+            };
+            vec![cache::encode_cache_remove_response(removed)]
         }
         262656 => {
             let name = map::decode_name(&req);

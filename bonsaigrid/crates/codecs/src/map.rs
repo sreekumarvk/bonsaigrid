@@ -22,6 +22,22 @@ pub fn decode_add_entry_listener(frames: &[Frame]) -> (String, i32, bool) {
     (decode_string(&frames[1]), flags, include_value)
 }
 
+pub fn decode_add_entry_listener_with_predicate(frames: &[Frame]) -> (String, i32, bool, &[u8]) {
+    let c = &frames[0].content;
+    let include_value = c[16] == 1;
+    let flags = read_i32_le(c, 17);
+    let name = decode_string(&frames[1]);
+    let predicate = &frames[2].content;
+    (name, flags, include_value, predicate)
+}
+
+pub fn decode_add_partition_lost_listener(frames: &[Frame]) -> (String, bool) {
+    let c = &frames[0].content;
+    let local_only = c[16] == 1;
+    let name = decode_string(&frames[1]);
+    (name, local_only)
+}
+
 fn push_nullable(frames: &mut Vec<Frame>, v: Option<&[u8]>) {
     match v {
         Some(b) => frames.push(data_frame(b)),
