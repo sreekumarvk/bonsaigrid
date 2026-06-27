@@ -10,6 +10,7 @@
 //! is the increment-3 realization of per-core ownership.
 
 mod slab;
+pub mod mapstore;
 
 use slab::{Handle, Slab};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -659,6 +660,7 @@ pub struct Store {
     pncounters: Mutex<HashMap<String, i64>>,
     flake: Mutex<HashMap<String, i64>>,
     schemas: std::sync::OnceLock<serialization::schema::SchemaService>,
+    map_stores: Mutex<HashMap<String, std::sync::Arc<dyn crate::mapstore::MapStore>>>,
 }
 
 struct Ring {
@@ -705,11 +707,16 @@ impl Store {
             pncounters: Mutex::new(HashMap::new()),
             flake: Mutex::new(HashMap::new()),
             schemas: std::sync::OnceLock::new(),
+            map_stores: Mutex::new(HashMap::new()),
         }
     }
 
     pub fn set_schemas(&self, schemas: serialization::schema::SchemaService) {
         let _ = self.schemas.set(schemas);
+    }
+
+    pub fn configure_map_store(&self, map: &str, store: std::sync::Arc<dyn crate::mapstore::MapStore>) {
+        self.map_stores.lock().unwrap().insert(map.to_string(), store);
     }
 
     pub fn schemas(&self) -> &serialization::schema::SchemaService {
@@ -1034,6 +1041,9 @@ impl Store {
     }
 
     pub fn put(&self, map: &str, key: Vec<u8>, val: Vec<u8>) -> Option<Vec<u8>> {
+        if let Some(store) = self.map_stores.lock().unwrap().get(map) {
+            let _ = store.store(&key, &val);
+        }
         let stamp = self.next_stamp();
         let schemas = self.schemas();
         self.shard(map, &key).lock().unwrap().put(map, &key, &val, 0, stamp, schemas)
@@ -1041,6 +1051,9 @@ impl Store {
 
     /// Put with TTL in milliseconds (0 == no expiry).
     pub fn put_ttl(&self, map: &str, key: Vec<u8>, val: Vec<u8>, ttl_ms: u64) -> Option<Vec<u8>> {
+        if let Some(store) = self.map_stores.lock().unwrap().get(map) {
+            let _ = store.store(&key, &val);
+        }
         let stamp = self.next_stamp();
         let schemas = self.schemas();
         self.shard(map, &key).lock().unwrap().put(map, &key, &val, ttl_ms, stamp, schemas)
@@ -1078,7 +1091,18 @@ impl Store {
     }
 
     pub fn get(&self, map: &str, key: &[u8]) -> Option<Vec<u8>> {
-        self.shard(map, key).lock().unwrap().get(map, key)
+        let val = self.shard(map, key).lock().unwrap().get(map, key);
+        if val.is_none() {
+            if let Some(store) = self.map_stores.lock().unwrap().get(map).cloned() {
+                if let Ok(Some(loaded_val)) = store.load(key) {
+                    let stamp = self.next_stamp();
+                    let schemas = self.schemas();
+                    self.shard(map, key).lock().unwrap().put(map, key, &loaded_val, 0, stamp, schemas);
+                    return Some(loaded_val);
+                }
+            }
+        }
+        val
     }
 
     /// Zero-copy read: runs `f` with the value slice (or None) while holding the
@@ -1092,7 +1116,18 @@ impl Store {
                 let val = &inner.slab.get(e.handle, total)[e.key_len as usize..];
                 f(Some(val))
             }
-            None => f(None),
+            None => {
+                drop(inner);
+                if let Some(store) = self.map_stores.lock().unwrap().get(map).cloned() {
+                    if let Ok(Some(loaded_val)) = store.load(key) {
+                        let stamp = self.next_stamp();
+                        let schemas = self.schemas();
+                        self.shard(map, key).lock().unwrap().put(map, key, &loaded_val, 0, stamp, schemas);
+                        return f(Some(&loaded_val));
+                    }
+                }
+                f(None)
+            }
         }
     }
 
@@ -1136,6 +1171,9 @@ impl Store {
     }
 
     pub fn remove(&self, map: &str, key: &[u8]) -> Option<Vec<u8>> {
+        if let Some(store) = self.map_stores.lock().unwrap().get(map) {
+            let _ = store.delete(key);
+        }
         let schemas = self.schemas();
         self.shard(map, key).lock().unwrap().remove(map, key, schemas)
     }

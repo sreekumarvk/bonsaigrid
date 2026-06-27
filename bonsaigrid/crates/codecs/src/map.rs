@@ -364,6 +364,23 @@ pub fn encode_aggregate_response(val: &[u8]) -> Vec<Frame> {
     out
 }
 
+pub fn decode_execute_on_key(frames: &[Frame]) -> (String, &[u8], &[u8], u64) {
+    let c = &frames[0].content;
+    let thread_id = read_i64_le(c, 16);
+    let name = decode_string(&frames[1]);
+    let entry_processor = &frames[2].content;
+    let key = &frames[3].content;
+    (name, entry_processor, key, thread_id as u64)
+}
+
+pub fn encode_execute_on_key_response(val: Option<&[u8]>) -> Vec<Frame> {
+    let mut c = vec![0u8; 13];
+    write_i32_le(&mut c, 0, 77313); // RESPONSE_MESSAGE_TYPE
+    let mut out = vec![initial_frame(c)];
+    push_nullable(&mut out, val);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

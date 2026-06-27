@@ -12,3 +12,4 @@ pub mod membership;
 pub mod migration;
 pub mod metrics;
 pub mod reactor;
+pub mod entry_processor;

@@ -325,7 +325,7 @@ fn error_response(error_code: i32, class_name: &str, message: &str) -> Vec<Frame
 fn is_quorum_gated_write(msg_type: i32) -> bool {
     matches!(
         msg_type,
-        65792 | 66304 | 67840 | 76800        // IMap: put, remove, delete, putAll
+        65792 | 66304 | 67840 | 76800 | 77312 // IMap: put, remove, delete, putAll, executeOnKey
             | 328704 | 328960 | 329984       // list: add, remove, clear
             | 394240 | 394496 | 395520       // set: add, remove, clear
             | 196864 | 197888 | 197632 | 200448 // queue: offer, poll, remove, clear
@@ -531,6 +531,57 @@ pub fn dispatch(
                 cluster_view::members_view_event(cluster.member_list_version, &mem),
                 cluster_view::partitions_view_event(cluster.partition_list_version, &parts),
             ]
+        }
+        // MapExecuteOnKey
+        77312 => {
+            let (name, processor_data, key, _thread_id) = map::decode_execute_on_key(&req);
+            let processor = match crate::entry_processor::parse_processor(processor_data) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("EntryProcessor error: {}", e);
+                    // For now, return a null response if unsupported
+                    let mut resp = map::encode_execute_on_key_response(None);
+                    set_correlation_id(&mut resp, corr);
+                    return vec![resp];
+                }
+            };
+            let old = store.get(&name, key);
+            match processor.process(key, old.as_deref()) {
+                Ok((new_val, result)) => {
+                    if let Some(v) = new_val {
+                        store.put_ttl(&name, key.to_vec(), v.clone(), 0);
+                        if broker.has_listeners(&name) {
+                            broker.publish(&name, if old.is_some() { map::UPDATED } else { map::ADDED }, key, Some(&v), old.as_deref());
+                        }
+                        if broker.has_near_cache(&name) {
+                            broker.invalidate(&name, key);
+                        }
+                        let mut resp = map::encode_execute_on_key_response(result.as_deref());
+                        set_correlation_id(&mut resp, corr);
+                        if replicate_write(replicator, cluster, conn_id, &resp, key, |op| Msg::BackupPut {
+                            op_id: op,
+                            name: name.clone(),
+                            key: key.to_vec(),
+                            value: v,
+                            ttl_ms: 0,
+                        }) {
+                            vec![]
+                        } else {
+                            vec![resp]
+                        }
+                    } else {
+                        let mut resp = map::encode_execute_on_key_response(result.as_deref());
+                        set_correlation_id(&mut resp, corr);
+                        vec![resp]
+                    }
+                }
+                Err(e) => {
+                    eprintln!("EntryProcessor error: {}", e);
+                    let mut resp = map::encode_execute_on_key_response(None);
+                    set_correlation_id(&mut resp, corr);
+                    vec![resp]
+                }
+            }
         }
         // MapPut (with TTL ms; <=0 means no expiry)
         65792 => {
