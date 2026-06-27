@@ -4,7 +4,7 @@
 //! typing/optimization/joins are out of scope.
 
 use crate::{eval, Op, Predicate};
-use serialization::compact::{AutoExtractor, CompactExtractor, FieldExtractor, FieldValue};
+use serialization::compact::{AutoExtractor, FieldExtractor, FieldValue};
 use serialization::schema::SchemaService;
 use std::collections::HashMap;
 
@@ -65,9 +65,13 @@ pub enum Statement {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum Cols {
-    Star,
-    Named(Vec<String>),
+pub enum ColExpr {
+    Col(String),
+    Count(String),
+    Sum(String),
+    Avg(String),
+    Min(String),
+    Max(String),
 }
 
 /// A join clause: `JOIN <right> ON <left_col> = <right_col>`.
@@ -80,10 +84,15 @@ pub struct Join {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Select {
-    pub cols: Cols,
+    pub is_distinct: bool,
+    pub cols: Vec<ColExpr>,
+    pub star: bool,
     pub map: String,
     pub join: Option<Join>,
     pub filter: Option<Predicate>,
+    pub group_by: Option<Vec<String>>,
+    pub order_by: Option<(String, bool)>, // (col, is_desc)
+    pub limit: Option<usize>,
 }
 
 /// Parse any supported statement.
@@ -114,16 +123,51 @@ pub fn parse_select(sql: &str) -> Option<Select> {
     }
 }
 
-fn parse_select_body(t: &mut Tokenizer) -> Option<Select> {
-    let cols = if t.symbol("*") {
-        Cols::Star
+fn parse_col_expr(t: &mut Tokenizer) -> Option<ColExpr> {
+    t.skip_ws();
+    if t.keyword("count").is_some() {
+        t.symbol("(");
+        let arg = if t.symbol("*") { "*".to_string() } else { t.col_ref()? };
+        t.symbol(")");
+        Some(ColExpr::Count(arg))
+    } else if t.keyword("sum").is_some() {
+        t.symbol("(");
+        let arg = t.col_ref()?;
+        t.symbol(")");
+        Some(ColExpr::Sum(arg))
+    } else if t.keyword("avg").is_some() {
+        t.symbol("(");
+        let arg = t.col_ref()?;
+        t.symbol(")");
+        Some(ColExpr::Avg(arg))
+    } else if t.keyword("min").is_some() {
+        t.symbol("(");
+        let arg = t.col_ref()?;
+        t.symbol(")");
+        Some(ColExpr::Min(arg))
+    } else if t.keyword("max").is_some() {
+        t.symbol("(");
+        let arg = t.col_ref()?;
+        t.symbol(")");
+        Some(ColExpr::Max(arg))
     } else {
-        let mut names = vec![t.col_ref()?];
+        let name = t.col_ref()?;
+        Some(ColExpr::Col(name))
+    }
+}
+
+fn parse_select_body(t: &mut Tokenizer) -> Option<Select> {
+    let is_distinct = t.keyword("distinct").is_some();
+    let mut cols = Vec::new();
+    let mut star = false;
+    if t.symbol("*") {
+        star = true;
+    } else {
+        cols.push(parse_col_expr(t)?);
         while t.symbol(",") {
-            names.push(t.col_ref()?);
+            cols.push(parse_col_expr(t)?);
         }
-        Cols::Named(names)
-    };
+    }
     t.keyword("from")?;
     let map = t.ident()?;
     let join = if t.keyword("join").is_some() {
@@ -139,7 +183,42 @@ fn parse_select_body(t: &mut Tokenizer) -> Option<Select> {
         None
     };
     let filter = if t.keyword("where").is_some() { Some(parse_conds(t)?) } else { None };
-    Some(Select { cols, map, join, filter })
+    
+    let mut group_by = None;
+    if t.keyword("group").is_some() {
+        t.keyword("by")?;
+        let mut gcols = vec![t.ident()?];
+        while t.symbol(",") {
+            gcols.push(t.ident()?);
+        }
+        group_by = Some(gcols);
+    }
+    
+    let mut order_by = None;
+    if t.keyword("order").is_some() {
+        t.keyword("by")?;
+        let col = t.ident()?;
+        let is_desc = if t.keyword("desc").is_some() {
+            true
+        } else {
+            let _ = t.keyword("asc");
+            false
+        };
+        order_by = Some((col, is_desc));
+    }
+    
+    let mut limit = None;
+    if t.keyword("limit").is_some() {
+        t.skip_ws();
+        let start = t.i;
+        while t.i < t.s.len() && t.s[t.i].is_ascii_digit() {
+            t.i += 1;
+        }
+        let num_str = std::str::from_utf8(&t.s[start..t.i]).ok()?;
+        limit = Some(num_str.parse::<usize>().ok()?);
+    }
+    
+    Some(Select { is_distinct, cols, star, map, join, filter, group_by, order_by, limit })
 }
 
 /// Given `a` and `b` from `ON a = b`, return (col-on-left, col-on-right) using the
@@ -280,27 +359,216 @@ pub fn execute_with(
     let matched: Vec<&(Vec<u8>, Vec<u8>)> =
         entries.iter().filter(|(_, v)| eval(filter, v, schemas, ex)).collect();
 
-    let columns: Vec<String> = match &select.cols {
-        Cols::Named(names) => names.iter().map(|n| bare_col(n)).collect(),
-        Cols::Star if !star_cols.is_empty() => star_cols.to_vec(),
-        Cols::Star => matched.first().and_then(|(_, v)| schema_fields(v, schemas)).unwrap_or_default(),
-    };
+    let mut columns = Vec::new();
+    if select.star {
+        if !star_cols.is_empty() {
+            columns = star_cols.to_vec();
+        } else {
+            columns = matched.first().and_then(|(_, v)| schema_fields(v, schemas)).unwrap_or_default();
+        }
+    } else {
+        for c in &select.cols {
+            match c {
+                ColExpr::Col(n) => columns.push(bare_col(n)),
+                ColExpr::Count(n) => columns.push(format!("count({})", bare_col(n))),
+                ColExpr::Sum(n) => columns.push(format!("sum({})", bare_col(n))),
+                ColExpr::Avg(n) => columns.push(format!("avg({})", bare_col(n))),
+                ColExpr::Min(n) => columns.push(format!("min({})", bare_col(n))),
+                ColExpr::Max(n) => columns.push(format!("max({})", bare_col(n))),
+            }
+        }
+    }
 
-    let rows = matched
-        .iter()
-        .map(|(k, v)| {
-            columns
-                .iter()
-                .map(|c| {
-                    if Some(c.as_str()) == key_col {
-                        fmt(crate::json::decode_key_data(k)) // key column projected from the key
-                    } else {
-                        fmt(ex.extract(v, schemas, c))
+    let has_aggregates = !select.star && select.cols.iter().any(|c| !matches!(c, ColExpr::Col(_)));
+    let mut rows = Vec::new();
+
+    if has_aggregates || select.group_by.is_some() {
+        let group_cols = select.group_by.clone().unwrap_or_default();
+        let mut groups: HashMap<Vec<Option<String>>, Vec<&(Vec<u8>, Vec<u8>)>> = HashMap::new();
+        
+        for entry in &matched {
+            let mut group_key = Vec::new();
+            for col in &group_cols {
+                let val = if Some(col.as_str()) == key_col {
+                    fmt(crate::json::decode_key_data(&entry.0))
+                } else {
+                    fmt(ex.extract(&entry.1, schemas, col))
+                };
+                group_key.push(val);
+            }
+            groups.entry(group_key).or_default().push(entry);
+        }
+        
+        for (group_key, group_entries) in groups {
+            let mut row = Vec::new();
+            if select.star {
+                continue;
+            }
+            for col_expr in &select.cols {
+                match col_expr {
+                    ColExpr::Col(n) => {
+                        let b = bare_col(n);
+                        let opt_idx = group_cols.iter().position(|gc| gc == &b);
+                        if let Some(idx) = opt_idx {
+                            row.push(group_key[idx].clone());
+                        } else if let Some(entry) = group_entries.first() {
+                            let val = if Some(b.as_str()) == key_col {
+                                fmt(crate::json::decode_key_data(&entry.0))
+                            } else {
+                                fmt(ex.extract(&entry.1, schemas, &b))
+                            };
+                            row.push(val);
+                        } else {
+                            row.push(None);
+                        }
                     }
-                })
-                .collect()
-        })
-        .collect();
+                    ColExpr::Count(_) => {
+                        row.push(Some(group_entries.len().to_string()));
+                    }
+                    ColExpr::Sum(n) => {
+                        let b = bare_col(n);
+                        let mut sum = 0.0;
+                        let mut has_val = false;
+                        for entry in &group_entries {
+                            let val = if Some(b.as_str()) == key_col {
+                                crate::json::decode_key_data(&entry.0)
+                            } else {
+                                ex.extract(&entry.1, schemas, &b)
+                            };
+                            match val {
+                                FieldValue::I32(v) => { sum += v as f64; has_val = true; }
+                                FieldValue::I64(v) => { sum += v as f64; has_val = true; }
+                                FieldValue::F64(v) => { sum += v; has_val = true; }
+                                _ => {}
+                            }
+                        }
+                        row.push(if has_val { Some(sum.to_string()) } else { None });
+                    }
+                    ColExpr::Avg(n) => {
+                        let b = bare_col(n);
+                        let mut sum = 0.0;
+                        let mut count = 0;
+                        for entry in &group_entries {
+                            let val = if Some(b.as_str()) == key_col {
+                                crate::json::decode_key_data(&entry.0)
+                            } else {
+                                ex.extract(&entry.1, schemas, &b)
+                            };
+                            match val {
+                                FieldValue::I32(v) => { sum += v as f64; count += 1; }
+                                FieldValue::I64(v) => { sum += v as f64; count += 1; }
+                                FieldValue::F64(v) => { sum += v; count += 1; }
+                                _ => {}
+                            }
+                        }
+                        row.push(if count > 0 { Some((sum / count as f64).to_string()) } else { None });
+                    }
+                    ColExpr::Min(n) => {
+                        let b = bare_col(n);
+                        let mut min_fv: Option<FieldValue> = None;
+                        for entry in &group_entries {
+                            let val = if Some(b.as_str()) == key_col {
+                                crate::json::decode_key_data(&entry.0)
+                            } else {
+                                ex.extract(&entry.1, schemas, &b)
+                            };
+                            if val != FieldValue::Null {
+                                if let Some(ref m) = min_fv {
+                                    if val.compare(m) == Some(std::cmp::Ordering::Less) {
+                                        min_fv = Some(val);
+                                    }
+                                } else {
+                                    min_fv = Some(val);
+                                }
+                            }
+                        }
+                        row.push(min_fv.and_then(|v| fmt_value(&v)));
+                    }
+                    ColExpr::Max(n) => {
+                        let b = bare_col(n);
+                        let mut max_fv: Option<FieldValue> = None;
+                        for entry in &group_entries {
+                            let val = if Some(b.as_str()) == key_col {
+                                crate::json::decode_key_data(&entry.0)
+                            } else {
+                                ex.extract(&entry.1, schemas, &b)
+                            };
+                            if val != FieldValue::Null {
+                                if let Some(ref m) = max_fv {
+                                    if val.compare(m) == Some(std::cmp::Ordering::Greater) {
+                                        max_fv = Some(val);
+                                    }
+                                } else {
+                                    max_fv = Some(val);
+                                }
+                            }
+                        }
+                        row.push(max_fv.and_then(|v| fmt_value(&v)));
+                    }
+                }
+            }
+            rows.push(row);
+        }
+    } else {
+        for entry in &matched {
+            let mut row = Vec::new();
+            if select.star {
+                for c in &columns {
+                    let val = if Some(c.as_str()) == key_col {
+                        fmt(crate::json::decode_key_data(&entry.0))
+                    } else {
+                        fmt(ex.extract(&entry.1, schemas, c))
+                    };
+                    row.push(val);
+                }
+            } else {
+                for col_expr in &select.cols {
+                    match col_expr {
+                        ColExpr::Col(n) => {
+                            let b = bare_col(n);
+                            let val = if Some(b.as_str()) == key_col {
+                                fmt(crate::json::decode_key_data(&entry.0))
+                            } else {
+                                fmt(ex.extract(&entry.1, schemas, &b))
+                            };
+                            row.push(val);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            rows.push(row);
+        }
+    }
+
+    if select.is_distinct {
+        let mut seen = std::collections::HashSet::new();
+        rows.retain(|r| seen.insert(r.clone()));
+    }
+
+    if let Some((order_col, is_desc)) = &select.order_by {
+        if let Some(col_idx) = columns.iter().position(|c| c == order_col) {
+            rows.sort_by(|a, b| {
+                let val_a = &a[col_idx];
+                let val_b = &b[col_idx];
+                let ord = match (val_a.as_ref().and_then(|s| s.parse::<f64>().ok()), 
+                                 val_b.as_ref().and_then(|s| s.parse::<f64>().ok())) {
+                    (Some(na), Some(nb)) => na.total_cmp(&nb),
+                    _ => val_a.cmp(val_b),
+                };
+                if *is_desc {
+                    ord.reverse()
+                } else {
+                    ord
+                }
+            });
+        }
+    }
+
+    if let Some(limit) = select.limit {
+        rows.truncate(limit);
+    }
+
     (columns, rows)
 }
 
@@ -411,10 +679,18 @@ pub fn project_row(select: &Select, fields: &[(String, FieldValue)]) -> Option<V
     if !eval_fields(filter, fields) {
         return None;
     }
-    let cols: Vec<String> = match &select.cols {
-        Cols::Named(n) => n.iter().map(|c| bare_col(c)).collect(),
-        Cols::Star => fields.iter().map(|(k, _)| k.clone()).collect(),
-    };
+    let mut cols = Vec::new();
+    if select.star {
+        for (k, _) in fields {
+            cols.push(k.clone());
+        }
+    } else {
+        for expr in &select.cols {
+            if let ColExpr::Col(n) = expr {
+                cols.push(bare_col(n));
+            }
+        }
+    }
     Some(
         cols.iter()
             .map(|c| {
@@ -571,7 +847,8 @@ mod tests {
     fn parse_select_with_where() {
         let s = parse_select("SELECT name, age FROM people WHERE age > 30 AND name = 'alice'").unwrap();
         assert_eq!(s.map, "people");
-        assert_eq!(s.cols, Cols::Named(vec!["name".into(), "age".into()]));
+        assert_eq!(s.cols, vec![ColExpr::Col("name".into()), ColExpr::Col("age".into())]);
+        assert_eq!(s.star, false);
         match s.filter.unwrap() {
             Predicate::And(v) => assert_eq!(v.len(), 2),
             _ => panic!("expected AND"),
@@ -581,8 +858,23 @@ mod tests {
     #[test]
     fn parse_star_no_where() {
         let s = parse_select("select * from m").unwrap();
-        assert_eq!(s.cols, Cols::Star);
+        assert_eq!(s.star, true);
+        assert!(s.cols.is_empty());
         assert!(s.filter.is_none());
+    }
+
+    #[test]
+    fn parse_aggregations_and_modifiers() {
+        let s = parse_select("SELECT DISTINCT count(*), sum(age), avg(salary) FROM people GROUP BY dept ORDER BY age DESC LIMIT 10").unwrap();
+        assert_eq!(s.is_distinct, true);
+        assert_eq!(s.cols, vec![
+            ColExpr::Count("*".into()),
+            ColExpr::Sum("age".into()),
+            ColExpr::Avg("salary".into()),
+        ]);
+        assert_eq!(s.group_by, Some(vec!["dept".into()]));
+        assert_eq!(s.order_by, Some(("age".into(), true)));
+        assert_eq!(s.limit, Some(10));
     }
 
     #[test]
@@ -634,7 +926,6 @@ mod tests {
 
     #[test]
     fn join_core_filters_and_projects() {
-        // Simulate a streamed order joined with a recommendation row.
         let sel = match parse(
             "CREATE JOB j AS SINK INTO out SELECT order_id, user_id, starter FROM orders \
              JOIN recommender ON orders.user_id = recommender.user_id WHERE starter = 'Soup'",
@@ -658,7 +949,6 @@ mod tests {
                 ("starter".into(), FieldValue::Str("Soup".into())),
             ]
         );
-        // WHERE filters non-Soup out.
         let salad = vec![("starter".to_string(), FieldValue::Str("Salad".into()))];
         assert!(project_row(&sel, &salad).is_none());
     }
@@ -671,7 +961,6 @@ mod tests {
             "person".into(),
             vec![FieldDescriptor::new("name".into(), STRING), FieldDescriptor::new("age".into(), INT32)],
         ));
-        // Real Person{name:"alice", age:35} Compact value.
         let payload: Vec<u8> = (0.."eac7fcf34f8f1c720000000d0000002300000005616c69636504".len())
             .step_by(2)
             .map(|i| u8::from_str_radix(&"eac7fcf34f8f1c720000000d0000002300000005616c69636504"[i..i + 2], 16).unwrap())
@@ -685,8 +974,55 @@ mod tests {
         assert_eq!(cols, vec!["name", "age"]);
         assert_eq!(rows, vec![vec![Some("alice".into()), Some("35".into())]]);
 
-        // filtered out
         let sel2 = parse_select("SELECT name FROM people WHERE age > 40").unwrap();
         assert!(execute(&sel2, &entries, &schemas).1.is_empty());
+    }
+
+    #[test]
+    fn execute_aggregations_group_order_limit() {
+        use serialization::schema::{FieldDescriptor, Schema, INT32, STRING};
+        let schemas = SchemaService::new();
+        let schema = Schema::new(
+            "employee".into(),
+            vec![
+                FieldDescriptor::new("dept".into(), STRING),
+                FieldDescriptor::new("salary".into(), INT32),
+            ],
+        );
+        schemas.put(schema);
+        
+        let helper = |dept: &str, salary: i32| {
+            let mut payload = Vec::new();
+            let schema = Schema::new("employee".into(), vec![
+                FieldDescriptor::new("dept".into(), STRING),
+                FieldDescriptor::new("salary".into(), INT32),
+            ]);
+            payload.extend_from_slice(&schema.id.to_be_bytes());
+            payload.extend_from_slice(&4u32.to_be_bytes());
+            payload.extend_from_slice(&salary.to_be_bytes());
+            payload.push(5);
+            payload.extend_from_slice(&(dept.len() as u32).to_be_bytes());
+            payload.extend_from_slice(dept.as_bytes());
+            
+            let mut v = vec![0u8; serialization::DATA_OFFSET];
+            v.extend_from_slice(&payload);
+            (vec![0], v)
+        };
+
+        let entries = vec![
+            helper("sales", 100),
+            helper("sales", 200),
+            helper("eng", 300),
+            helper("eng", 400),
+        ];
+
+        // 1. Group by dept, avg salary
+        let sel = parse_select("SELECT dept, avg(salary), count(*) FROM employees GROUP BY dept ORDER BY dept").unwrap();
+        let (cols, mut rows) = execute(&sel, &entries, &schemas);
+        assert_eq!(cols, vec!["dept", "avg(salary)", "count(*)"]);
+        rows.sort();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], vec![Some("eng".into()), Some("350".into()), Some("2".into())]);
+        assert_eq!(rows[1], vec![Some("sales".into()), Some("150".into()), Some("2".into())]);
     }
 }

@@ -22,6 +22,7 @@ mod eval;
 pub mod json;
 pub mod sql;
 pub mod index;
+pub mod agg;
 pub use eval::eval;
 
 use serialization::compact::{FieldExtractor, FieldValue};
@@ -121,7 +122,8 @@ const CLASS_GREATER_LESS: i32 = 4;
 const CLASS_LIKE: i32 = 5;
 const CLASS_ILIKE: i32 = 6;
 const CLASS_IN: i32 = 7;
-const CLASS_INSTANCEOF: i32 = 8;
+    #[allow(dead_code)]
+    const CLASS_INSTANCEOF: i32 = 8;
 const CLASS_NOTEQUAL: i32 = 9;
 const CLASS_NOT: i32 = 10;
 const CLASS_OR: i32 = 11;

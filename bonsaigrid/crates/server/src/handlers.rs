@@ -769,6 +769,54 @@ pub fn dispatch(
             let matches = store.query(&name, &query::decode(&pred), schemas);
             vec![map::encode_entry_list_response(75777, &matches)]
         }
+        // MapProject -> List<Data>
+        80640 => {
+            let (name, projection_data) = codecs::map::decode_project(&req);
+            if let Some(attr_path) = query::agg::extract_attribute_from_projection(&projection_data) {
+                let entries = store.entries(&name);
+                let projected = query::agg::execute_projection(&attr_path, &entries, schemas);
+                vec![codecs::map::encode_project_response(&projected)]
+            } else {
+                vec![codecs::map::encode_project_response(&[])]
+            }
+        }
+        // MapProjectWithPredicate -> List<Data>
+        80896 => {
+            let (name, projection_data, predicate_data) = codecs::map::decode_project_with_predicate(&req);
+            if let Some(attr_path) = query::agg::extract_attribute_from_projection(&projection_data) {
+                let matches = store.query(&name, &query::decode(&predicate_data), schemas);
+                let projected = query::agg::execute_projection(&attr_path, &matches, schemas);
+                vec![codecs::map::encode_project_response(&projected)]
+            } else {
+                vec![codecs::map::encode_project_response(&[])]
+            }
+        }
+        // MapAggregate -> Data
+        87552 => {
+            let (name, aggregator_data) = codecs::map::decode_aggregate(&req);
+            if let Some(agg) = query::agg::decode_aggregator(&aggregator_data) {
+                let entries = store.entries(&name);
+                let val = query::agg::execute_aggregation(&agg, &entries, schemas);
+                let data = serialization::compact::encode_scalar(&val);
+                vec![codecs::map::encode_aggregate_response(&data)]
+            } else {
+                let null_data = serialization::compact::encode_scalar(&serialization::compact::FieldValue::Null);
+                vec![codecs::map::encode_aggregate_response(&null_data)]
+            }
+        }
+        // MapAggregateWithPredicate -> Data
+        87808 => {
+            let (name, aggregator_data, predicate_data) = codecs::map::decode_aggregate_with_predicate(&req);
+            if let Some(agg) = query::agg::decode_aggregator(&aggregator_data) {
+                let matches = store.query(&name, &query::decode(&predicate_data), schemas);
+                let val = query::agg::execute_aggregation(&agg, &matches, schemas);
+                let data = serialization::compact::encode_scalar(&val);
+                vec![codecs::map::encode_aggregate_response(&data)]
+            } else {
+                let null_data = serialization::compact::encode_scalar(&serialization::compact::FieldValue::Null);
+                vec![codecs::map::encode_aggregate_response(&null_data)]
+            }
+        }
         // ---- Topic (pub/sub) ----
         262400 => {
             let (name, message) = map::decode_name_value(&req);
@@ -999,7 +1047,11 @@ pub fn dispatch(
                     vec![codecs::sql::encode_execute_response(&cols, &rows)]
                 }
                 Some(Statement::Select(sel)) => {
-                    let entries = store.entries(&sel.map);
+                    let entries = if let Some(filter) = &sel.filter {
+                        store.query(&sel.map, filter, schemas)
+                    } else {
+                        store.entries(&sel.map)
+                    };
                     let mapping = crate::catalog::get_mapping(&sel.map);
                     let star_cols: Vec<String> =
                         mapping.as_ref().map(|m| m.columns.iter().map(|(n, _)| n.clone()).collect()).unwrap_or_default();
@@ -1258,5 +1310,89 @@ mod tests {
         let out = dispatch(get_request("m", &[1, 2], 2), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster(), None);
         assert_eq!(msg_type(&out[0]), 66049);
         assert_eq!(out[0][1].content, vec![9]);
+    }
+
+    #[test]
+    fn test_project_and_aggregate_handlers() {
+        use serialization::schema::{FieldDescriptor, Schema, INT32, STRING};
+        use protocol::primitives::{data_frame, string_frame};
+        
+        let store = Store::new();
+        let schemas = SchemaService::new();
+        let schema = Schema::new(
+            "employee".into(),
+            vec![
+                FieldDescriptor::new("dept".into(), STRING),
+                FieldDescriptor::new("salary".into(), INT32),
+            ],
+        );
+        schemas.put(schema.clone());
+
+        let helper = |dept: &str, salary: i32| {
+            let mut payload = Vec::new();
+            payload.extend_from_slice(&schema.id.to_be_bytes());
+            payload.extend_from_slice(&4u32.to_be_bytes());
+            payload.extend_from_slice(&salary.to_be_bytes());
+            payload.push(5);
+            payload.extend_from_slice(&(dept.len() as u32).to_be_bytes());
+            payload.extend_from_slice(dept.as_bytes());
+            
+            let mut v = vec![0u8; serialization::DATA_OFFSET];
+            v.extend_from_slice(&payload);
+            v
+        };
+
+        dispatch(put_request("emp", &[1], &helper("sales", 100), 1), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &schemas, &single_cluster(), None);
+        dispatch(put_request("emp", &[2], &helper("sales", 200), 2), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &schemas, &single_cluster(), None);
+
+        let mut proj_payload = Vec::new();
+        proj_payload.extend_from_slice(&(-32i32).to_be_bytes());
+        proj_payload.extend_from_slice(&0i32.to_be_bytes());
+        proj_payload.push(1);
+        proj_payload.extend_from_slice(&6i32.to_be_bytes());
+        proj_payload.extend_from_slice(b"salary");
+        
+        let mut proj_data = vec![0u8; 4];
+        proj_data.extend_from_slice(&(-2i32).to_be_bytes());
+        proj_data.push(1);
+        proj_data.extend_from_slice(&proj_payload);
+
+        let mut project_req = vec![
+            Frame { flags: UNFRAGMENTED, content: vec![0u8; 24] },
+            string_frame("emp"),
+            data_frame(&proj_data),
+        ];
+        write_i32_le(&mut project_req[0].content, 0, 80640);
+        set_correlation_id(&mut project_req, 3);
+
+        let out = dispatch(project_req, 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &schemas, &single_cluster(), None);
+        assert_eq!(msg_type(&out[0]), 80641);
+        assert_eq!(out[0].len(), 5);
+        
+        let mut agg_payload = Vec::new();
+        agg_payload.extend_from_slice(&(-26i32).to_be_bytes());
+        agg_payload.extend_from_slice(&4i32.to_be_bytes());
+        agg_payload.push(0);
+        
+        let mut agg_data = vec![0u8; 4];
+        agg_data.extend_from_slice(&(-2i32).to_be_bytes());
+        agg_data.push(1);
+        agg_data.extend_from_slice(&agg_payload);
+
+        let mut agg_req = vec![
+            Frame { flags: UNFRAGMENTED, content: vec![0u8; 24] },
+            string_frame("emp"),
+            data_frame(&agg_data),
+        ];
+        write_i32_le(&mut agg_req[0].content, 0, 87552);
+        set_correlation_id(&mut agg_req, 4);
+
+        let out = dispatch(agg_req, 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &schemas, &single_cluster(), None);
+        assert_eq!(msg_type(&out[0]), 87553);
+        let result_data = &out[0][1].content;
+        let type_id = i32::from_be_bytes(result_data[4..8].try_into().unwrap());
+        assert_eq!(type_id, -8);
+        let count_val = i64::from_be_bytes(result_data[8..16].try_into().unwrap());
+        assert_eq!(count_val, 2);
     }
 }

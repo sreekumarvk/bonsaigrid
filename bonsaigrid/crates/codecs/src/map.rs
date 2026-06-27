@@ -328,6 +328,42 @@ pub fn encode_add_index_response() -> Vec<Frame> {
     vec![initial_frame(c)]
 }
 
+pub fn decode_project(frames: &[Frame]) -> (String, Vec<u8>) {
+    (decode_string(&frames[1]), frames[2].content.clone())
+}
+
+pub fn decode_project_with_predicate(frames: &[Frame]) -> (String, Vec<u8>, Vec<u8>) {
+    (decode_string(&frames[1]), frames[2].content.clone(), frames[3].content.clone())
+}
+
+pub fn decode_aggregate(frames: &[Frame]) -> (String, Vec<u8>) {
+    (decode_string(&frames[1]), frames[2].content.clone())
+}
+
+pub fn decode_aggregate_with_predicate(frames: &[Frame]) -> (String, Vec<u8>, Vec<u8>) {
+    (decode_string(&frames[1]), frames[2].content.clone(), frames[3].content.clone())
+}
+
+pub fn encode_project_response(list: &[Vec<u8>]) -> Vec<Frame> {
+    let mut c = vec![0u8; 13];
+    write_i32_le(&mut c, 0, 80641);
+    let mut out = vec![initial_frame(c)];
+    out.push(crate::begin_frame());
+    for item in list {
+        out.push(data_frame(item));
+    }
+    out.push(crate::end_frame());
+    out
+}
+
+pub fn encode_aggregate_response(val: &[u8]) -> Vec<Frame> {
+    let mut c = vec![0u8; 13];
+    write_i32_le(&mut c, 0, 87553);
+    let mut out = vec![initial_frame(c)];
+    out.push(data_frame(val));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

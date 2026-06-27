@@ -320,6 +320,42 @@ impl FieldExtractor for CompactExtractor {
     }
 }
 
+pub fn encode_scalar(v: &FieldValue) -> Vec<u8> {
+    let mut payload = Vec::new();
+    let type_id: i32 = match v {
+        FieldValue::Null => 0,
+        FieldValue::Bool(_) => -4,
+        FieldValue::I32(_) => -7,
+        FieldValue::I64(_) => -8,
+        FieldValue::F64(_) => -10,
+        FieldValue::Str(_) => -11,
+    };
+    match v {
+        FieldValue::Null => {}
+        FieldValue::Bool(b) => {
+            payload.push(if *b { 1 } else { 0 });
+        }
+        FieldValue::I32(i) => {
+            payload.extend_from_slice(&i.to_be_bytes());
+        }
+        FieldValue::I64(i) => {
+            payload.extend_from_slice(&i.to_be_bytes());
+        }
+        FieldValue::F64(f) => {
+            payload.extend_from_slice(&f.to_bits().to_be_bytes());
+        }
+        FieldValue::Str(s) => {
+            payload.extend_from_slice(&(s.len() as i32).to_be_bytes());
+            payload.extend_from_slice(s.as_bytes());
+        }
+    }
+    let mut out = vec![0u8; 8];
+    out[0..4].copy_from_slice(&0i32.to_be_bytes());
+    out[4..8].copy_from_slice(&type_id.to_be_bytes());
+    out.extend_from_slice(&payload);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

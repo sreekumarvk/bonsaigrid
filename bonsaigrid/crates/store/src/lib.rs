@@ -26,6 +26,38 @@ fn now_ms() -> u64 {
     START.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvictionPolicy {
+    None,
+    Lru,
+    Lfu,
+    Random,
+}
+
+#[derive(Clone, Debug)]
+pub struct MapConfig {
+    pub max_size: usize,
+    pub eviction_policy: EvictionPolicy,
+    pub max_idle_ms: u64,
+}
+
+impl Default for MapConfig {
+    fn default() -> Self {
+        MapConfig {
+            max_size: 0,
+            eviction_policy: EvictionPolicy::None,
+            max_idle_ms: 0,
+        }
+    }
+}
+
+
+fn rand_idx(max: usize) -> usize {
+    static SEED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(12345);
+    let s = SEED.fetch_add(1103515245, std::sync::atomic::Ordering::Relaxed);
+    s % max
+}
+
 #[derive(Clone, Copy)]
 struct Entry {
     hash: u64, // EMPTY / TOMBSTONE / real (MSB set)
@@ -35,6 +67,8 @@ struct Entry {
     val_len: u32,
     expire_at: u64, // 0 == never
     stamp: u64,     // monotonic update stamp (for split-brain LatestUpdate merge)
+    last_access_ms: u64,
+    hits: u32,
 }
 
 impl Entry {
@@ -46,12 +80,11 @@ impl Entry {
         val_len: 0,
         expire_at: 0,
         stamp: 0,
+        last_access_ms: 0,
+        hits: 0,
     };
     fn occupied(&self) -> bool {
         self.hash > TOMBSTONE
-    }
-    fn expired(&self, now: u64) -> bool {
-        self.expire_at != 0 && now >= self.expire_at
     }
 }
 
@@ -66,6 +99,7 @@ struct Inner {
     counts: Vec<usize>, // live entries per map_id
     index_configs: HashMap<String, Vec<query::index::IndexConfig>>,
     indexes: HashMap<String, HashMap<String, query::index::Index>>,
+    configs: HashMap<String, MapConfig>,
 }
 
 /// FNV-1a over (map_id, key) with the MSB forced set, so real hashes are
@@ -97,6 +131,7 @@ impl Inner {
             counts: Vec::new(),
             index_configs: HashMap::new(),
             indexes: HashMap::new(),
+            configs: HashMap::new(),
         }
     }
 
@@ -158,7 +193,7 @@ impl Inner {
         for attr in &config.attributes {
             for idx in 0..self.table.len() {
                 let e = &self.table[idx];
-                if e.occupied() && e.map_id == map_id && !e.expired(now_ms()) {
+                if e.occupied() && e.map_id == map_id && !self.is_expired(map_id, e, now_ms()) {
                     let key_vec = self.key_bytes(e).to_vec();
                     let val_vec = self.val_bytes(e);
                     let fv = serialization::compact::AutoExtractor.extract(&val_vec, schemas, attr);
@@ -171,6 +206,101 @@ impl Inner {
                     }
                 }
             }
+        }
+    }
+
+    fn is_expired(&self, map_id: u32, e: &Entry, now: u64) -> bool {
+        if e.expire_at != 0 && now >= e.expire_at {
+            return true;
+        }
+        let map_name = &self.map_names[map_id as usize];
+        if let Some(cfg) = self.configs.get(map_name) {
+            if cfg.max_idle_ms > 0 {
+                let last_access_ms = e.last_access_ms;
+                if now.saturating_sub(last_access_ms) > cfg.max_idle_ms {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn evict_one(
+        &mut self,
+        map: &str,
+        map_id: u32,
+        policy: EvictionPolicy,
+        schemas: &serialization::schema::SchemaService,
+    ) {
+        if policy == EvictionPolicy::None {
+            return;
+        }
+        let candidate_idx = match policy {
+            EvictionPolicy::Random => {
+                let start = rand_idx(self.table.len());
+                let mut found = None;
+                for i in 0..self.table.len() {
+                    let idx = (start + i) & self.mask;
+                    let e = self.table[idx];
+                    if e.occupied() && e.map_id == map_id {
+                        found = Some(idx);
+                        break;
+                    }
+                }
+                found
+            }
+            EvictionPolicy::Lru => {
+                let mut best_idx = None;
+                let mut min_access = u64::MAX;
+                let sample_size = 5;
+                for _ in 0..sample_size {
+                    let start = rand_idx(self.table.len());
+                    for i in 0..self.table.len() {
+                        let idx = (start + i) & self.mask;
+                        let e = self.table[idx];
+                        if e.occupied() && e.map_id == map_id {
+                            if e.last_access_ms < min_access {
+                                min_access = e.last_access_ms;
+                                best_idx = Some(idx);
+                            }
+                            break;
+                        }
+                    }
+                }
+                best_idx
+            }
+            EvictionPolicy::Lfu => {
+                let mut best_idx = None;
+                let mut min_hits = u32::MAX;
+                let sample_size = 5;
+                for _ in 0..sample_size {
+                    let start = rand_idx(self.table.len());
+                    for i in 0..self.table.len() {
+                        let idx = (start + i) & self.mask;
+                        let e = self.table[idx];
+                        if e.occupied() && e.map_id == map_id {
+                            if e.hits < min_hits {
+                                min_hits = e.hits;
+                                best_idx = Some(idx);
+                            }
+                            break;
+                        }
+                    }
+                }
+                best_idx
+            }
+            EvictionPolicy::None => None,
+        };
+        if let Some(idx) = candidate_idx {
+            let e = self.table[idx];
+            let key = self.key_bytes(&e).to_vec();
+            let old = self.val_bytes(&e);
+            self.update_indexes(map, &key, Some(&old), None, schemas);
+            self.slab.free(e.handle);
+            self.table[idx].hash = TOMBSTONE;
+            self.len -= 1;
+            self.tombstones += 1;
+            self.counts[map_id as usize] -= 1;
         }
     }
 
@@ -233,11 +363,19 @@ impl Inner {
                     val_len: val.len() as u32,
                     expire_at,
                     stamp,
+                    last_access_ms: now_ms(),
+                    hits: 1,
                 };
                 self.len += 1;
                 self.counts[map_id as usize] += 1;
                 
                 self.update_indexes(map, key, None, Some(val), schemas);
+                
+                if let Some(cfg) = self.configs.get(map) {
+                    if cfg.max_size > 0 && self.counts[map_id as usize] > cfg.max_size {
+                        self.evict_one(map, map_id, cfg.eviction_policy, schemas);
+                    }
+                }
                 
                 return None;
             }
@@ -249,7 +387,7 @@ impl Inner {
                 continue;
             }
             if e.hash == h && e.map_id == map_id && self.key_bytes(&e) == key {
-                let old = if e.expired(now_ms()) { None } else { Some(self.val_bytes(&e)) };
+                let old = if self.is_expired(map_id, &e, now_ms()) { None } else { Some(self.val_bytes(&e)) };
                 self.slab.free(e.handle);
                 let handle = self.slab.put_two(key, val);
                 self.table[i] = Entry {
@@ -260,10 +398,9 @@ impl Inner {
                     val_len: val.len() as u32,
                     expire_at,
                     stamp,
+                    last_access_ms: now_ms(),
+                    hits: e.hits.saturating_add(1),
                 };
-                if old.is_none() && e.expired(now_ms()) {
-                    // previously-expired slot becomes live again
-                }
                 
                 self.update_indexes(map, key, old.as_deref(), Some(val), schemas);
                 
@@ -290,7 +427,7 @@ impl Inner {
                 continue;
             }
             if e.hash == h && e.map_id == map_id && self.key_bytes(&e) == key {
-                if e.expired(now) {
+                if self.is_expired(map_id, &e, now) {
                     self.slab.free(e.handle);
                     self.table[i].hash = TOMBSTONE;
                     self.len -= 1;
@@ -298,6 +435,8 @@ impl Inner {
                     self.counts[map_id as usize] -= 1;
                     return None;
                 }
+                self.table[i].last_access_ms = now_ms();
+                self.table[i].hits = self.table[i].hits.saturating_add(1);
                 return Some(i);
             }
             i = (i + 1) & self.mask;
@@ -373,7 +512,7 @@ impl Inner {
     fn collect_all_stamped(&self, out: &mut Vec<(String, Vec<u8>, Vec<u8>, u64)>) {
         let now = now_ms();
         for e in self.table.iter() {
-            if e.occupied() && !e.expired(now) {
+            if e.occupied() && !self.is_expired(e.map_id, e, now) {
                 let total = (e.key_len + e.val_len) as usize;
                 let bytes = self.slab.get(e.handle, total);
                 out.push((
@@ -429,7 +568,7 @@ impl Inner {
         let Some(&map_id) = self.map_ids.get(map) else { return };
         let now = now_ms();
         for e in self.table.iter() {
-            if e.occupied() && e.map_id == map_id && !e.expired(now) {
+            if e.occupied() && e.map_id == map_id && !self.is_expired(map_id, e, now) {
                 let total = (e.key_len + e.val_len) as usize;
                 let bytes = self.slab.get(e.handle, total);
                 out.push((bytes[..e.key_len as usize].to_vec(), bytes[e.key_len as usize..].to_vec()));
@@ -464,7 +603,7 @@ impl Inner {
         }
         
         for e in self.table.iter() {
-            if e.occupied() && e.map_id == map_id && !e.expired(now) {
+            if e.occupied() && e.map_id == map_id && !self.is_expired(map_id, e, now) {
                 let total = (e.key_len + e.val_len) as usize;
                 let bytes = self.slab.get(e.handle, total);
                 let key = bytes[..e.key_len as usize].to_vec();
@@ -482,7 +621,7 @@ impl Inner {
         self.table.iter().any(|e| {
             e.occupied()
                 && e.map_id == map_id
-                && !e.expired(now)
+                && !self.is_expired(map_id, e, now)
                 && &self.slab.get(e.handle, (e.key_len + e.val_len) as usize)[e.key_len as usize..]
                     == val
         })
@@ -905,6 +1044,13 @@ impl Store {
         let stamp = self.next_stamp();
         let schemas = self.schemas();
         self.shard(map, &key).lock().unwrap().put(map, &key, &val, ttl_ms, stamp, schemas)
+    }
+
+    pub fn set_config(&self, map: &str, config: MapConfig) {
+        for shard in &self.shards {
+            let mut inner = shard.lock().unwrap();
+            inner.configs.insert(map.to_string(), config.clone());
+        }
     }
 
     /// Put with an explicit stamp (used when applying a migrated/replicated entry
@@ -1472,5 +1618,59 @@ mod tests {
         let mut keys_between: Vec<Vec<u8>> = matches_between.iter().map(|(k, _)| k.clone()).collect();
         keys_between.sort();
         assert_eq!(keys_between, vec![b"k1".to_vec(), b"k2".to_vec()]);
+    }
+
+    #[test]
+    fn test_store_eviction_and_max_idle() {
+        let s = Store::new();
+        
+        // 1. Max Size Eviction (Random Policy)
+        s.set_config("random_map", MapConfig {
+            max_size: 3,
+            eviction_policy: EvictionPolicy::Random,
+            max_idle_ms: 0,
+        });
+        
+        s.put("random_map", vec![1], vec![10]);
+        s.put("random_map", vec![2], vec![20]);
+        s.put("random_map", vec![3], vec![30]);
+        assert_eq!(s.size("random_map"), 3);
+        
+        s.put("random_map", vec![4], vec![40]);
+        assert_eq!(s.size("random_map"), 3);
+        
+        // 2. Max Size Eviction (LRU Policy)
+        s.set_config("lru_map", MapConfig {
+            max_size: 3,
+            eviction_policy: EvictionPolicy::Lru,
+            max_idle_ms: 0,
+        });
+        
+        s.put("lru_map", vec![1], vec![10]);
+        s.put("lru_map", vec![2], vec![20]);
+        s.put("lru_map", vec![3], vec![30]);
+        
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        s.get("lru_map", &[2]);
+        s.get("lru_map", &[3]);
+        
+        s.put("lru_map", vec![4], vec![40]);
+        assert_eq!(s.size("lru_map"), 3);
+        assert_eq!(s.get("lru_map", &[1]), None, "LRU key 1 evicted");
+        assert_eq!(s.get("lru_map", &[2]).is_some(), true);
+        assert_eq!(s.get("lru_map", &[3]).is_some(), true);
+        
+        // 3. Max Idle TTL Expiry
+        s.set_config("idle_map", MapConfig {
+            max_size: 0,
+            eviction_policy: EvictionPolicy::None,
+            max_idle_ms: 50,
+        });
+        
+        s.put("idle_map", vec![1], vec![99]);
+        assert_eq!(s.get("idle_map", &[1]), Some(vec![99]));
+        
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        assert_eq!(s.get("idle_map", &[1]), None, "idle expired");
     }
 }
