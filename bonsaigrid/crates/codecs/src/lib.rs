@@ -16,6 +16,8 @@ pub mod schema;
 pub mod sql;
 pub mod mc;
 pub mod cache;
+pub mod executor;
+pub mod txn;
 
 use protocol::frame::{Frame, BEGIN_DS, END_DS};
 

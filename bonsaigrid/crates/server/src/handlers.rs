@@ -110,13 +110,15 @@ pub fn dispatch_bytes(
     schemas: &SchemaService,
     cluster: &Cluster,
     replicator: Option<&Replicator>,
+    executor: &crate::executor::ExecutorService,
+    txn_service: &crate::txn::TransactionService,
     out: &mut Vec<u8>,
 ) {
     if try_fast_get(msg, store, out) {
         return;
     }
     if let Some((frames, _)) = read_message(msg) {
-        for reply in dispatch(frames, conn_id, store, cfg, broker, schemas, cluster, replicator) {
+        for reply in dispatch(frames, conn_id, store, cfg, broker, schemas, cluster, replicator, executor, txn_service) {
             out.extend_from_slice(&write_message(&reply));
         }
     }
@@ -471,6 +473,8 @@ pub fn dispatch(
     schemas: &SchemaService,
     cluster: &Cluster,
     replicator: Option<&Replicator>,
+    executor: &crate::executor::ExecutorService,
+    txn_service: &crate::txn::TransactionService,
 ) -> Vec<Vec<Frame>> {
     store.set_schemas(schemas.clone());
     let corr = correlation_id(&req);
@@ -928,6 +932,42 @@ pub fn dispatch(
             };
             vec![cache::encode_cache_remove_response(removed)]
         }
+        // ExecutorServiceSubmitToPartition
+        525568 => {
+            let (name, uuid, callable) = codecs::executor::decode_submit_to_partition(&req);
+            let response = executor.submit_to_partition(&name, uuid, callable);
+            vec![codecs::executor::encode_submit_response(525569, response.as_deref())]
+        }
+        // ExecutorServiceSubmitToMember
+        525824 => {
+            let (name, uuid, callable, _member_uuid) = codecs::executor::decode_submit_to_member(&req);
+            let response = executor.submit_to_member(&name, uuid, callable);
+            vec![codecs::executor::encode_submit_response(525825, response.as_deref())]
+        }
+        // TransactionCreate (1376768)
+        1376768 | 1312000 => { // TransactionCreate and XATransactionCreate
+            let uuid = txn_service.begin();
+            vec![codecs::txn::encode_transaction_create_response(uuid)]
+        }
+        // TransactionCommit (1376512)
+        1376512 => {
+            let uuid = codecs::txn::decode_transaction_commit(&req);
+            txn_service.commit(uuid, store);
+            vec![codecs::txn::encode_transaction_commit_response()]
+        }
+        // TransactionRollback (1377024)
+        1377024 => {
+            let uuid = codecs::txn::decode_transaction_rollback(&req);
+            txn_service.rollback(uuid);
+            vec![codecs::txn::encode_transaction_rollback_response()]
+        }
+        // TransactionalMapPut (919040)
+        919040 => {
+            let (name, txn_id, key, value) = codecs::txn::decode_transactional_map_put(&req);
+            let old = store.get(&name, &key);
+            txn_service.buffer_put(txn_id, name, key, value);
+            vec![codecs::txn::encode_transactional_map_put_response(old.as_deref())]
+        }
         262656 => {
             let name = map::decode_name(&req);
             broker.register_topic(&name, conn_id, corr);
@@ -1295,7 +1335,7 @@ mod tests {
     fn auth_reports_self_member_identity() {
         // member index 2 should report its own uuid (1,3) in the response header.
         let cfg = cluster_cfg(3, 2);
-        let out = dispatch(auth_request(1), 0, &Store::new(), &cfg, &EventBroker::new((1, 1)), &SchemaService::new(), &cluster_of(3), None);
+        let out = dispatch(auth_request(1), 0, &Store::new(), &cfg, &EventBroker::new((1, 1)), &SchemaService::new(), &cluster_of(3), None, &crate::executor::ExecutorService::new(), &crate::txn::TransactionService::new());
         assert_eq!(msg_type(&out[0]), 257);
         // member_uuid lives at offset 14 (after backupAcks@12 + status@13).
         assert_eq!(protocol::fixed::read_uuid(&out[0][0].content, 14), Some((1, 3)));
@@ -1318,7 +1358,7 @@ mod tests {
     #[test]
     fn auth_replies_257_with_echoed_correlation() {
         let store = Store::new();
-        let out = dispatch(auth_request(99), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster(), None);
+        let out = dispatch(auth_request(99), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster(), None, &crate::executor::ExecutorService::new(), &crate::txn::TransactionService::new());
         assert_eq!(out.len(), 1);
         assert_eq!(msg_type(&out[0]), 257);
         assert_eq!(correlation_id(&out[0]), 99);
@@ -1327,7 +1367,7 @@ mod tests {
     #[test]
     fn cluster_view_replies_response_plus_two_events() {
         let store = Store::new();
-        let out = dispatch(request(768, 5), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster(), None);
+        let out = dispatch(request(768, 5), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster(), None, &crate::executor::ExecutorService::new(), &crate::txn::TransactionService::new());
         assert_eq!(out.len(), 3);
         assert_eq!(msg_type(&out[0]), 769);
         assert_eq!(msg_type(&out[1]), 770);
@@ -1352,7 +1392,7 @@ mod tests {
         cluster.remove_member_by_uuid((1, 3));
         assert!(!cluster.has_quorum());
         let store = Store::new();
-        let out = dispatch(put_request("m", &[1], &[9], 7), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &cluster, None);
+        let out = dispatch(put_request("m", &[1], &[9], 7), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &cluster, None, &crate::executor::ExecutorService::new(), &crate::txn::TransactionService::new());
         assert_eq!(out.len(), 1);
         assert_eq!(msg_type(&out[0]), 0, "below quorum -> exception (type 0)");
         assert_eq!(correlation_id(&out[0]), 7);
@@ -1389,7 +1429,7 @@ mod tests {
     fn local_backup_listener_replies_3841_with_uuid() {
         use protocol::fixed::read_uuid;
         let store = Store::new();
-        let out = dispatch(request(3840, 7), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster(), None);
+        let out = dispatch(request(3840, 7), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster(), None, &crate::executor::ExecutorService::new(), &crate::txn::TransactionService::new());
         assert_eq!(msg_type(&out[0]), 3841);
         // initial frame must be 30 bytes with the registration UUID at offset 13
         assert_eq!(out[0][0].content.len(), 30);
@@ -1400,7 +1440,7 @@ mod tests {
     #[test]
     fn create_proxy_replies_empty_1025() {
         let store = Store::new();
-        let out = dispatch(request(1024, 8), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster(), None);
+        let out = dispatch(request(1024, 8), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster(), None, &crate::executor::ExecutorService::new(), &crate::txn::TransactionService::new());
         assert_eq!(msg_type(&out[0]), 1025);
         assert_eq!(correlation_id(&out[0]), 8);
     }
@@ -1408,11 +1448,11 @@ mod tests {
     #[test]
     fn put_then_get_roundtrips_through_store() {
         let store = Store::new();
-        let out = dispatch(put_request("m", &[1, 2], &[9], 1), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster(), None);
+        let out = dispatch(put_request("m", &[1, 2], &[9], 1), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster(), None, &crate::executor::ExecutorService::new(), &crate::txn::TransactionService::new());
         assert_eq!(msg_type(&out[0]), 65793);
         assert!(out[0][1].is_null()); // no prior value
 
-        let out = dispatch(get_request("m", &[1, 2], 2), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster(), None);
+        let out = dispatch(get_request("m", &[1, 2], 2), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster(), None, &crate::executor::ExecutorService::new(), &crate::txn::TransactionService::new());
         assert_eq!(msg_type(&out[0]), 66049);
         assert_eq!(out[0][1].content, vec![9]);
     }
@@ -1447,8 +1487,8 @@ mod tests {
             v
         };
 
-        dispatch(put_request("emp", &[1], &helper("sales", 100), 1), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &schemas, &single_cluster(), None);
-        dispatch(put_request("emp", &[2], &helper("sales", 200), 2), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &schemas, &single_cluster(), None);
+        dispatch(put_request("emp", &[1], &helper("sales", 100), 1), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &schemas, &single_cluster(), None, &crate::executor::ExecutorService::new(), &crate::txn::TransactionService::new());
+        dispatch(put_request("emp", &[2], &helper("sales", 200), 2), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &schemas, &single_cluster(), None, &crate::executor::ExecutorService::new(), &crate::txn::TransactionService::new());
 
         let mut proj_payload = Vec::new();
         proj_payload.extend_from_slice(&(-32i32).to_be_bytes());
@@ -1470,7 +1510,7 @@ mod tests {
         write_i32_le(&mut project_req[0].content, 0, 80640);
         set_correlation_id(&mut project_req, 3);
 
-        let out = dispatch(project_req, 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &schemas, &single_cluster(), None);
+        let out = dispatch(project_req, 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &schemas, &single_cluster(), None, &crate::executor::ExecutorService::new(), &crate::txn::TransactionService::new());
         assert_eq!(msg_type(&out[0]), 80641);
         assert_eq!(out[0].len(), 5);
         
@@ -1492,7 +1532,7 @@ mod tests {
         write_i32_le(&mut agg_req[0].content, 0, 87552);
         set_correlation_id(&mut agg_req, 4);
 
-        let out = dispatch(agg_req, 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &schemas, &single_cluster(), None);
+        let out = dispatch(agg_req, 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &schemas, &single_cluster(), None, &crate::executor::ExecutorService::new(), &crate::txn::TransactionService::new());
         assert_eq!(msg_type(&out[0]), 87553);
         let result_data = &out[0][1].content;
         let type_id = i32::from_be_bytes(result_data[4..8].try_into().unwrap());

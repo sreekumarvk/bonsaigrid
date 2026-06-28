@@ -57,14 +57,14 @@ fn map_get_hot_path_is_zero_alloc() {
     // Warmup: intern the map name, settle buffers.
     for _ in 0..200 {
         out.clear();
-        dispatch_bytes(&msg, 1, &store, &cfg, &broker, &schemas, &cluster, None, &mut out);
+        dispatch_bytes(&msg, 1, &store, &cfg, &broker, &schemas, &cluster, None, &server::executor::ExecutorService::new(), &server::txn::TransactionService::new(), &mut out);
     }
     assert!(out.windows(5).any(|w| w == b"value"), "response carries the value");
 
     let before = ALLOCS.load(Ordering::Relaxed);
     for _ in 0..10_000 {
         out.clear();
-        dispatch_bytes(&msg, 1, &store, &cfg, &broker, &schemas, &cluster, None, &mut out);
+        dispatch_bytes(&msg, 1, &store, &cfg, &broker, &schemas, &cluster, None, &server::executor::ExecutorService::new(), &server::txn::TransactionService::new(), &mut out);
     }
     let allocs = ALLOCS.load(Ordering::Relaxed) - before;
     assert_eq!(allocs, 0, "MapGet hot path allocated {allocs} times over 10k calls");
