@@ -1,7 +1,7 @@
-# Guide to BonsaiGrid with Java
+# Guide to BonsaiGrid (Java, Python, C++, Rust)
 
 ## 1. Overview
-In this article, we’ll explore **BonsaiGrid** — a revolutionary, blazingly fast, and zero-allocation drop-in replacement for the Hazelcast Server Cluster. We'll learn how to embed a BonsaiGrid server node natively inside a Java application, create a distributed *Map*, and use the standard Hazelcast Java Client to connect and query data.
+In this article, we’ll explore **BonsaiGrid** — a revolutionary, blazingly fast, and zero-allocation drop-in replacement for the Hazelcast Server Cluster. Because BonsaiGrid faithfully implements the Hazelcast open wire protocol, you can seamlessly connect to it using standard Hazelcast clients from any language. We'll show you how to easily connect and use a distributed *Map* from Java, Python, C++, and Rust!
 
 ## 2. What Is BonsaiGrid?
 Hazelcast is a popular distributed In-Memory Data Grid platform for Java. While powerful, its server architecture relies on the JVM, which can lead to GC pauses and high memory overhead under load. 
@@ -25,70 +25,104 @@ We also need the standard Hazelcast Java Client to communicate with our server:
 
 ## 4. A First BonsaiGrid Application
 
-### 4.1. Start the Embedded BonsaiGrid Server
-Unlike standard Hazelcast, which spawns a JVM-based server when you call `Hazelcast.newHazelcastInstance()`, BonsaiGrid provides a frictionless JNI wrapper that spawns the highly optimized Rust engine directly in the background of your JVM via FFI.
+Since BonsaiGrid implements the open Hazelcast binary protocol, it works seamlessly with any standard Hazelcast client across multiple languages!
 
-Let’s boot up our embedded node:
+First, start your BonsaiGrid server either standalone, via the Rust library, or embedded in Java using the JNI wrapper. Once it's running on `127.0.0.1:5701`, you can connect to it using any of the following languages:
 
-```java
-import com.bonsaigrid.BonsaiGrid;
-
-public class BonsaiGridDemo {
-    public static void main(String[] args) {
-        System.out.println("Booting up BonsaiGrid Rust Engine...");
-        
-        // Starts the io_uring thread-per-core server in the background natively
-        BonsaiGrid.startServer(); 
-        
-        System.out.println("BonsaiGrid is listening on 127.0.0.1:5701");
-    }
-}
-```
-When this runs, the Java application will seamlessly extract the native dynamic library (e.g. `.so`, `.dylib`, or `.dll`) and boot the Rust server cluster on port `5701`.
-
-### 4.2. Create the Hazelcast Java Client
-Since BonsaiGrid implements the standard protocol, we can connect to our embedded Rust server using the official Hazelcast Java Client.
+### 4.1. Java Client Demo
+Using the official `com.hazelcast:hazelcast` dependency, you can connect directly to BonsaiGrid.
 
 ```java
 import com.hazelcast.client.HazelcastClient;
 import com.hazelcast.client.config.ClientConfig;
 import com.hazelcast.core.HazelcastInstance;
+import com.hazelcast.map.IMap;
 
-// ... inside the main method ...
+public class JavaDemo {
+    public static void main(String[] args) {
+        ClientConfig config = new ClientConfig();
+        config.getNetworkConfig().addAddress("127.0.0.1:5701");
+        config.setClusterName("dev");
 
-ClientConfig clientConfig = new ClientConfig();
-clientConfig.getNetworkConfig().addAddress("127.0.0.1:5701");
-clientConfig.setClusterName("dev");
+        HazelcastInstance client = HazelcastClient.newHazelcastClient(config);
+        IMap<Long, String> map = client.getMap("vehicles");
 
-HazelcastInstance client = HazelcastClient.newHazelcastClient(clientConfig);
-System.out.println("Successfully connected to BonsaiGrid!");
+        map.put(1L, "Audi");
+        map.put(2L, "BMW");
+
+        System.out.println("Map Size: " + map.size());
+        client.shutdown();
+    }
+}
 ```
 
-### 4.3. Using the Distributed Map
-Now that we are connected, let's interact with a distributed `IMap`. All network requests will route over the wire to our lightning-fast embedded Rust backend.
+### 4.2. Python Client Demo
+Using the official `hazelcast-python-client`, Python applications can utilize BonsaiGrid's incredible performance.
 
-```java
-import com.hazelcast.map.IMap;
-import java.util.Map;
+```python
+import hazelcast
 
-// ... inside the main method ...
+if __name__ == "__main__":
+    # Connect to BonsaiGrid
+    client = hazelcast.HazelcastClient(
+        cluster_members=["127.0.0.1:5701"],
+        cluster_name="dev"
+    )
 
-IMap<Long, String> map = client.getMap("vehicles");
+    # Get the Distributed Map
+    map = client.get_map("vehicles").blocking()
 
-// Puts data into the BonsaiGrid store
-map.put(1L, "Audi");
-map.put(2L, "BMW");
-map.put(3L, "Mercedes");
+    map.put(1, "Audi")
+    map.put(2, "BMW")
 
-System.out.println("Map Size: " + map.size()); // Prints 3
+    print(f"Map Size: {map.size()}")
+    client.shutdown()
+```
 
-// Iterating over entries
-for (Map.Entry<Long, String> entry : map.entrySet()) {
-    System.out.printf("Key: %d, Value: %s\n", entry.getKey(), entry.getValue());
+### 4.3. C++ Client Demo
+Using the official Hazelcast C++ client, high-frequency trading or gaming applications can get sub-millisecond latencies against BonsaiGrid.
+
+```cpp
+#include <hazelcast/client/hazelcast_client.h>
+#include <iostream>
+
+int main() {
+    hazelcast::client::client_config config;
+    config.get_network_config().add_address({"127.0.0.1", 5701});
+    config.set_cluster_name("dev");
+
+    auto client = hazelcast::new_client(std::move(config)).get();
+    auto map = client.get_map("vehicles").get();
+
+    map->put<int64_t, std::string>(1, "Audi").get();
+    map->put<int64_t, std::string>(2, "BMW").get();
+
+    std::cout << "Map Size: " << map->size().get() << std::endl;
+    return 0;
 }
+```
 
-// Shut down the client
-client.shutdown();
+### 4.4. Rust Client Demo
+For native Rust applications, you can use community Rust Hazelcast clients or simply use BonsaiGrid's internal crates for direct embedded access!
+
+```rust
+use hazelcast_client::{Client, ClientConfig};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = ClientConfig::new();
+    config.network.add_address("127.0.0.1:5701");
+    config.cluster_name = "dev".to_string();
+
+    let client = Client::start(config).await?;
+    let map = client.get_map("vehicles").await?;
+
+    map.put(1i64, "Audi".to_string()).await?;
+    map.put(2i64, "BMW".to_string()).await?;
+
+    println!("Map Size: {}", map.size().await?);
+    Ok(())
+}
 ```
 
 ## 5. Why Choose BonsaiGrid?
