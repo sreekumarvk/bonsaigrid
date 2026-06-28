@@ -138,11 +138,13 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
     let metrics = Arc::new(server::metrics::Metrics::new());
     let executor = server::executor::ExecutorService::new();
     let txn_service = server::txn::TransactionService::new();
+    let jet_service = jet::executor::JetService::new();
     let (md, mh) = (metrics.clone(), metrics.clone());
     let cl_d = cluster.clone();
     let rep_d = replicator.clone();
     let exec_d = executor.clone();
     let txn_d = txn_service.clone();
+    let jet_d = jet_service.clone();
     let cl_h = cluster.clone();
     let rep_h = replicator.clone();
     // on_cluster: drain the reverse ring, apply to the authoritative Cluster, and
@@ -176,7 +178,7 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
         move |msg, conn_id, out| {
             md.inc_request();
             let cluster = cl_d.borrow();
-            server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, &schemas, &cluster, rep_d.as_ref().as_ref(), &exec_d, &txn_d, out)
+            server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, &schemas, &cluster, rep_d.as_ref().as_ref(), &exec_d, &txn_d, &jet_d, out)
         },
         move |path| {
             if let Some(dead) = parse_promote(path) {
@@ -257,6 +259,7 @@ fn run_single_node() -> std::io::Result<()> {
     let schemas = Arc::new(serialization::schema::SchemaService::new());
     let executor = server::executor::ExecutorService::new();
     let txn_service = server::txn::TransactionService::new();
+    let jet_service = jet::executor::JetService::new();
     let core_ids = core_affinity::get_core_ids().unwrap_or_default();
     eprintln!(
         "BonsaiGrid listening on {addr} (thread-per-core, {cores} cores, io_uring); TPC ports {:?}",
@@ -272,6 +275,7 @@ fn run_single_node() -> std::io::Result<()> {
         let schemas = schemas.clone();
         let executor = executor.clone();
         let txn_service = txn_service.clone();
+        let jet_service = jet_service.clone();
         let cluster = cluster.clone();
         let main_listener = reuseport_listener(addr)?;
         let tpc_addr: SocketAddr = format!("127.0.0.1:{}", TPC_BASE + i as i32).parse().unwrap();
@@ -285,11 +289,12 @@ fn run_single_node() -> std::io::Result<()> {
             let (md, mh) = (metrics.clone(), metrics.clone());
             let exec_d = executor.clone();
             let txn_d = txn_service.clone();
+            let jet_d = jet_service.clone();
             let _ = server::reactor::run(
                 vec![main_listener, tpc_listener],
                 move |msg, conn_id, out| {
                     md.inc_request();
-                    server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, &schemas, &cluster, None, &exec_d, &txn_d, out)
+                    server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, &schemas, &cluster, None, &exec_d, &txn_d, &jet_d, out)
                 },
                 move |path| http_route(path, 1, &mh),
                 move |conn_id, out| {

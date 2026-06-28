@@ -1,0 +1,9 @@
+[package]
+name = "jet"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+protocol = { path = "../protocol" }
+codecs = { path = "../codecs" }
+query = { path = "../query" }

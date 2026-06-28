@@ -9,6 +9,7 @@ codecs = { path = "../codecs" }
 store = { path = "../store" }
 serialization = { path = "../serialization" }
 query = { path = "../query" }
+jet = { path = "../jet" }
 member = { path = "../member" }
 spsc = { path = "../spsc" }
 io-uring = "0.6"
