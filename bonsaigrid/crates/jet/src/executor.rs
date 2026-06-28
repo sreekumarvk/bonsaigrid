@@ -36,71 +36,92 @@ impl JetService {
         };
         self.jobs.lock().unwrap().insert(id, job);
         
-        let jobs_arc = self.jobs.clone();
+        // E8.T4-T5: Fault Tolerance & Parallelism
+        // Spawn N background execution threads to simulate local parallelism
+        let local_parallelism = 2; // e.g., 2 cores for this job locally
+        let mut handles = Vec::new();
         
-        // Spawn a background execution thread for this job
-        thread::spawn(move || {
-            // Mock a simple pipeline: Source -> Map -> Filter -> Sink
-            // We just instantiate some tasklets and loop them
-            let mut tasklets = vec![
-                Tasklet {
-                    processor: Box::new(MapProcessor {}),
-                    inbox: {
-                        let mut q = VecDeque::new();
-                        q.push_back(Item::Data(vec![1, 2, 3]));
-                        q.push_back(Item::Data(vec![4, 5, 6]));
-                        q.push_back(Item::Done);
-                        q
-                    },
-                    outbox: VecDeque::new(),
-                },
-                Tasklet {
-                    processor: Box::new(FilterProcessor {}),
-                    inbox: VecDeque::new(),
-                    outbox: VecDeque::new(),
-                },
-            ];
-
-            let mut all_done = false;
-            while !all_done {
-                all_done = true;
-                let mut any_progress = false;
-
-                // Process each tasklet
-                for i in 0..tasklets.len() {
-                    let task = &mut tasklets[i];
-                    if task.processor.process(&mut task.inbox, &mut task.outbox) {
-                        any_progress = true;
-                    }
-                    if !task.inbox.is_empty() || !task.outbox.is_empty() {
-                        all_done = false;
-                    }
-                }
-
-                // Move items from outbox of i to inbox of i+1
-                for i in 0..tasklets.len() - 1 {
-                    let (left, right) = tasklets.split_at_mut(i + 1);
-                    let outbox = &mut left[i].outbox;
-                    let inbox = &mut right[0].inbox;
-                    while let Some(item) = outbox.pop_front() {
-                        inbox.push_back(item);
-                        any_progress = true;
-                    }
-                }
-
-                // Drain the sink (last tasklet's outbox)
-                if let Some(last) = tasklets.last_mut() {
-                    while let Some(_item) = last.outbox.pop_front() {
-                        any_progress = true;
-                    }
-                }
-
-                if !any_progress && !all_done {
-                    thread::yield_now();
-                }
-            }
+        for worker_id in 0..local_parallelism {
+            let jobs_arc = self.jobs.clone();
             
-            // Mark as completed
+            handles.push(thread::spawn(move || {
+                let mut tasklets = vec![
+                    Tasklet {
+                        processor: Box::new(MapProcessor {}),
+                        inbox: {
+                            let mut q = VecDeque::new();
+                            q.push_back(Item::Data(vec![1, 2, worker_id as u8]));
+                            q.push_back(Item::Data(vec![4, 5, 6]));
+                            // Insert a snapshot barrier (Watermark acting as barrier for now)
+                            q.push_back(Item::Watermark(100));
+                            q.push_back(Item::Done);
+                            q
+                        },
+                        outbox: VecDeque::new(),
+                    },
+                    Tasklet {
+                        processor: Box::new(FilterProcessor {}),
+                        inbox: VecDeque::new(),
+                        outbox: VecDeque::new(),
+                    },
+                ];
+
+                let mut all_done = false;
+                let mut snapshot_captured = false;
+                
+                while !all_done {
+                    all_done = true;
+                    let mut any_progress = false;
+
+                    // Process each tasklet
+                    for i in 0..tasklets.len() {
+                        let task = &mut tasklets[i];
+                        if task.processor.process(&mut task.inbox, &mut task.outbox) {
+                            any_progress = true;
+                        }
+                        if !task.inbox.is_empty() || !task.outbox.is_empty() {
+                            all_done = false;
+                        }
+                    }
+
+                    // Move items from outbox of i to inbox of i+1
+                    for i in 0..tasklets.len() - 1 {
+                        let (left, right) = tasklets.split_at_mut(i + 1);
+                        let outbox = &mut left[i].outbox;
+                        let inbox = &mut right[0].inbox;
+                        while let Some(item) = outbox.pop_front() {
+                            if let Item::Watermark(w) = item {
+                                // Fault Tolerance: Snapshot Barrier Reached
+                                if w == 100 && !snapshot_captured {
+                                    // Serialize tasklet states (mocked)
+                                    snapshot_captured = true;
+                                }
+                            }
+                            inbox.push_back(item);
+                            any_progress = true;
+                        }
+                    }
+
+                    // Drain the sink
+                    if let Some(last) = tasklets.last_mut() {
+                        while let Some(_item) = last.outbox.pop_front() {
+                            any_progress = true;
+                        }
+                    }
+
+                    if !any_progress && !all_done {
+                        thread::yield_now();
+                    }
+                }
+            }));
+        }
+
+        // We can spawn another thread to wait and mark the job as completed
+        let jobs_arc = self.jobs.clone();
+        thread::spawn(move || {
+            for h in handles {
+                let _ = h.join();
+            }
             if let Some(job) = jobs_arc.lock().unwrap().get_mut(&id) {
                 job.status = 2; // COMPLETED
             }
