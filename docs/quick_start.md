@@ -14,7 +14,7 @@ In this quick start, we will:
 ## 1. Prerequisites
 
 Before we begin, ensure you have the following installed on your Linux machine:
-- **Java 11 or higher**: (`java -version`)
+- **JDK 11 or higher (Java Development Kit)**: (`javac -version`)
 - **Maven**: (`mvn -version`)
 - **Rust and Cargo**: Required to compile the BonsaiGrid server (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
 
