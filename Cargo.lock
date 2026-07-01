@@ -614,6 +614,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
 dependencies = [
  "digest",
+ "hmac",
 ]
 
 [[package]]
@@ -812,6 +813,19 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "security"
+version = "0.0.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "hmac",
+ "pbkdf2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+]
 
 [[package]]
 name = "semver"
