@@ -236,3 +236,12 @@ Deliverable: TLS/kTLS on the client protocol with the three-state mode. Requires
 ## Execution Note
 
 Phases 1–3 (RBAC + hardened auth, over plaintext) are self-contained, fully verifiable headless, and are implemented first. Phases 4–5 (kTLS/mTLS) require a kernel-capable environment with certs and are implemented/verified there.
+
+## Status (2026-07-01)
+
+- ✅ **Phase 1 shipped** (`1d57666`) — `crates/security` crate; 26 unit tests.
+- ✅ **Phase 2 shipped** (`dd12ba2`) — RBAC enforcement in dispatch; `rbac.rs` + zero-alloc authorize; falsified.
+- ✅ **Phase 3 shipped** (`537acf7`) — auth hardening + per-connection principal binding; `auth.rs`.
+- ⏳ **Phases 4–5 pending** — kTLS client reactor + mTLS members. Deferred to a kernel-capable environment (needs `TLS_TX`/`TLS_RX`, real certs, and io_uring+kTLS validation); not landed headless to avoid shipping unverified transport-security code.
+
+Everything through Phase 3 is on `main`, whole workspace green, zero-alloc hot path preserved.
