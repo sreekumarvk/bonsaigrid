@@ -61,21 +61,18 @@ fn map_get_hot_path_is_zero_alloc() {
     let msg = build_get_msg("m", b"k");
     let mut out: Vec<u8> = Vec::with_capacity(64 * 1024); // pre-reserved, like the reactor
 
+    // These services are constructed once at startup by the reactor (see
+    // main.rs), not per request. Build them here — outside the measured loop —
+    // so the test faithfully measures the request hot path and not its setup.
+    let executor = server::executor::ExecutorService::new();
+    let txn = server::txn::TransactionService::new();
+    let jet = jet::executor::JetService::new();
+
     // Warmup: intern the map name, settle buffers.
     for _ in 0..200 {
         out.clear();
         dispatch_bytes(
-            &msg,
-            1,
-            &store,
-            &cfg,
-            &broker,
-            &schemas,
-            &cluster,
-            None,
-            &server::executor::ExecutorService::new(),
-            &server::txn::TransactionService::new(),
-            &jet::executor::JetService::new(),
+            &msg, 1, &store, &cfg, &broker, &schemas, &cluster, None, &executor, &txn, &jet,
             &mut out,
         );
     }
@@ -88,17 +85,7 @@ fn map_get_hot_path_is_zero_alloc() {
     for _ in 0..10_000 {
         out.clear();
         dispatch_bytes(
-            &msg,
-            1,
-            &store,
-            &cfg,
-            &broker,
-            &schemas,
-            &cluster,
-            None,
-            &server::executor::ExecutorService::new(),
-            &server::txn::TransactionService::new(),
-            &jet::executor::JetService::new(),
+            &msg, 1, &store, &cfg, &broker, &schemas, &cluster, None, &executor, &txn, &jet,
             &mut out,
         );
     }
