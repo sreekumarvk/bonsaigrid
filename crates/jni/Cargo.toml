@@ -12,6 +12,7 @@ server = { path = "../server" }
 store = { path = "../store" }
 serialization = { path = "../serialization" }
 jet = { path = "../jet" }
+security = { path = "../security" }
 socket2 = { version = "0.5", features = ["all"] }
 core_affinity = "0.8"
 tokio = { version = "1.30", features = ["rt-multi-thread"] }

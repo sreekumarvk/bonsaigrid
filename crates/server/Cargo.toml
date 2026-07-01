@@ -12,6 +12,7 @@ query = { path = "../query" }
 jet = { path = "../jet" }
 member = { path = "../member" }
 spsc = { path = "../spsc" }
+security = { path = "../security" }
 io-uring = "0.6"
 libc = "0.2"
 socket2 = { version = "0.5", features = ["all"] }

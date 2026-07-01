@@ -70,6 +70,7 @@ pub extern "system" fn Java_com_bonsaigrid_BonsaiGrid_startServer(_env: JNIEnv, 
         let (eb, cb) = (broker.clone(), broker.clone());
         let (md, _mh) = (metrics.clone(), metrics.clone());
 
+        let anon = security::Principal::anonymous_full();
         let _ = server::reactor::run(
             vec![main_listener, tpc_listener],
             move |msg, conn_id, out| {
@@ -86,6 +87,7 @@ pub extern "system" fn Java_com_bonsaigrid_BonsaiGrid_startServer(_env: JNIEnv, 
                     &executor,
                     &txn_service,
                     &jet_service,
+                    &anon,
                     out,
                 )
             },

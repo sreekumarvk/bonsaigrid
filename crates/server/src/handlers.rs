@@ -65,7 +65,12 @@ fn encode_get_into(out: &mut Vec<u8>, corr: i64, v: Option<&[u8]>) {
     }
 }
 
-fn try_fast_get(msg: &[u8], store: &Store, out: &mut Vec<u8>) -> bool {
+fn try_fast_get(
+    msg: &[u8],
+    store: &Store,
+    principal: &security::Principal,
+    out: &mut Vec<u8>,
+) -> bool {
     let Some((c0, off1)) = frame_at(msg, 0) else {
         return false;
     };
@@ -82,8 +87,42 @@ fn try_fast_get(msg: &[u8], store: &Store, out: &mut Vec<u8>) -> bool {
     let Ok(name) = std::str::from_utf8(name_b) else {
         return false;
     };
+    // RBAC: if the principal may not read this map, fall through to the normal
+    // dispatch path, which emits the AccessControlException reply.
+    if !principal.authorize(security::ResourceType::Map, name, security::Action::Read) {
+        return false;
+    }
     store.get_with(name, key_b, |v| encode_get_into(out, corr, v));
     true
+}
+
+/// RBAC gate. Returns `Some(reply)` — a Hazelcast `AccessControlException` frame
+/// carrying the request's correlation id — when `principal` may not perform the
+/// operation; `None` when it is authorized. Allocation-free on the allow path.
+fn authz_denial(frames: &[Frame], principal: &security::Principal) -> Option<Vec<Frame>> {
+    let allowed = match security::classify(msg_type(frames)) {
+        security::Decision::Data(rt, action) => {
+            let name = frames
+                .get(1)
+                .and_then(|f| std::str::from_utf8(&f.content).ok())
+                .unwrap_or("");
+            principal.authorize(rt, name, action)
+        }
+        security::Decision::Infra => true,
+        security::Decision::AdminOnly => principal.is_admin,
+        // Unmapped op: fail closed — only admin may run it.
+        security::Decision::Unknown => principal.is_admin,
+    };
+    if allowed {
+        return None;
+    }
+    let mut e = error_response(
+        64, // ClientProtocolErrorCodes.ACCESS_CONTROL
+        "java.security.AccessControlException",
+        "Permission denied",
+    );
+    set_correlation_id(&mut e, correlation_id(frames));
+    Some(e)
 }
 
 /// Hazelcast REST health endpoints (served on the main port via protocol
@@ -123,12 +162,17 @@ pub fn dispatch_bytes(
     executor: &crate::executor::ExecutorService,
     txn_service: &crate::txn::TransactionService,
     jet_service: &jet::executor::JetService,
+    principal: &security::Principal,
     out: &mut Vec<u8>,
 ) {
-    if try_fast_get(msg, store, out) {
+    if try_fast_get(msg, store, principal, out) {
         return;
     }
     if let Some((frames, _)) = read_message(msg) {
+        if let Some(denied) = authz_denial(&frames, principal) {
+            out.extend_from_slice(&write_message(&denied));
+            return;
+        }
         for reply in dispatch(
             frames,
             conn_id,

@@ -67,13 +67,16 @@ fn map_get_hot_path_is_zero_alloc() {
     let executor = server::executor::ExecutorService::new();
     let txn = server::txn::TransactionService::new();
     let jet = jet::executor::JetService::new();
+    // The authenticated principal is bound once per connection (not per request);
+    // build it outside the loop. Admin short-circuits authorize() with no alloc.
+    let principal = security::Principal::anonymous_full();
 
     // Warmup: intern the map name, settle buffers.
     for _ in 0..200 {
         out.clear();
         dispatch_bytes(
             &msg, 1, &store, &cfg, &broker, &schemas, &cluster, None, &executor, &txn, &jet,
-            &mut out,
+            &principal, &mut out,
         );
     }
     assert!(
@@ -86,12 +89,51 @@ fn map_get_hot_path_is_zero_alloc() {
         out.clear();
         dispatch_bytes(
             &msg, 1, &store, &cfg, &broker, &schemas, &cluster, None, &executor, &txn, &jet,
-            &mut out,
+            &principal, &mut out,
         );
     }
     let allocs = ALLOCS.load(Ordering::Relaxed) - before;
     assert_eq!(
         allocs, 0,
         "MapGet hot path allocated {allocs} times over 10k calls"
+    );
+
+    // Same hot path, but with a NON-admin principal whose grant must actually be
+    // matched (glob + resource + action) — proving the Phase 2 RBAC enforcement
+    // is allocation-free. Kept in this one test (not a separate #[test]) because
+    // the counting allocator is process-global and parallel tests would
+    // contaminate each other's counts.
+    let granted = security::Principal {
+        name: "app".into(),
+        grants: vec![security::permission::Permission {
+            resource_type: security::permission::ResourceType::Map,
+            name: "m*".into(),
+            actions: security::permission::ActionSet::of(security::permission::Action::Read),
+        }],
+        is_admin: false,
+    };
+    for _ in 0..200 {
+        out.clear();
+        dispatch_bytes(
+            &msg, 1, &store, &cfg, &broker, &schemas, &cluster, None, &executor, &txn, &jet,
+            &granted, &mut out,
+        );
+    }
+    assert!(
+        out.windows(5).any(|w| w == b"value"),
+        "grant must permit GET"
+    );
+    let before = ALLOCS.load(Ordering::Relaxed);
+    for _ in 0..10_000 {
+        out.clear();
+        dispatch_bytes(
+            &msg, 1, &store, &cfg, &broker, &schemas, &cluster, None, &executor, &txn, &jet,
+            &granted, &mut out,
+        );
+    }
+    let allocs = ALLOCS.load(Ordering::Relaxed) - before;
+    assert_eq!(
+        allocs, 0,
+        "RBAC authorize (non-admin matching grant) allocated {allocs} times over 10k gets"
     );
 }

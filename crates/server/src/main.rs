@@ -189,6 +189,9 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
             }
         }
     };
+    // Phase 2: RBAC enforcement runs with the anonymous (full-grant) principal
+    // until Phase 3 binds the authenticated principal per connection.
+    let anon = security::Principal::anonymous_full();
     server::reactor::run(
         vec![listener],
         move |msg, conn_id, out| {
@@ -206,6 +209,7 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
                 &exec_d,
                 &txn_d,
                 &jet_d,
+                &anon,
                 out,
             )
         },
@@ -336,13 +340,14 @@ fn run_single_node() -> std::io::Result<()> {
             let exec_d = executor.clone();
             let txn_d = txn_service.clone();
             let jet_d = jet_service.clone();
+            let anon = security::Principal::anonymous_full();
             let _ = server::reactor::run(
                 vec![main_listener, tpc_listener],
                 move |msg, conn_id, out| {
                     md.inc_request();
                     server::handlers::dispatch_bytes(
                         msg, conn_id, &store, &cfg, &broker, &schemas, &cluster, None, &exec_d,
-                        &txn_d, &jet_d, out,
+                        &txn_d, &jet_d, &anon, out,
                     )
                 },
                 move |path| http_route(path, 1, &mh),
