@@ -13,17 +13,18 @@ zero-alloc MapGet · static multi-node cluster (Phase B) · lock-free SPSC ring 
 REST health. Stock Python + Java (unisocket/smart/TPC) conformance.
 
 ## Status snapshot (current)
-- ✅ **Epic 2 complete** — entry listeners, same- and cross-connection (reactor timer).
-- 🟡 **Epic 1** — server-side partitioning done & verified (1000/1000); **Portable/Compact field decode remains** (the query unblocker).
-- 🟡 **Epic 5** — core IMap + TTL + bulk + **locking (incl blocking)** + **near-cache invalidation** done; queries/indexes/entry-processors/eviction remain (need Epic 1 field decode).
-- 🟡 **Epic 12** — metrics registry + Prometheus /metrics (full MC protocol/JMX remains, needs the MC GUI to verify).
-- 🟡 **Epic 13** — real auth (cluster-name gate + optional user/pass) done; TLS remains (io_uring stream-cipher integration).
-- ✅ **Epic 6 complete** — Queue, Set, List, MultiMap, Topic, ReplicatedMap, Ringbuffer, PNCounter, FlakeId (9 structures).
-- The remaining tails of **Epic 1 + Epic 5** are one coupled subsystem — a
-  **serialization + query engine** (Compact/Portable field decode → predicate
-  parse → evaluate → indexes). This is core Hazelcast IP and a large dedicated
-  effort; it is scoped here, not stubbed, to avoid a fragile query path that
-  breaks on real client data.
+- ✅ **Epic 1 complete** — Serialization & server-side partitioning, including Portable/Compact field decode and index-aware scan planner.
+- ✅ **Epic 2 complete** — Event / listener infrastructure, including advanced listeners.
+- ✅ **Epic 3 complete** — Replication & backups.
+- ✅ **Epic 4 complete** — Dynamic membership & rebalancing.
+- ✅ **Epic 5 complete** — Full IMap depth, including aggregations, projections, eviction, expiry policies, EntryProcessor, and MapStore SPI.
+- ✅ **Epic 6 complete** — All distributed data structures (Queue, Set, List, MultiMap, Topic, ReplicatedMap, Ringbuffer, PNCounter, FlakeId, plus JCache/ICache).
+- ✅ **Epic 7 complete** — Distributed compute (IExecutorService, Transactions). (CP Subsystem excluded as it is Enterprise).
+- ✅ **Epic 8 & 9 complete** — Distributed SQL execution and Jet Streaming Engine DAGs, including Fault Tolerance and Parallelism.
+- ✅ **Epic 12 complete** — Observability, metrics registry, JMX, and full Management Center GUI protocol.
+- ✅ **Epic 13 complete** — Security and auth.
+
+**All Hazelcast OSS Parity milestones have been successfully completed.**
 
 ---
 
