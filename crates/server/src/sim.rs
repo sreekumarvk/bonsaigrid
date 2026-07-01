@@ -408,7 +408,11 @@ mod tests {
     /// while the majority stays available.
     #[test]
     fn minority_partition_refuses_writes_majority_stays_available() {
-        let mut sim = SimCluster::new(3, 1, 2, 0xBEEF);
+        // Built with the production DEFAULT quorum (a strict majority), so this
+        // proves split-brain protection holds out of the box, not just when an
+        // operator opts in.
+        let quorum = crate::membership::default_quorum(3);
+        let mut sim = SimCluster::new(3, 1, quorum, 0xBEEF);
         settle(&mut sim);
 
         // Split {0,1} | {2}.

@@ -245,6 +245,15 @@ impl Cluster {
     }
 }
 
+/// Split-brain-safe default quorum for a cluster of `cluster_size` members:
+/// a strict majority, `floor(n/2) + 1`. With this threshold at most one side of
+/// any network partition can retain quorum, so a minority can never keep
+/// accepting writes. (n=1 → 1, n=2 → 2, n=3 → 2, n=5 → 3.) Operators may still
+/// override via `BONSAI_QUORUM`, but the *default* is safe rather than `1`.
+pub fn default_quorum(cluster_size: usize) -> usize {
+    cluster_size / 2 + 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +307,23 @@ mod tests {
         assert!(c.has_quorum()); // 2 live == quorum
         c.remove_member_by_uuid((1, 2));
         assert!(!c.has_quorum()); // 1 live < 2
+    }
+
+    #[test]
+    fn default_quorum_is_a_strict_majority() {
+        assert_eq!(default_quorum(1), 1); // single node stays writable
+        assert_eq!(default_quorum(2), 2);
+        assert_eq!(default_quorum(3), 2);
+        assert_eq!(default_quorum(4), 3);
+        assert_eq!(default_quorum(5), 3);
+        // `2*quorum > n` guarantees no split a+b=n can leave both sides with
+        // quorum — the formal no-split-brain condition.
+        for n in 1..=64 {
+            assert!(
+                2 * default_quorum(n) > n,
+                "two partitions could both hold quorum at n={n}"
+            );
+        }
     }
 
     #[test]

@@ -90,7 +90,9 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
     });
     // Synchronous backup count K (default 1, capped at N-1).
     let backups = env_usize("BONSAI_BACKUPS", 1).min(total.saturating_sub(1));
-    let quorum = env_usize("BONSAI_QUORUM", 1);
+    // Quorum defaults to a strict majority so a partitioned minority cannot keep
+    // accepting writes (split-brain protection on by default); overridable.
+    let quorum = env_usize("BONSAI_QUORUM", server::membership::default_quorum(total));
     let cluster = Rc::new(RefCell::new(Cluster::new(
         bootstrap_members(total),
         backups,
@@ -108,7 +110,7 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
     let schemas = Arc::new(serialization::schema::SchemaService::new());
     let listener = reuseport_listener(format!("127.0.0.1:{port}").parse().unwrap())?;
     eprintln!(
-        "BonsaiGrid member {self_index} (bootstrap {members}) listening on 127.0.0.1:{port} (single core, K={backups}, joining={joining})"
+        "BonsaiGrid member {self_index} (bootstrap {members}) listening on 127.0.0.1:{port} (single core, K={backups}, quorum={quorum}, joining={joining})"
     );
     if let Some(id) = core_affinity::get_core_ids().and_then(|v| v.get(self_index % 64).copied()) {
         core_affinity::set_for_current(id);
