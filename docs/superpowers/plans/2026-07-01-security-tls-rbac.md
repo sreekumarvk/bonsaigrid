@@ -242,6 +242,8 @@ Phases 1–3 (RBAC + hardened auth, over plaintext) are self-contained, fully ve
 - ✅ **Phase 1 shipped** (`1d57666`) — `crates/security` crate; 26 unit tests.
 - ✅ **Phase 2 shipped** (`dd12ba2`) — RBAC enforcement in dispatch; `rbac.rs` + zero-alloc authorize; falsified.
 - ✅ **Phase 3 shipped** (`537acf7`) — auth hardening + per-connection principal binding; `auth.rs`.
-- ⏳ **Phases 4–5 pending** — kTLS client reactor + mTLS members. Deferred to a kernel-capable environment (needs `TLS_TX`/`TLS_RX`, real certs, and io_uring+kTLS validation); not landed headless to avoid shipping unverified transport-security code.
+- 🟡 **Phase 4 part 1 shipped** (`d60ae07`) — `security/src/tls.rs`: TlsMode, PEM loaders, rustls TLS 1.3 config builders (ring backend), and hand-rolled `enable_ktls`. **kTLS mechanism verified end-to-end on this kernel** (`tests/ktls_roundtrip.rs`: real handshake → kTLS → encrypted round-trip). Machine confirmed kTLS-capable (kernel 6.17, `tls` ULP present).
+- ⏳ **Phase 4 part 2 (Tasks 4.2/4.3) pending** — wire the verified kTLS into the reactor: `Conn` gains `Handshaking(rustls)`/`Ktls` states, drive the handshake over io_uring `Recv`/`Send`, `enable_ktls` on completion, plus the `permissive` first-byte peek (`0x16` vs `CP2`). This touches the hot path and needs a real-client-through-the-reactor test; deferred to its own focused pass now that the crypto is proven.
+- ⏳ **Phase 5 pending** — mTLS on the member transport (reuses the same `tls.rs` + `enable_ktls`).
 
-Everything through Phase 3 is on `main`, whole workspace green, zero-alloc hot path preserved.
+Everything through Phase 4 part 1 is on `main`, whole workspace green, zero-alloc hot path untouched (no reactor changes yet).
