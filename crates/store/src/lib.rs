@@ -674,10 +674,26 @@ fn shard_of(map: &str, key: &[u8], n: usize) -> usize {
     (h as usize) % n
 }
 
+/// Wall-clock milliseconds since the Unix epoch — the physical component of an
+/// HLC stamp. Unlike [`now_ms`] (monotonic-since-start, for TTL), this is
+/// comparable *across members*, which LatestUpdate merge requires. It is the one
+/// deliberate wall-clock read on the write path (a vDSO call, no allocation).
+fn wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 pub struct Store {
-    /// Monotonic per-member update-stamp source (seeded so different members'
-    /// stamps differ); used for split-brain LatestUpdate merge.
+    /// HLC-packed update-stamp clock. A stamp is `physical_ms:41 | member:7 |
+    /// counter:16`: physical time occupies the high bits so LatestUpdate merges
+    /// resolve by *real time*, and `member_id` is only a low-bit tiebreak within
+    /// a single millisecond. Monotonic per member even if the wall clock stalls
+    /// or steps backward. See [`Store::next_stamp`].
     stamp_seq: std::sync::atomic::AtomicU64,
+    /// This member's index (0 for single-node) — the tiebreak bits of a stamp.
+    member_id: u64,
     shards: Vec<Mutex<Inner>>,
     // Distributed Queue backing: each queue is single-partition, so the owning
     // member holds it locally. Keyed by queue name.
@@ -723,12 +739,14 @@ impl Store {
         Self::with_shards_seed(n, 0)
     }
 
-    /// Like `with_shards`, but seed the stamp counter (member-specific) so stamps
-    /// from different members are distinguishable for merge.
-    pub fn with_shards_seed(n: usize, stamp_seed: u64) -> Store {
+    /// Like `with_shards`, but tag this member's stamps with `member_id` so
+    /// writes from different members are ordered deterministically (member id is
+    /// the low tiebreak of the HLC stamp — see [`Store::next_stamp`]).
+    pub fn with_shards_seed(n: usize, member_id: u64) -> Store {
         assert!(n >= 1);
         Store {
-            stamp_seq: std::sync::atomic::AtomicU64::new(stamp_seed),
+            stamp_seq: std::sync::atomic::AtomicU64::new(0),
+            member_id,
             shards: (0..n).map(|_| Mutex::new(Inner::new())).collect(),
             queues: Mutex::new(HashMap::new()),
             sets: Mutex::new(HashMap::new()),
@@ -1176,11 +1194,49 @@ impl Store {
         &self.shards[shard_of(map, key, self.shards.len())]
     }
 
-    /// A fresh monotonic update stamp.
+    /// A fresh update stamp for the current wall-clock millisecond. Stamps are
+    /// monotonic per member and time-ordered across members, so a later write
+    /// always outranks an earlier one under LatestUpdate merge (regardless of
+    /// which member produced it).
     pub fn next_stamp(&self) -> u64 {
-        self.stamp_seq
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            + 1
+        self.next_stamp_at(wall_ms())
+    }
+
+    /// Produce the next stamp for an explicit physical millisecond. Split out so
+    /// the merge/failover simulations can drive time deterministically. Applies
+    /// the HLC rule: advance to `phys_ms` when it moves forward, otherwise bump
+    /// the counter (or the logical millisecond if the counter is exhausted), so
+    /// the stamp is always strictly greater than the previous one on this member.
+    pub fn next_stamp_at(&self, phys_ms: u64) -> u64 {
+        use std::sync::atomic::Ordering::{AcqRel, Acquire};
+        // Layout: ms:41 | member:7 | counter:16.
+        const MS_SHIFT: u32 = 23;
+        const MEMBER_SHIFT: u32 = 16;
+        const MEMBER_MASK: u64 = 0x7F;
+        const COUNTER_MASK: u64 = 0xFFFF;
+
+        let member_bits = (self.member_id & MEMBER_MASK) << MEMBER_SHIFT;
+        loop {
+            let prev = self.stamp_seq.load(Acquire);
+            let prev_ms = prev >> MS_SHIFT;
+            let cand = if phys_ms > prev_ms {
+                (phys_ms << MS_SHIFT) | member_bits // new millisecond: counter resets
+            } else {
+                let ctr = prev & COUNTER_MASK;
+                if ctr < COUNTER_MASK {
+                    (prev & !COUNTER_MASK) | (ctr + 1) // same/back-stepped ms: ++counter
+                } else {
+                    ((prev_ms + 1) << MS_SHIFT) | member_bits // counter exhausted: ++logical ms
+                }
+            };
+            if self
+                .stamp_seq
+                .compare_exchange_weak(prev, cand, AcqRel, Acquire)
+                .is_ok()
+            {
+                return cand;
+            }
+        }
     }
 
     pub fn put(&self, map: &str, key: Vec<u8>, val: Vec<u8>) -> Option<Vec<u8>> {
@@ -1747,6 +1803,32 @@ mod tests {
         let big = vec![3u8; 20_000];
         s.put("m", vec![1], big.clone());
         assert_eq!(s.get("m", &[1]), Some(big));
+    }
+
+    #[test]
+    fn hlc_stamp_orders_by_time_then_breaks_ties_by_member() {
+        let s = Store::with_shards_seed(1, 3);
+        // Physical time advancing => strictly increasing.
+        let a = s.next_stamp_at(1000);
+        let b = s.next_stamp_at(1001);
+        assert!(b > a);
+        // Same millisecond => still strictly increasing (per-ms counter).
+        let c = s.next_stamp_at(1001);
+        assert!(c > b);
+        // Wall clock steps BACKWARD => stamp still strictly increases (HLC bump),
+        // so a later write can never receive a smaller stamp on this member.
+        let d = s.next_stamp_at(500);
+        assert!(d > c);
+
+        // Within the same millisecond, the higher member id wins — but only as a
+        // tiebreak *below* the time bits.
+        let m1 = Store::with_shards_seed(1, 1).next_stamp_at(2000);
+        let m5 = Store::with_shards_seed(1, 5).next_stamp_at(2000);
+        assert!(m5 > m1, "same ms: member id breaks the tie");
+        // A later time on the LOWER-indexed member still outranks the
+        // higher-indexed member's earlier write — time dominates member id.
+        let low_later = Store::with_shards_seed(1, 1).next_stamp_at(2001);
+        assert!(low_later > m5, "real time must dominate member index");
     }
 
     #[test]

@@ -102,7 +102,7 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
     } else {
         None
     };
-    let store = Arc::new(store::Store::with_shards_seed(1, (self_index as u64) << 48));
+    let store = Arc::new(store::Store::with_shards_seed(1, self_index as u64));
     server::jobs::set_store(store.clone()); // streaming SQL jobs look up the IMap here
     let broker = Arc::new(server::events::EventBroker::new(self_uuid));
     let schemas = Arc::new(serialization::schema::SchemaService::new());

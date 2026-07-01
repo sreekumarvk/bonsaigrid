@@ -110,8 +110,9 @@ pub(crate) struct SimCluster {
 
 impl SimCluster {
     /// Build an `n`-member cluster with `backups` sync backups and the given
-    /// `quorum`. Stamp counters are seeded exactly as production
-    /// (`self_index << 48`), so merge behaviour is faithful.
+    /// `quorum`. Each member's store is tagged with its index exactly as
+    /// production (`with_shards_seed(1, self_index)`), so HLC stamp / merge
+    /// behaviour is faithful.
     pub(crate) fn new(n: usize, backups: usize, quorum: usize, seed: u64) -> SimCluster {
         let members: Vec<MemberInfo> = (0..n)
             .map(|i| {
@@ -130,7 +131,7 @@ impl SimCluster {
         let (hb_interval, hb_timeout) = (2u64, 10u64);
         let mut nodes = Vec::with_capacity(n);
         for i in 0..n {
-            let store = Arc::new(Store::with_shards_seed(1, (i as u64) << 48));
+            let store = Arc::new(Store::with_shards_seed(1, i as u64));
             let broker = Arc::new(EventBroker::new((1, i as i64 + 1)));
             let (job_tx, job_rx) = spsc::channel::<MemberJob>(4096);
             let (ev_tx, ev_rx) = spsc::channel::<ClusterEvent>(4096);
@@ -440,26 +441,26 @@ mod tests {
         );
     }
 
-    /// INVARIANT 3 — Merge convergence (characterizes a KNOWN HAZARD).
-    /// `LatestUpdate` picks the higher per-entry stamp, but stamps are seeded by
-    /// `member_index << 48`. So across a split-brain merge the *higher-indexed*
-    /// member's write always wins — even if it happened *earlier* in real time.
-    /// This test pins that behaviour so a future fix to the stamp scheme is
-    /// noticed. (Reachable only when misconfigured with quorum < majority; with
-    /// quorum >= majority, INVARIANT 2 prevents the concurrent writes entirely.)
+    /// INVARIANT 3 — Merge convergence resolves by real time, not member index.
+    /// `LatestUpdate` keeps the higher per-entry stamp, and stamps are now
+    /// HLC-packed (physical-ms high bits, member id only a low tiebreak). So a
+    /// genuinely later write wins a split-brain merge even when it came from a
+    /// *lower*-indexed member — the member-index-dominates hazard is gone.
+    /// (`next_stamp_at` drives physical time explicitly so the test is
+    /// deterministic and does not depend on the wall clock advancing.)
     #[test]
-    fn latest_update_merge_resolves_by_member_index_not_time() {
-        // Two members write the same key during a split; member 2 writes FIRST,
-        // member 0 writes LATER.
-        let m0 = Store::with_shards_seed(1, 0u64 << 48); // member 0
-        let m2 = Store::with_shards_seed(1, 2u64 << 48); // member 2
-        let s2_earlier = m2.next_stamp(); // member 2's (earlier) write stamp
-        let s0_later = m0.next_stamp(); // member 0's (later) write stamp
+    fn latest_update_merge_resolves_by_real_time() {
+        // During a split, member 2 writes at ms=100 (EARLIER); the lower-indexed
+        // member 0 writes at ms=101 (LATER).
+        let m0 = Store::with_shards_seed(1, 0); // member 0
+        let m2 = Store::with_shards_seed(1, 2); // member 2
+        let s2_earlier = m2.next_stamp_at(100); // higher index, earlier time
+        let s0_later = m0.next_stamp_at(101); // lower index, later time
 
         assert!(
-            s2_earlier > s0_later,
-            "member-index seeding: the higher index yields the larger stamp \
-             regardless of real order (hazard precondition)"
+            s0_later > s2_earlier,
+            "the later real-time write must carry the higher stamp regardless of \
+             member index"
         );
 
         // On heal, both entries land on one holder and merge via LatestUpdate.
@@ -469,9 +470,8 @@ mod tests {
 
         assert_eq!(
             merged.get("m", b"k"),
-            Some(b"m2-earlier".to_vec()),
-            "HAZARD: merge kept the earlier write purely because it came from a \
-             higher-indexed member — a silent lost update"
+            Some(b"m0-LATER".to_vec()),
+            "LatestUpdate must keep the genuinely later write (no member-index bias)"
         );
     }
 
@@ -483,9 +483,11 @@ mod tests {
     fn migration_does_not_clobber_concurrent_write() {
         for migrate_first in [true, false] {
             // Destination is the new owner (member index 1).
-            let dest = Store::with_shards_seed(1, 1u64 << 48);
-            let migrated_stamp = 5u64; // original stamp of the entry being migrated
-            let concurrent_stamp = dest.next_stamp(); // fresh local write, larger
+            let dest = Store::with_shards_seed(1, 1);
+            // The migrated entry keeps its original (earlier) stamp from the
+            // source member; the concurrent client write on `dest` is later.
+            let migrated_stamp = Store::with_shards_seed(1, 0).next_stamp_at(999);
+            let concurrent_stamp = dest.next_stamp_at(1_000); // fresh local write, larger
 
             let apply_migrated =
                 |s: &Store| s.put_merge("m", b"k", b"OLD", 0, migrated_stamp, true);
