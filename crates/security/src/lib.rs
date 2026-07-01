@@ -11,6 +11,7 @@ pub mod identity;
 pub mod optable;
 pub mod permission;
 pub mod principal;
+pub mod tls;
 
 pub use identity::{IdentityProvider, StaticIdentityProvider};
 pub use optable::{classify, resource_name, Decision};
