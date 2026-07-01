@@ -69,14 +69,25 @@ fn map_get_hot_path_is_zero_alloc() {
     let jet = jet::executor::JetService::new();
     // The authenticated principal is bound once per connection (not per request);
     // build it outside the loop. Admin short-circuits authorize() with no alloc.
-    let principal = security::Principal::anonymous_full();
+    let mut principal = std::sync::Arc::new(security::Principal::anonymous_full());
 
     // Warmup: intern the map name, settle buffers.
     for _ in 0..200 {
         out.clear();
         dispatch_bytes(
-            &msg, 1, &store, &cfg, &broker, &schemas, &cluster, None, &executor, &txn, &jet,
-            &principal, &mut out,
+            &msg,
+            1,
+            &store,
+            &cfg,
+            &broker,
+            &schemas,
+            &cluster,
+            None,
+            &executor,
+            &txn,
+            &jet,
+            &mut principal,
+            &mut out,
         );
     }
     assert!(
@@ -88,8 +99,19 @@ fn map_get_hot_path_is_zero_alloc() {
     for _ in 0..10_000 {
         out.clear();
         dispatch_bytes(
-            &msg, 1, &store, &cfg, &broker, &schemas, &cluster, None, &executor, &txn, &jet,
-            &principal, &mut out,
+            &msg,
+            1,
+            &store,
+            &cfg,
+            &broker,
+            &schemas,
+            &cluster,
+            None,
+            &executor,
+            &txn,
+            &jet,
+            &mut principal,
+            &mut out,
         );
     }
     let allocs = ALLOCS.load(Ordering::Relaxed) - before;
@@ -103,7 +125,7 @@ fn map_get_hot_path_is_zero_alloc() {
     // is allocation-free. Kept in this one test (not a separate #[test]) because
     // the counting allocator is process-global and parallel tests would
     // contaminate each other's counts.
-    let granted = security::Principal {
+    let mut granted = std::sync::Arc::new(security::Principal {
         name: "app".into(),
         grants: vec![security::permission::Permission {
             resource_type: security::permission::ResourceType::Map,
@@ -111,12 +133,23 @@ fn map_get_hot_path_is_zero_alloc() {
             actions: security::permission::ActionSet::of(security::permission::Action::Read),
         }],
         is_admin: false,
-    };
+    });
     for _ in 0..200 {
         out.clear();
         dispatch_bytes(
-            &msg, 1, &store, &cfg, &broker, &schemas, &cluster, None, &executor, &txn, &jet,
-            &granted, &mut out,
+            &msg,
+            1,
+            &store,
+            &cfg,
+            &broker,
+            &schemas,
+            &cluster,
+            None,
+            &executor,
+            &txn,
+            &jet,
+            &mut granted,
+            &mut out,
         );
     }
     assert!(
@@ -127,8 +160,19 @@ fn map_get_hot_path_is_zero_alloc() {
     for _ in 0..10_000 {
         out.clear();
         dispatch_bytes(
-            &msg, 1, &store, &cfg, &broker, &schemas, &cluster, None, &executor, &txn, &jet,
-            &granted, &mut out,
+            &msg,
+            1,
+            &store,
+            &cfg,
+            &broker,
+            &schemas,
+            &cluster,
+            None,
+            &executor,
+            &txn,
+            &jet,
+            &mut granted,
+            &mut out,
         );
     }
     let allocs = ALLOCS.load(Ordering::Relaxed) - before;

@@ -13,6 +13,7 @@ use server::handlers::{Cfg, Member};
 use server::membership::{Cluster, MemberInfo};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -45,6 +46,23 @@ fn auth_cfg() -> (String, Option<String>, Option<String>) {
         std::env::var("BONSAI_USER").ok(),
         std::env::var("BONSAI_PASS").ok(),
     )
+}
+
+/// Build the security context from `BONSAI_SECURITY_CONFIG` (a JSON file path);
+/// falls back to the permissive open context when unset. A parse error is fatal
+/// (we refuse to start with a broken security policy).
+fn build_security() -> Arc<security::SecurityContext> {
+    match std::env::var("BONSAI_SECURITY_CONFIG") {
+        Ok(path) => {
+            let json = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read BONSAI_SECURITY_CONFIG {path}: {e}"));
+            let ctx = security::SecurityContext::from_json(&json)
+                .unwrap_or_else(|e| panic!("invalid security config {path}: {e}"));
+            eprintln!("BonsaiGrid security: RBAC enabled from {path}");
+            Arc::new(ctx)
+        }
+        Err(_) => Arc::new(security::SecurityContext::open()),
+    }
 }
 
 fn cluster_members(n: usize) -> Vec<Member> {
@@ -87,6 +105,7 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
         cluster_name,
         username,
         password,
+        security: build_security(),
     });
     // Synchronous backup count K (default 1, capped at N-1).
     let backups = env_usize("BONSAI_BACKUPS", 1).min(total.saturating_sub(1));
@@ -189,14 +208,23 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
             }
         }
     };
-    // Phase 2: RBAC enforcement runs with the anonymous (full-grant) principal
-    // until Phase 3 binds the authenticated principal per connection.
-    let anon = security::Principal::anonymous_full();
+    // Per-connection authenticated principal (this core only — no cross-thread
+    // sharing). Defaults to the security context's anonymous principal until a
+    // ClientAuthentication rebinds it; cleaned up when the connection drops.
+    let conns: Rc<RefCell<HashMap<u64, Arc<security::Principal>>>> =
+        Rc::new(RefCell::new(HashMap::new()));
+    let conns_drop = conns.clone();
+    let anon = cfg.security.anonymous();
     server::reactor::run(
         vec![listener],
         move |msg, conn_id, out| {
             md.inc_request();
             let cluster = cl_d.borrow();
+            let mut principal = conns
+                .borrow()
+                .get(&conn_id)
+                .cloned()
+                .unwrap_or_else(|| anon.clone());
             server::handlers::dispatch_bytes(
                 msg,
                 conn_id,
@@ -209,9 +237,10 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
                 &exec_d,
                 &txn_d,
                 &jet_d,
-                &anon,
+                &mut principal,
                 out,
-            )
+            );
+            conns.borrow_mut().insert(conn_id, principal);
         },
         move |path| {
             if let Some(dead) = parse_promote(path) {
@@ -233,7 +262,10 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
                 out.extend_from_slice(&ev);
             }
         },
-        move |conn_id| cb.drop_conn(conn_id),
+        move |conn_id| {
+            conns_drop.borrow_mut().remove(&conn_id);
+            cb.drop_conn(conn_id)
+        },
         on_cluster,
     )
 }
@@ -297,6 +329,7 @@ fn run_single_node() -> std::io::Result<()> {
         cluster_name,
         username,
         password,
+        security: build_security(),
     });
     let store = Arc::new(store::Store::with_shards(cores));
     server::jobs::set_store(store.clone()); // streaming SQL jobs look up the IMap here
@@ -340,15 +373,35 @@ fn run_single_node() -> std::io::Result<()> {
             let exec_d = executor.clone();
             let txn_d = txn_service.clone();
             let jet_d = jet_service.clone();
-            let anon = security::Principal::anonymous_full();
+            let conns: Rc<RefCell<HashMap<u64, Arc<security::Principal>>>> =
+                Rc::new(RefCell::new(HashMap::new()));
+            let conns_drop = conns.clone();
+            let anon = cfg.security.anonymous();
             let _ = server::reactor::run(
                 vec![main_listener, tpc_listener],
                 move |msg, conn_id, out| {
                     md.inc_request();
+                    let mut principal = conns
+                        .borrow()
+                        .get(&conn_id)
+                        .cloned()
+                        .unwrap_or_else(|| anon.clone());
                     server::handlers::dispatch_bytes(
-                        msg, conn_id, &store, &cfg, &broker, &schemas, &cluster, None, &exec_d,
-                        &txn_d, &jet_d, &anon, out,
-                    )
+                        msg,
+                        conn_id,
+                        &store,
+                        &cfg,
+                        &broker,
+                        &schemas,
+                        &cluster,
+                        None,
+                        &exec_d,
+                        &txn_d,
+                        &jet_d,
+                        &mut principal,
+                        out,
+                    );
+                    conns.borrow_mut().insert(conn_id, principal);
                 },
                 move |path| http_route(path, 1, &mh),
                 move |conn_id, out| {
@@ -356,7 +409,10 @@ fn run_single_node() -> std::io::Result<()> {
                         out.extend_from_slice(&ev);
                     }
                 },
-                move |conn_id| cb.drop_conn(conn_id),
+                move |conn_id| {
+                    conns_drop.borrow_mut().remove(&conn_id);
+                    cb.drop_conn(conn_id)
+                },
                 || {}, // single node: no membership changes
             );
         }));

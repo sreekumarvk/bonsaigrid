@@ -43,14 +43,15 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
 
-/// Run one op through dispatch with `principal`, returning the response bytes.
-fn run(principal: &Principal, msg: &[u8]) -> Vec<u8> {
+/// Run one op through dispatch as `principal`, returning the response bytes.
+fn run(principal: Principal, msg: &[u8]) -> Vec<u8> {
     let store = Store::new();
     store.put("orders1", b"k".to_vec(), b"value".to_vec());
     let cfg = Cfg::single();
     let broker = EventBroker::new((1, 1));
     let schemas = serialization::schema::SchemaService::new();
     let cl = cluster();
+    let mut principal = std::sync::Arc::new(principal);
     let mut out = Vec::new();
     dispatch_bytes(
         msg,
@@ -64,7 +65,7 @@ fn run(principal: &Principal, msg: &[u8]) -> Vec<u8> {
         &server::executor::ExecutorService::new(),
         &server::txn::TransactionService::new(),
         &jet::executor::JetService::new(),
-        principal,
+        &mut principal,
         &mut out,
     );
     out
@@ -85,7 +86,7 @@ fn read_only_on_orders() -> Principal {
 #[test]
 fn read_only_principal_can_get() {
     let out = run(
-        &read_only_on_orders(),
+        read_only_on_orders(),
         &build_msg(66048, "orders1", b"k", None),
     );
     assert!(contains(&out, b"value"), "GET should return the value");
@@ -98,7 +99,7 @@ fn read_only_principal_can_get() {
 #[test]
 fn read_only_principal_cannot_put() {
     let out = run(
-        &read_only_on_orders(),
+        read_only_on_orders(),
         &build_msg(65792, "orders1", b"k", Some(b"v2")),
     );
     assert!(
@@ -111,7 +112,7 @@ fn read_only_principal_cannot_put() {
 fn read_only_principal_cannot_get_ungranted_map() {
     // "cart1" is not covered by the "orders*" grant → denied even for a read.
     let out = run(
-        &read_only_on_orders(),
+        read_only_on_orders(),
         &build_msg(66048, "cart1", b"k", None),
     );
     assert!(
@@ -123,7 +124,7 @@ fn read_only_principal_cannot_get_ungranted_map() {
 #[test]
 fn admin_principal_can_put() {
     let admin = Principal::anonymous_full(); // is_admin = true
-    let out = run(&admin, &build_msg(65792, "orders1", b"k", Some(b"v2")));
+    let out = run(admin, &build_msg(65792, "orders1", b"k", Some(b"v2")));
     assert!(
         !contains(&out, ACCESS_CONTROL_CLASS),
         "admin PUT must be allowed"
@@ -133,7 +134,7 @@ fn admin_principal_can_put() {
 #[test]
 fn non_admin_denied_admin_only_op() {
     // MCGetTimedMemberState (2099968) is AdminOnly.
-    let out = run(&read_only_on_orders(), &build_msg(2099968, "x", b"", None));
+    let out = run(read_only_on_orders(), &build_msg(2099968, "x", b"", None));
     assert!(
         contains(&out, ACCESS_CONTROL_CLASS),
         "AdminOnly op must be denied for a non-admin principal"

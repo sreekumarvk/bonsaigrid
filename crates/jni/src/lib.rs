@@ -39,6 +39,7 @@ pub extern "system" fn Java_com_bonsaigrid_BonsaiGrid_startServer(_env: JNIEnv, 
             cluster_name: "dev".into(),
             username: None,
             password: None,
+            security: std::sync::Arc::new(security::SecurityContext::open()),
         });
 
         let store = Arc::new(store::Store::with_shards(cores));
@@ -70,11 +71,20 @@ pub extern "system" fn Java_com_bonsaigrid_BonsaiGrid_startServer(_env: JNIEnv, 
         let (eb, cb) = (broker.clone(), broker.clone());
         let (md, _mh) = (metrics.clone(), metrics.clone());
 
-        let anon = security::Principal::anonymous_full();
+        let conns: std::rc::Rc<
+            std::cell::RefCell<std::collections::HashMap<u64, Arc<security::Principal>>>,
+        > = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
+        let conns_drop = conns.clone();
+        let anon = cfg.security.anonymous();
         let _ = server::reactor::run(
             vec![main_listener, tpc_listener],
             move |msg, conn_id, out| {
                 md.inc_request();
+                let mut principal = conns
+                    .borrow()
+                    .get(&conn_id)
+                    .cloned()
+                    .unwrap_or_else(|| anon.clone());
                 server::handlers::dispatch_bytes(
                     msg,
                     conn_id,
@@ -87,9 +97,10 @@ pub extern "system" fn Java_com_bonsaigrid_BonsaiGrid_startServer(_env: JNIEnv, 
                     &executor,
                     &txn_service,
                     &jet_service,
-                    &anon,
+                    &mut principal,
                     out,
-                )
+                );
+                conns.borrow_mut().insert(conn_id, principal);
             },
             move |_path| (404, "Not Found", "Not Found".to_string()), // mock http route for now
             move |conn_id, out| {
@@ -97,7 +108,10 @@ pub extern "system" fn Java_com_bonsaigrid_BonsaiGrid_startServer(_env: JNIEnv, 
                     out.extend_from_slice(&ev);
                 }
             },
-            move |conn_id| cb.drop_conn(conn_id),
+            move |conn_id| {
+                conns_drop.borrow_mut().remove(&conn_id);
+                cb.drop_conn(conn_id)
+            },
             || {},
         );
     });

@@ -96,6 +96,34 @@ fn try_fast_get(
     true
 }
 
+/// On a successful `ClientAuthentication` (msg type 256), resolve the presented
+/// credentials through the security context and rebind the connection's
+/// principal. No-op for every other message, and for failed auth (the client
+/// receives a failure status from the auth handler and typically disconnects).
+fn maybe_rebind_principal(
+    msg: &[u8],
+    cfg: &Cfg,
+    principal: &mut std::sync::Arc<security::Principal>,
+) {
+    let Some((c0, _)) = frame_at(msg, 0) else {
+        return;
+    };
+    if c0.len() < 4 || read_i32_le(c0, 0) != 256 {
+        return; // not ClientAuthentication
+    }
+    if let Some((frames, _)) = read_message(msg) {
+        let req = codecs::auth::decode_request(&frames);
+        if req.cluster_name == cfg.cluster_name {
+            if let Some(p) = cfg
+                .security
+                .authenticate(req.username.as_deref(), req.password.as_deref())
+            {
+                *principal = p;
+            }
+        }
+    }
+}
+
 /// RBAC gate. Returns `Some(reply)` — a Hazelcast `AccessControlException` frame
 /// carrying the request's correlation id — when `principal` may not perform the
 /// operation; `None` when it is authorized. Allocation-free on the allow path.
@@ -162,9 +190,12 @@ pub fn dispatch_bytes(
     executor: &crate::executor::ExecutorService,
     txn_service: &crate::txn::TransactionService,
     jet_service: &jet::executor::JetService,
-    principal: &security::Principal,
+    principal: &mut std::sync::Arc<security::Principal>,
     out: &mut Vec<u8>,
 ) {
+    // A successful ClientAuthentication rebinds this connection's principal; all
+    // subsequent ops on the connection authorize against it.
+    maybe_rebind_principal(msg, cfg, principal);
     if try_fast_get(msg, store, principal, out) {
         return;
     }
@@ -217,13 +248,16 @@ pub struct Cfg {
     pub tpc_ports: Vec<i32>,
     /// Cluster name a client must present (the Hazelcast OSS auth gate).
     pub cluster_name: String,
-    /// Optional username/password; when set, clients must match.
+    /// Optional legacy username/password (used only when no security config is
+    /// present — `security` takes precedence when it requires auth).
     pub username: Option<String>,
     pub password: Option<String>,
+    /// Authentication + authorization context. `open()` = no-auth (anonymous).
+    pub security: std::sync::Arc<security::SecurityContext>,
 }
 
 impl Cfg {
-    /// Single-node, single-member cluster.
+    /// Single-node, single-member cluster (no security).
     pub fn single() -> Cfg {
         Cfg {
             members: vec![Member {
@@ -236,6 +270,7 @@ impl Cfg {
             cluster_name: "dev".into(),
             username: None,
             password: None,
+            security: std::sync::Arc::new(security::SecurityContext::open()),
         }
     }
 
@@ -245,6 +280,18 @@ impl Cfg {
         if req.cluster_name != self.cluster_name {
             return 3;
         }
+        if self.security.requires_auth() {
+            // Security config present: credentials are verified against the
+            // hashed store via the identity provider.
+            return match self
+                .security
+                .authenticate(req.username.as_deref(), req.password.as_deref())
+            {
+                Some(_) => 0,
+                None => 1,
+            };
+        }
+        // Legacy plaintext gate (only when no security config is configured).
         if let Some(user) = &self.username {
             if req.username.as_deref() != Some(user.as_str())
                 || req.password.as_deref() != self.password.as_deref()
@@ -1640,6 +1687,7 @@ mod tests {
             cluster_name: "dev".into(),
             username: None,
             password: None,
+            security: std::sync::Arc::new(security::SecurityContext::open()),
         }
     }
 
