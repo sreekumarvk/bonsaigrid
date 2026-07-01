@@ -1,4 +1,4 @@
-use protocol::fixed::{read_i32_le, read_i64_le, write_i32_le, write_uuid};
+use protocol::fixed::{read_i64_le, write_i32_le, write_uuid};
 use protocol::frame::Frame;
 use protocol::primitives::{data_frame, decode_string, initial_frame, null_frame};
 

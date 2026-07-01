@@ -1,5 +1,5 @@
 use protocol::fixed::write_i32_le;
-use protocol::frame::{Frame, UNFRAGMENTED};
+use protocol::frame::Frame;
 use protocol::primitives::{initial_frame, string_frame};
 
 /// Encodes MCGetTimedMemberStateResponse (2099969) which carries a single

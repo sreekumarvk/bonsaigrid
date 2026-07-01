@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 
 pub fn like_to_regex(expr: &str, case_insensitive: bool) -> Result<regex::Regex, regex::Error> {
     let mut re_str = String::new();
-    re_str.push_str("^");
+    re_str.push('^');
     let mut chars = expr.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
@@ -27,14 +27,14 @@ pub fn like_to_regex(expr: &str, case_insensitive: bool) -> Result<regex::Regex,
                 re_str.push_str(".*");
             }
             '_' => {
-                re_str.push_str(".");
+                re_str.push('.');
             }
             other => {
                 re_str.push_str(&regex::escape(&other.to_string()));
             }
         }
     }
-    re_str.push_str("$");
+    re_str.push('$');
 
     regex::RegexBuilder::new(&re_str)
         .dot_matches_new_line(true)

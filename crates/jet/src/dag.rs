@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 #[derive(Debug, Clone)]
 pub struct Edge {
     pub source_vertex: String,
@@ -21,6 +19,12 @@ pub struct Vertex {
 pub struct Dag {
     pub vertices: Vec<Vertex>,
     pub edges: Vec<Edge>,
+}
+
+impl Default for Dag {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Dag {

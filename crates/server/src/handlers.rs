@@ -1027,17 +1027,14 @@ pub fn dispatch(
                 r#"{{
                 "memberState": {{
                     "address": "127.0.0.1:5701",
-                    "uuid": "{}",
+                    "uuid": "{:016x}{:016x}",
                     "mapStats": {{}},
                     "clients": []
                 }},
                 "clusterState": "ACTIVE",
                 "master": true
             }}"#,
-                format!(
-                    "{:016x}{:016x}",
-                    cfg.members[cfg.self_index].uuid.0, cfg.members[cfg.self_index].uuid.1
-                )
+                cfg.members[cfg.self_index].uuid.0, cfg.members[cfg.self_index].uuid.1
             );
             vec![mc::encode_get_timed_member_state_response(&json)]
         }
@@ -1120,7 +1117,7 @@ pub fn dispatch(
         }
         // JetSubmitJob (16646400)
         16646400 => {
-            let (job_id, dag_bytes) = jet::codecs::decode_submit_job(&req);
+            let (_job_id, dag_bytes) = jet::codecs::decode_submit_job(&req);
             let assigned_id = jet_service.submit(dag_bytes);
             vec![jet::codecs::encode_submit_job_response(assigned_id)]
         }

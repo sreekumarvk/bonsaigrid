@@ -1054,7 +1054,7 @@ impl Store {
             .or_default()
             .entry(key)
             .or_default();
-        if values.iter().any(|v| *v == value) {
+        if values.contains(&value) {
             false
         } else {
             values.push(value);

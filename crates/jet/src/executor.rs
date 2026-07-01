@@ -42,10 +42,10 @@ impl JetService {
         let mut handles = Vec::new();
 
         for worker_id in 0..local_parallelism {
-            let jobs_arc = self.jobs.clone();
+            let _jobs_arc = self.jobs.clone();
 
             handles.push(thread::spawn(move || {
-                let mut tasklets = vec![
+                let mut tasklets = [
                     Tasklet {
                         processor: Box::new(MapProcessor {}),
                         inbox: {
@@ -74,8 +74,7 @@ impl JetService {
                     let mut any_progress = false;
 
                     // Process each tasklet
-                    for i in 0..tasklets.len() {
-                        let task = &mut tasklets[i];
+                    for task in &mut tasklets {
                         if task.processor.process(&mut task.inbox, &mut task.outbox) {
                             any_progress = true;
                         }

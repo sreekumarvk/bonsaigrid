@@ -577,17 +577,14 @@ pub fn execute_with(
                 }
             } else {
                 for col_expr in &select.cols {
-                    match col_expr {
-                        ColExpr::Col(n) => {
-                            let b = bare_col(n);
-                            let val = if Some(b.as_str()) == key_col {
-                                fmt(crate::json::decode_key_data(&entry.0))
-                            } else {
-                                fmt(ex.extract(&entry.1, schemas, &b))
-                            };
-                            row.push(val);
-                        }
-                        _ => {}
+                    if let ColExpr::Col(n) = col_expr {
+                        let b = bare_col(n);
+                        let val = if Some(b.as_str()) == key_col {
+                            fmt(crate::json::decode_key_data(&entry.0))
+                        } else {
+                            fmt(ex.extract(&entry.1, schemas, &b))
+                        };
+                        row.push(val);
                     }
                 }
             }
