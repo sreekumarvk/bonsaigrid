@@ -10,15 +10,25 @@ use std::collections::BTreeMap;
 use tokio::runtime::Runtime;
 
 fn runtime() -> Runtime {
-    tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio runtime")
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
 }
 
 fn hosts(brokers: &str) -> Vec<String> {
-    brokers.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+    brokers
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 async fn partition(brokers: &str, topic: &str) -> Result<PartitionClient, String> {
-    let client = ClientBuilder::new(hosts(brokers)).build().await.map_err(|e| e.to_string())?;
+    let client = ClientBuilder::new(hosts(brokers))
+        .build()
+        .await
+        .map_err(|e| e.to_string())?;
     client
         .partition_client(topic.to_string(), 0, UnknownTopicHandling::Retry)
         .await
@@ -43,7 +53,10 @@ impl KafkaSource {
     /// `max_wait_ms` for data; returns empty on timeout.
     pub fn poll(&mut self, max_wait_ms: i32) -> Vec<Vec<u8>> {
         let off = self.offset;
-        match self.rt.block_on(self.pc.fetch_records(off, 1..1_000_000, max_wait_ms)) {
+        match self
+            .rt
+            .block_on(self.pc.fetch_records(off, 1..1_000_000, max_wait_ms))
+        {
             Ok((recs, _high_watermark)) => recs
                 .into_iter()
                 .map(|r| {

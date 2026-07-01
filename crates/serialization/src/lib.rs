@@ -138,7 +138,10 @@ mod tests {
 
     #[test]
     fn murmur_is_deterministic() {
-        assert_eq!(murmur3_x86_32(b"the quick brown fox", 0), murmur3_x86_32(b"the quick brown fox", 0));
+        assert_eq!(
+            murmur3_x86_32(b"the quick brown fox", 0),
+            murmur3_x86_32(b"the quick brown fox", 0)
+        );
         assert_ne!(murmur3_x86_32(b"a", 0), murmur3_x86_32(b"b", 0));
     }
 }

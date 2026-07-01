@@ -1,5 +1,5 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
 use serialization::compact::FieldValue;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq)]
 pub enum IndexType {
@@ -76,61 +76,57 @@ impl Index {
     pub fn query(&self, op: crate::Op, val: &FieldValue) -> HashSet<Vec<u8>> {
         let mut out = HashSet::new();
         match self {
-            Index::Sorted(map) => {
-                match op {
-                    crate::Op::Eq => {
-                        if let Some(set) = map.get(val) {
-                            out.extend(set.iter().cloned());
-                        }
+            Index::Sorted(map) => match op {
+                crate::Op::Eq => {
+                    if let Some(set) = map.get(val) {
+                        out.extend(set.iter().cloned());
                     }
-                    crate::Op::NotEq => {
-                        for (k, set) in map {
-                            if k != val {
-                                out.extend(set.iter().cloned());
-                            }
-                        }
-                    }
-                    crate::Op::Lt => {
-                        for (_, set) in map.range(..val) {
-                            out.extend(set.iter().cloned());
-                        }
-                    }
-                    crate::Op::Le => {
-                        for (_, set) in map.range(..=val) {
-                            out.extend(set.iter().cloned());
-                        }
-                    }
-                    crate::Op::Gt => {
-                        use std::ops::Bound;
-                        for (_, set) in map.range((Bound::Excluded(val), Bound::Unbounded)) {
-                            out.extend(set.iter().cloned());
-                        }
-                    }
-                    crate::Op::Ge => {
-                        use std::ops::Bound;
-                        for (_, set) in map.range((Bound::Included(val), Bound::Unbounded)) {
+                }
+                crate::Op::NotEq => {
+                    for (k, set) in map {
+                        if k != val {
                             out.extend(set.iter().cloned());
                         }
                     }
                 }
-            }
-            Index::Hash(map) => {
-                match op {
-                    crate::Op::Eq => {
-                        if let Some(set) = map.get(val) {
+                crate::Op::Lt => {
+                    for (_, set) in map.range(..val) {
+                        out.extend(set.iter().cloned());
+                    }
+                }
+                crate::Op::Le => {
+                    for (_, set) in map.range(..=val) {
+                        out.extend(set.iter().cloned());
+                    }
+                }
+                crate::Op::Gt => {
+                    use std::ops::Bound;
+                    for (_, set) in map.range((Bound::Excluded(val), Bound::Unbounded)) {
+                        out.extend(set.iter().cloned());
+                    }
+                }
+                crate::Op::Ge => {
+                    use std::ops::Bound;
+                    for (_, set) in map.range((Bound::Included(val), Bound::Unbounded)) {
+                        out.extend(set.iter().cloned());
+                    }
+                }
+            },
+            Index::Hash(map) => match op {
+                crate::Op::Eq => {
+                    if let Some(set) = map.get(val) {
+                        out.extend(set.iter().cloned());
+                    }
+                }
+                crate::Op::NotEq => {
+                    for (k, set) in map {
+                        if k != val {
                             out.extend(set.iter().cloned());
                         }
                     }
-                    crate::Op::NotEq => {
-                        for (k, set) in map {
-                            if k != val {
-                                out.extend(set.iter().cloned());
-                            }
-                        }
-                    }
-                    _ => {}
                 }
-            }
+                _ => {}
+            },
         }
         out
     }
@@ -159,7 +155,9 @@ pub fn plan_and_resolve(
     match predicate {
         crate::Predicate::Compare { field, op, value } => {
             if let Some(index) = indexes.get(field) {
-                if matches!(op, crate::Op::Eq | crate::Op::NotEq) || matches!(index, Index::Sorted(_)) {
+                if matches!(op, crate::Op::Eq | crate::Op::NotEq)
+                    || matches!(index, Index::Sorted(_))
+                {
                     return Some(index.query(*op, value));
                 }
             }

@@ -27,7 +27,11 @@ impl Client {
         let mut stream = TcpStream::connect(addr).expect("connect");
         stream.set_nodelay(true).ok();
         stream.write_all(b"CP2").expect("preamble");
-        let mut c = Client { stream, buf: Vec::new(), corr: 0 };
+        let mut c = Client {
+            stream,
+            buf: Vec::new(),
+            corr: 0,
+        };
         c.authenticate();
         c
     }
@@ -59,10 +63,13 @@ impl Client {
         write_i32_le(&mut initial, 0, 256);
         write_i32_le(&mut initial, 12, -1); // partitionId
         let req = vec![
-            Frame { flags: UNFRAGMENTED, content: initial },
-            string_frame("dev"),       // clusterName
-            null_frame(),              // username
-            null_frame(),              // password
+            Frame {
+                flags: UNFRAGMENTED,
+                content: initial,
+            },
+            string_frame("dev"),        // clusterName
+            null_frame(),               // username
+            null_frame(),               // password
             string_frame("rust-bench"), // clientType
         ];
         self.call(req);
@@ -75,7 +82,10 @@ impl Client {
         write_i64_le(&mut initial, 16, 1); // threadId
         write_i64_le(&mut initial, 24, 0); // ttl
         self.call(vec![
-            Frame { flags: UNFRAGMENTED, content: initial },
+            Frame {
+                flags: UNFRAGMENTED,
+                content: initial,
+            },
             string_frame(name),
             data_frame(key),
             data_frame(value),
@@ -88,7 +98,10 @@ impl Client {
         write_i32_le(&mut initial, 12, -1);
         write_i64_le(&mut initial, 16, 1);
         self.call(vec![
-            Frame { flags: UNFRAGMENTED, content: initial },
+            Frame {
+                flags: UNFRAGMENTED,
+                content: initial,
+            },
             string_frame(name),
             data_frame(key),
         ]);

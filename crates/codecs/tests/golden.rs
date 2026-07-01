@@ -71,10 +71,16 @@ fn map_get_request_decodes_reference_values() {
 
 #[test]
 fn map_put_response_encodes_to_golden_bytes() {
-    assert_same_message(codecs::map::encode_put_response(Some(A_DATA)), message_of_type(65793));
+    assert_same_message(
+        codecs::map::encode_put_response(Some(A_DATA)),
+        message_of_type(65793),
+    );
 }
 
 #[test]
 fn map_get_response_encodes_to_golden_bytes() {
-    assert_same_message(codecs::map::encode_get_response(Some(A_DATA)), message_of_type(66049));
+    assert_same_message(
+        codecs::map::encode_get_response(Some(A_DATA)),
+        message_of_type(66049),
+    );
 }

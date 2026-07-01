@@ -128,8 +128,14 @@ mod tests {
     #[test]
     fn multi_frame_message_parses_until_final() {
         let frames = vec![
-            Frame { flags: UNFRAGMENTED, content: vec![0xAA] },
-            Frame { flags: 0, content: vec![0xBB, 0xCC] },
+            Frame {
+                flags: UNFRAGMENTED,
+                content: vec![0xAA],
+            },
+            Frame {
+                flags: 0,
+                content: vec![0xBB, 0xCC],
+            },
         ];
         let wire = write_message(&frames);
         let (got, used) = read_message(&wire).unwrap();

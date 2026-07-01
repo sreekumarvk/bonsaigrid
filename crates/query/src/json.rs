@@ -17,7 +17,9 @@ pub struct JsonExtractor;
 
 impl FieldExtractor for JsonExtractor {
     fn extract(&self, value: &[u8], _schemas: &SchemaService, field: &str) -> FieldValue {
-        let Some(obj) = parse_json_object(value) else { return FieldValue::Null };
+        let Some(obj) = parse_json_object(value) else {
+            return FieldValue::Null;
+        };
         match obj.get(field) {
             None | Some(serde_json::Value::Null) => FieldValue::Null,
             Some(serde_json::Value::String(s)) => FieldValue::Str(s.clone()),
@@ -42,7 +44,10 @@ pub fn parse_json_object(value: &[u8]) -> Option<serde_json::Map<String, serde_j
     let len = i32::from_be_bytes(value[DATA_OFFSET..DATA_OFFSET + 4].try_into().ok()?) as usize;
     let start = DATA_OFFSET + 4;
     let json = value.get(start..start + len)?;
-    serde_json::from_slice::<serde_json::Value>(json).ok()?.as_object().cloned()
+    serde_json::from_slice::<serde_json::Value>(json)
+        .ok()?
+        .as_object()
+        .cloned()
 }
 
 /// All flat field names present in a JSON value (for `SELECT *`).
@@ -56,9 +61,10 @@ pub fn json_to_fieldvalue(v: &serde_json::Value) -> FieldValue {
         serde_json::Value::Null => FieldValue::Null,
         serde_json::Value::Bool(b) => FieldValue::Bool(*b),
         serde_json::Value::String(s) => FieldValue::Str(s.clone()),
-        serde_json::Value::Number(n) => {
-            n.as_i64().map(FieldValue::I64).unwrap_or_else(|| FieldValue::F64(n.as_f64().unwrap_or(0.0)))
-        }
+        serde_json::Value::Number(n) => n
+            .as_i64()
+            .map(FieldValue::I64)
+            .unwrap_or_else(|| FieldValue::F64(n.as_f64().unwrap_or(0.0))),
         other => FieldValue::Str(other.to_string()),
     }
 }
@@ -80,7 +86,11 @@ pub fn json_record_fields(json: &str) -> Vec<(String, FieldValue)> {
     serde_json::from_str::<serde_json::Value>(json)
         .ok()
         .and_then(|v| v.as_object().cloned())
-        .map(|o| o.iter().map(|(k, v)| (k.clone(), json_to_fieldvalue(v))).collect())
+        .map(|o| {
+            o.iter()
+                .map(|(k, v)| (k.clone(), json_to_fieldvalue(v)))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -166,7 +176,10 @@ mod tests {
         let blob = json_value_data(r#"{"starter":"Soup","n":7}"#);
         let s = SchemaService::new();
         let ex = JsonExtractor;
-        assert_eq!(ex.extract(&blob, &s, "starter"), FieldValue::Str("Soup".into()));
+        assert_eq!(
+            ex.extract(&blob, &s, "starter"),
+            FieldValue::Str("Soup".into())
+        );
         assert_eq!(ex.extract(&blob, &s, "n"), FieldValue::I64(7));
         assert_eq!(ex.extract(&blob, &s, "missing"), FieldValue::Null);
         let mut names = json_field_names(&blob).unwrap();
@@ -176,7 +189,10 @@ mod tests {
 
     #[test]
     fn build_object() {
-        let j = json_object(&[("a".into(), FieldValue::Str("x".into())), ("b".into(), FieldValue::I64(2))]);
+        let j = json_object(&[
+            ("a".into(), FieldValue::Str("x".into())),
+            ("b".into(), FieldValue::I64(2)),
+        ]);
         // serde preserves insertion order for Map by default feature? Use contains checks.
         assert!(j.contains("\"a\":\"x\""));
         assert!(j.contains("\"b\":2"));

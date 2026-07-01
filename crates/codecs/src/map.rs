@@ -63,7 +63,10 @@ pub fn encode_entry_event(
     write_i32_le(&mut c, 16, event_type);
     write_uuid(&mut c, 20, Some(uuid));
     write_i32_le(&mut c, 37, 1); // numberOfAffectedEntries
-    let mut frames = vec![Frame { flags: UNFRAGMENTED | IS_EVENT, content: c }];
+    let mut frames = vec![Frame {
+        flags: UNFRAGMENTED | IS_EVENT,
+        content: c,
+    }];
     push_nullable(&mut frames, key);
     push_nullable(&mut frames, value);
     push_nullable(&mut frames, old);
@@ -151,7 +154,10 @@ pub fn encode_invalidation_event(
     write_uuid(&mut c, 16, Some(source));
     write_uuid(&mut c, 33, Some(partition));
     write_i64_le(&mut c, 50, sequence);
-    let mut frames = vec![Frame { flags: UNFRAGMENTED | IS_EVENT, content: c }];
+    let mut frames = vec![Frame {
+        flags: UNFRAGMENTED | IS_EVENT,
+        content: c,
+    }];
     frames.push(data_frame(key));
     write_message(&frames)
 }
@@ -167,7 +173,10 @@ pub fn encode_metadata_response(msg_type: i32) -> Vec<Frame> {
         initial_frame(c),
         crate::begin_frame(),
         crate::end_frame(),
-        Frame { flags: 0, content: Vec::new() },
+        Frame {
+            flags: 0,
+            content: Vec::new(),
+        },
     ]
 }
 
@@ -180,7 +189,10 @@ pub fn encode_topic_event(corr: i64, publish_time: i64, uuid: (i64, i64), item: 
     write_i32_le(&mut c, 12, -1);
     write_i64_le(&mut c, 16, publish_time);
     write_uuid(&mut c, 24, Some(uuid));
-    let mut frames = vec![Frame { flags: UNFRAGMENTED | IS_EVENT, content: c }];
+    let mut frames = vec![Frame {
+        flags: UNFRAGMENTED | IS_EVENT,
+        content: c,
+    }];
     frames.push(data_frame(item));
     write_message(&frames)
 }
@@ -249,7 +261,13 @@ pub fn pncounter_response(
     let mut ts_frame = vec![0u8; 25];
     write_uuid(&mut ts_frame, 0, Some(ts_uuid));
     write_i64_le(&mut ts_frame, 17, ts);
-    vec![initial_frame(c), Frame { flags: 0, content: ts_frame }]
+    vec![
+        initial_frame(c),
+        Frame {
+            flags: 0,
+            content: ts_frame,
+        },
+    ]
 }
 
 /// FlakeId NewIdBatch response: base (long @13), increment (long @21), batchSize (int @29).
@@ -349,7 +367,11 @@ pub fn decode_project(frames: &[Frame]) -> (String, Vec<u8>) {
 }
 
 pub fn decode_project_with_predicate(frames: &[Frame]) -> (String, Vec<u8>, Vec<u8>) {
-    (decode_string(&frames[1]), frames[2].content.clone(), frames[3].content.clone())
+    (
+        decode_string(&frames[1]),
+        frames[2].content.clone(),
+        frames[3].content.clone(),
+    )
 }
 
 pub fn decode_aggregate(frames: &[Frame]) -> (String, Vec<u8>) {
@@ -357,7 +379,11 @@ pub fn decode_aggregate(frames: &[Frame]) -> (String, Vec<u8>) {
 }
 
 pub fn decode_aggregate_with_predicate(frames: &[Frame]) -> (String, Vec<u8>, Vec<u8>) {
-    (decode_string(&frames[1]), frames[2].content.clone(), frames[3].content.clone())
+    (
+        decode_string(&frames[1]),
+        frames[2].content.clone(),
+        frames[3].content.clone(),
+    )
 }
 
 pub fn encode_project_response(list: &[Vec<u8>]) -> Vec<Frame> {

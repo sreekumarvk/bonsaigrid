@@ -18,11 +18,11 @@
 //! Grounded against real client captures (e.g. equal(age,30) ->
 //! `01 ffffffec 00000003 00000003 616765 fffffff9 0000001e`).
 
+pub mod agg;
 mod eval;
+pub mod index;
 pub mod json;
 pub mod sql;
-pub mod index;
-pub mod agg;
 pub use eval::eval;
 
 use serialization::compact::{FieldExtractor, FieldValue};
@@ -77,7 +77,12 @@ where
     I: IntoIterator<Item = (Vec<u8>, Vec<u8>)>,
 {
     match predicate {
-        Predicate::Paging { inner, page, page_size, iteration_type: _ } => {
+        Predicate::Paging {
+            inner,
+            page,
+            page_size,
+            iteration_type: _,
+        } => {
             let mut matched: Vec<(Vec<u8>, Vec<u8>)> = if let Some(inner_pred) = inner {
                 entries
                     .into_iter()
@@ -94,7 +99,10 @@ where
             let end = (start + *page_size as usize).min(matched.len());
             matched[start..end].to_vec()
         }
-        Predicate::Partition { partition_id, target } => {
+        Predicate::Partition {
+            partition_id,
+            target,
+        } => {
             entries
                 .into_iter()
                 .filter(|(k, _)| {
@@ -104,12 +112,10 @@ where
                 .filter(|(_, v)| eval(target, v, schemas, ex))
                 .collect()
         }
-        other => {
-            entries
-                .into_iter()
-                .filter(|(_, v)| eval(other, v, schemas, ex))
-                .collect()
-        }
+        other => entries
+            .into_iter()
+            .filter(|(_, v)| eval(other, v, schemas, ex))
+            .collect(),
     }
 }
 
@@ -122,8 +128,8 @@ const CLASS_GREATER_LESS: i32 = 4;
 const CLASS_LIKE: i32 = 5;
 const CLASS_ILIKE: i32 = 6;
 const CLASS_IN: i32 = 7;
-    #[allow(dead_code)]
-    const CLASS_INSTANCEOF: i32 = 8;
+#[allow(dead_code)]
+const CLASS_INSTANCEOF: i32 = 8;
 const CLASS_NOTEQUAL: i32 = 9;
 const CLASS_NOT: i32 = 10;
 const CLASS_OR: i32 = 11;
@@ -152,15 +158,35 @@ pub enum Op {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Predicate {
-    Compare { field: String, op: Op, value: FieldValue },
+    Compare {
+        field: String,
+        op: Op,
+        value: FieldValue,
+    },
     And(Vec<Predicate>),
     Or(Vec<Predicate>),
     Not(Box<Predicate>),
-    Between { field: String, from: FieldValue, to: FieldValue },
-    In { field: String, values: Vec<FieldValue> },
-    Like { field: String, expr: String },
-    ILike { field: String, expr: String },
-    Regex { field: String, regex: String },
+    Between {
+        field: String,
+        from: FieldValue,
+        to: FieldValue,
+    },
+    In {
+        field: String,
+        values: Vec<FieldValue>,
+    },
+    Like {
+        field: String,
+        expr: String,
+    },
+    ILike {
+        field: String,
+        expr: String,
+    },
+    Regex {
+        field: String,
+        regex: String,
+    },
     True,
     False,
     Sql(String),
@@ -177,7 +203,6 @@ pub enum Predicate {
     /// Unsupported / malformed predicate — matches nothing (safe default).
     MatchNone,
 }
-
 
 /// Decode a predicate from its full `Data` blob (8-byte header + IDS body).
 pub fn decode(data: &[u8]) -> Predicate {
@@ -211,7 +236,11 @@ fn decode_ids(c: &mut Cur) -> Option<Predicate> {
         CLASS_EQUAL => {
             let field = c.string()?;
             let value = decode_value(c)?;
-            Some(Predicate::Compare { field, op: Op::Eq, value })
+            Some(Predicate::Compare {
+                field,
+                op: Op::Eq,
+                value,
+            })
         }
         CLASS_GREATER_LESS => {
             let field = c.string()?;
@@ -257,7 +286,11 @@ fn decode_ids(c: &mut Cur) -> Option<Predicate> {
         CLASS_NOTEQUAL => {
             let field = c.string()?;
             let value = decode_value(c)?;
-            Some(Predicate::Compare { field, op: Op::NotEq, value })
+            Some(Predicate::Compare {
+                field,
+                op: Op::NotEq,
+                value,
+            })
         }
         CLASS_NOT => {
             let inner = decode_object(c)?;
@@ -268,12 +301,8 @@ fn decode_ids(c: &mut Cur) -> Option<Predicate> {
             let regex = c.string()?;
             Some(Predicate::Regex { field, regex })
         }
-        CLASS_FALSE => {
-            Some(Predicate::False)
-        }
-        CLASS_TRUE => {
-            Some(Predicate::True)
-        }
+        CLASS_FALSE => Some(Predicate::False),
+        CLASS_TRUE => Some(Predicate::True),
         CLASS_AND | CLASS_OR => {
             let count = c.i32()?;
             if !(0..=4096).contains(&count) {
@@ -308,12 +337,12 @@ fn decode_ids(c: &mut Cur) -> Option<Predicate> {
                     None
                 }
             };
-            
+
             skip_object(c)?; // comparator
             let page = c.i32()?;
             let page_size = c.i32()?;
             let iteration_type = c.string()?;
-            
+
             let anchor_size = c.i32()?;
             if !(0..=4096).contains(&anchor_size) {
                 return Some(Predicate::MatchNone);
@@ -323,7 +352,7 @@ fn decode_ids(c: &mut Cur) -> Option<Predicate> {
                 skip_object(c)?; // key
                 skip_object(c)?; // val
             }
-            
+
             Some(Predicate::Paging {
                 inner: inner.map(Box::new),
                 page,
@@ -335,7 +364,10 @@ fn decode_ids(c: &mut Cur) -> Option<Predicate> {
             let partition_key = decode_value(c)?;
             let target = decode_object(c)?;
             let partition_id = field_value_partition_id(&partition_key, 271);
-            Some(Predicate::Partition { partition_id, target: Box::new(target) })
+            Some(Predicate::Partition {
+                partition_id,
+                target: Box::new(target),
+            })
         }
         _ => Some(Predicate::MatchNone),
     }
@@ -345,18 +377,31 @@ fn skip_object(c: &mut Cur) -> Option<()> {
     let ty = c.i32()?;
     match ty {
         0 => Some(()), // null
-        T_INTEGER => { c.i32()?; Some(()) }
-        T_LONG => { c.i64()?; Some(()) }
-        T_DOUBLE => { c.i64()?; Some(()) }
-        T_BOOLEAN => { c.u8()?; Some(()) }
-        T_STRING => { c.string()?; Some(()) }
+        T_INTEGER => {
+            c.i32()?;
+            Some(())
+        }
+        T_LONG => {
+            c.i64()?;
+            Some(())
+        }
+        T_DOUBLE => {
+            c.i64()?;
+            Some(())
+        }
+        T_BOOLEAN => {
+            c.u8()?;
+            Some(())
+        }
+        T_STRING => {
+            c.string()?;
+            Some(())
+        }
         TYPE_IDS => {
             let _pred = decode_ids(c)?;
             Some(())
         }
-        _ => {
-            Some(())
-        }
+        _ => Some(()),
     }
 }
 
@@ -412,7 +457,10 @@ mod tests {
     use super::*;
 
     fn hex(s: &str) -> Vec<u8> {
-        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
     }
     /// Wrap a captured IDS payload (the bytes after the Data header) in a Data
     /// blob with serializer type -2.
@@ -426,24 +474,55 @@ mod tests {
     #[test]
     fn decodes_equal_int() {
         let p = decode(&data("01ffffffec0000000300000003616765fffffff90000001e"));
-        assert_eq!(p, Predicate::Compare { field: "age".into(), op: Op::Eq, value: FieldValue::I32(30) });
+        assert_eq!(
+            p,
+            Predicate::Compare {
+                field: "age".into(),
+                op: Op::Eq,
+                value: FieldValue::I32(30)
+            }
+        );
     }
 
     #[test]
     fn decodes_equal_string() {
-        let p = decode(&data("01ffffffec00000003000000046e616d65fffffff500000005616c696365"));
+        let p = decode(&data(
+            "01ffffffec00000003000000046e616d65fffffff500000005616c696365",
+        ));
         assert_eq!(
             p,
-            Predicate::Compare { field: "name".into(), op: Op::Eq, value: FieldValue::Str("alice".into()) }
+            Predicate::Compare {
+                field: "name".into(),
+                op: Op::Eq,
+                value: FieldValue::Str("alice".into())
+            }
         );
     }
 
     #[test]
     fn decodes_greater_and_greater_equal() {
-        let gt = decode(&data("01ffffffec0000000400000003616765fffffff90000001e0000"));
-        assert_eq!(gt, Predicate::Compare { field: "age".into(), op: Op::Gt, value: FieldValue::I32(30) });
-        let ge = decode(&data("01ffffffec0000000400000003616765fffffff90000001e0100"));
-        assert_eq!(ge, Predicate::Compare { field: "age".into(), op: Op::Ge, value: FieldValue::I32(30) });
+        let gt = decode(&data(
+            "01ffffffec0000000400000003616765fffffff90000001e0000",
+        ));
+        assert_eq!(
+            gt,
+            Predicate::Compare {
+                field: "age".into(),
+                op: Op::Gt,
+                value: FieldValue::I32(30)
+            }
+        );
+        let ge = decode(&data(
+            "01ffffffec0000000400000003616765fffffff90000001e0100",
+        ));
+        assert_eq!(
+            ge,
+            Predicate::Compare {
+                field: "age".into(),
+                op: Op::Ge,
+                value: FieldValue::I32(30)
+            }
+        );
     }
 
     #[test]
@@ -455,8 +534,16 @@ mod tests {
         assert_eq!(
             p,
             Predicate::And(vec![
-                Predicate::Compare { field: "name".into(), op: Op::Eq, value: FieldValue::Str("alice".into()) },
-                Predicate::Compare { field: "age".into(), op: Op::Gt, value: FieldValue::I32(30) },
+                Predicate::Compare {
+                    field: "name".into(),
+                    op: Op::Eq,
+                    value: FieldValue::Str("alice".into())
+                },
+                Predicate::Compare {
+                    field: "age".into(),
+                    op: Op::Gt,
+                    value: FieldValue::I32(30)
+                },
             ])
         );
     }
@@ -476,44 +563,95 @@ mod tests {
 
     #[test]
     fn decodes_between() {
-        let p = decode(&data("01ffffffec0000000200000003616765fffffff900000014fffffff90000000a"));
-        assert_eq!(p, Predicate::Between { field: "age".into(), from: FieldValue::I32(10), to: FieldValue::I32(20) });
+        let p = decode(&data(
+            "01ffffffec0000000200000003616765fffffff900000014fffffff90000000a",
+        ));
+        assert_eq!(
+            p,
+            Predicate::Between {
+                field: "age".into(),
+                from: FieldValue::I32(10),
+                to: FieldValue::I32(20)
+            }
+        );
     }
 
     #[test]
     fn decodes_like() {
         let p = decode(&data("01ffffffec00000005000000046e616d6500000003612562"));
-        assert_eq!(p, Predicate::Like { field: "name".into(), expr: "a%b".into() });
+        assert_eq!(
+            p,
+            Predicate::Like {
+                field: "name".into(),
+                expr: "a%b".into()
+            }
+        );
     }
 
     #[test]
     fn decodes_ilike() {
         let p = decode(&data("01ffffffec00000006000000046e616d6500000003612562"));
-        assert_eq!(p, Predicate::ILike { field: "name".into(), expr: "a%b".into() });
+        assert_eq!(
+            p,
+            Predicate::ILike {
+                field: "name".into(),
+                expr: "a%b".into()
+            }
+        );
     }
 
     #[test]
     fn decodes_regex() {
         let p = decode(&data("01ffffffec0000000c000000046e616d6500000004612e2a62"));
-        assert_eq!(p, Predicate::Regex { field: "name".into(), regex: "a.*b".into() });
+        assert_eq!(
+            p,
+            Predicate::Regex {
+                field: "name".into(),
+                regex: "a.*b".into()
+            }
+        );
     }
 
     #[test]
     fn decodes_in() {
-        let p = decode(&data("01ffffffec000000070000000361676500000002fffffff90000000afffffff900000014"));
-        assert_eq!(p, Predicate::In { field: "age".into(), values: vec![FieldValue::I32(10), FieldValue::I32(20)] });
+        let p = decode(&data(
+            "01ffffffec000000070000000361676500000002fffffff90000000afffffff900000014",
+        ));
+        assert_eq!(
+            p,
+            Predicate::In {
+                field: "age".into(),
+                values: vec![FieldValue::I32(10), FieldValue::I32(20)]
+            }
+        );
     }
 
     #[test]
     fn decodes_notequal() {
         let p = decode(&data("01ffffffec0000000900000003616765fffffff90000001e"));
-        assert_eq!(p, Predicate::Compare { field: "age".into(), op: Op::NotEq, value: FieldValue::I32(30) });
+        assert_eq!(
+            p,
+            Predicate::Compare {
+                field: "age".into(),
+                op: Op::NotEq,
+                value: FieldValue::I32(30)
+            }
+        );
     }
 
     #[test]
     fn decodes_not() {
-        let p = decode(&data("01ffffffec0000000afffffffe01ffffffec0000000300000003616765fffffff90000001e"));
-        assert_eq!(p, Predicate::Not(Box::new(Predicate::Compare { field: "age".into(), op: Op::Eq, value: FieldValue::I32(30) })));
+        let p = decode(&data(
+            "01ffffffec0000000afffffffe01ffffffec0000000300000003616765fffffff90000001e",
+        ));
+        assert_eq!(
+            p,
+            Predicate::Not(Box::new(Predicate::Compare {
+                field: "age".into(),
+                op: Op::Eq,
+                value: FieldValue::I32(30)
+            }))
+        );
     }
 
     #[test]
@@ -527,33 +665,54 @@ mod tests {
     #[test]
     fn decodes_paging_pre_5_4() {
         let p = decode(&data("01ffffffec0000000ffffffffe01ffffffec0000000300000003616765fffffff90000001e00000000000000010000000a000000034b455900000000"));
-        assert_eq!(p, Predicate::Paging {
-            inner: Some(Box::new(Predicate::Compare { field: "age".into(), op: Op::Eq, value: FieldValue::I32(30) })),
-            page: 1,
-            page_size: 10,
-            iteration_type: "KEY".into(),
-        });
+        assert_eq!(
+            p,
+            Predicate::Paging {
+                inner: Some(Box::new(Predicate::Compare {
+                    field: "age".into(),
+                    op: Op::Eq,
+                    value: FieldValue::I32(30)
+                })),
+                page: 1,
+                page_size: 10,
+                iteration_type: "KEY".into(),
+            }
+        );
     }
 
     #[test]
     fn decodes_paging_5_4() {
         let p = decode(&data("01ffffffec0000000f000000026e73fffffffe01ffffffec0000000300000003616765fffffff90000001e00000000000000010000000a000000034b455900000000"));
-        assert_eq!(p, Predicate::Paging {
-            inner: Some(Box::new(Predicate::Compare { field: "age".into(), op: Op::Eq, value: FieldValue::I32(30) })),
-            page: 1,
-            page_size: 10,
-            iteration_type: "KEY".into(),
-        });
+        assert_eq!(
+            p,
+            Predicate::Paging {
+                inner: Some(Box::new(Predicate::Compare {
+                    field: "age".into(),
+                    op: Op::Eq,
+                    value: FieldValue::I32(30)
+                })),
+                page: 1,
+                page_size: 10,
+                iteration_type: "KEY".into(),
+            }
+        );
     }
 
     #[test]
     fn decodes_partition() {
         let p = decode(&data("01ffffffec00000010fffffff500000008757365722d313233fffffffe01ffffffec0000000300000003616765fffffff90000001e"));
         let expected_partition = field_value_partition_id(&FieldValue::Str("user-123".into()), 271);
-        assert_eq!(p, Predicate::Partition {
-            partition_id: expected_partition,
-            target: Box::new(Predicate::Compare { field: "age".into(), op: Op::Eq, value: FieldValue::I32(30) }),
-        });
+        assert_eq!(
+            p,
+            Predicate::Partition {
+                partition_id: expected_partition,
+                target: Box::new(Predicate::Compare {
+                    field: "age".into(),
+                    op: Op::Eq,
+                    value: FieldValue::I32(30)
+                }),
+            }
+        );
     }
 
     #[test]

@@ -42,7 +42,15 @@ impl Pending {
         if remaining == 0 {
             return Some((conn_id, response));
         }
-        self.ops.insert(op_id, PendingOp { remaining, conn_id, response, age: 0 });
+        self.ops.insert(
+            op_id,
+            PendingOp {
+                remaining,
+                conn_id,
+                response,
+                age: 0,
+            },
+        );
         None
     }
 
@@ -72,8 +80,12 @@ impl Pending {
         for op in self.ops.values_mut() {
             op.age += 1;
         }
-        let ids: Vec<u64> =
-            self.ops.iter().filter(|(_, op)| op.age >= max_age).map(|(&id, _)| id).collect();
+        let ids: Vec<u64> = self
+            .ops
+            .iter()
+            .filter(|(_, op)| op.age >= max_age)
+            .map(|(&id, _)| id)
+            .collect();
         for id in ids {
             let op = self.ops.remove(&id).unwrap();
             expired.push((op.conn_id, op.response));
@@ -92,7 +104,13 @@ impl Pending {
 /// Apply an inbound backup mutation to the local store (backup side).
 pub fn apply(store: &Store, msg: &Msg) {
     match msg {
-        Msg::BackupPut { name, key, value, ttl_ms, .. } => {
+        Msg::BackupPut {
+            name,
+            key,
+            value,
+            ttl_ms,
+            ..
+        } => {
             store.put_ttl(name, key.clone(), value.clone(), *ttl_ms);
         }
         Msg::BackupRemove { name, key, .. } => {
@@ -132,9 +150,25 @@ mod tests {
     #[test]
     fn apply_writes_and_removes() {
         let s = Store::new();
-        apply(&s, &Msg::BackupPut { op_id: 1, name: "m".into(), key: b"k".to_vec(), value: b"v".to_vec(), ttl_ms: 0 });
+        apply(
+            &s,
+            &Msg::BackupPut {
+                op_id: 1,
+                name: "m".into(),
+                key: b"k".to_vec(),
+                value: b"v".to_vec(),
+                ttl_ms: 0,
+            },
+        );
         assert_eq!(s.get("m", b"k"), Some(b"v".to_vec()));
-        apply(&s, &Msg::BackupRemove { op_id: 2, name: "m".into(), key: b"k".to_vec() });
+        apply(
+            &s,
+            &Msg::BackupRemove {
+                op_id: 2,
+                name: "m".into(),
+                key: b"k".to_vec(),
+            },
+        );
         assert_eq!(s.get("m", b"k"), None);
     }
 }

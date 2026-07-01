@@ -18,7 +18,10 @@ fn cp2_preamble_then_echo_correlation() {
         server::connection::handle(stream, |req| {
             let mut c = vec![0u8; 13];
             write_i32_le(&mut c, 0, 257); // pretend auth response
-            let mut reply = vec![Frame { flags: UNFRAGMENTED, content: c }];
+            let mut reply = vec![Frame {
+                flags: UNFRAGMENTED,
+                content: c,
+            }];
             set_correlation_id(&mut reply, correlation_id(&req));
             vec![reply]
         })
@@ -30,7 +33,10 @@ fn cp2_preamble_then_echo_correlation() {
 
     let mut c = vec![0u8; 36];
     write_i32_le(&mut c, 0, 256); // auth request type
-    let mut req = vec![Frame { flags: UNFRAGMENTED, content: c }];
+    let mut req = vec![Frame {
+        flags: UNFRAGMENTED,
+        content: c,
+    }];
     set_correlation_id(&mut req, 7);
     client.write_all(&write_message(&req)).unwrap();
 

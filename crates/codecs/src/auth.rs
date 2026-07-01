@@ -25,7 +25,13 @@ pub fn decode_request(frames: &[Frame]) -> AuthRequest {
     let routing_mode = if initial.len() > 34 { initial[34] } else { 0 };
     // Var-frames: each nullable field is exactly one frame, so positions are fixed:
     // [1]=clusterName [2]=username [3]=password [4]=clientType ...
-    let nullable = |f: &Frame| if f.is_null() { None } else { Some(decode_string(f)) };
+    let nullable = |f: &Frame| {
+        if f.is_null() {
+            None
+        } else {
+            Some(decode_string(f))
+        }
+    };
     AuthRequest {
         cluster_name: decode_string(&frames[1]),
         username: nullable(&frames[2]),
@@ -81,13 +87,19 @@ pub fn encode_response(r: &AuthResponse) -> Vec<Frame> {
             for (i, p) in ports.iter().enumerate() {
                 write_i32_le(&mut pc, i * 4, *p);
             }
-            out.push(Frame { flags: 0, content: pc });
+            out.push(Frame {
+                flags: 0,
+                content: pc,
+            });
         }
         None => out.push(null_frame()),
     }
     match r.tpc_token {
         // ByteArrayCodec: one frame of raw bytes.
-        Some(tok) => out.push(Frame { flags: 0, content: tok.to_vec() }),
+        Some(tok) => out.push(Frame {
+            flags: 0,
+            content: tok.to_vec(),
+        }),
         None => out.push(null_frame()),
     }
     member_info::encode_list(&mut out, r.members);

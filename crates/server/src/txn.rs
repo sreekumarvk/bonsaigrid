@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub enum Mutation {
     Put(String, Vec<u8>, Vec<u8>), // map_name, key, value

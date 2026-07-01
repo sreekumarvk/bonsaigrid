@@ -9,7 +9,10 @@ pub fn encode(out: &mut Vec<Frame>, host: &str, port: i32) {
     out.push(begin_frame());
     let mut initial = vec![0u8; 4];
     write_i32_le(&mut initial, 0, port);
-    out.push(Frame { flags: 0, content: initial });
+    out.push(Frame {
+        flags: 0,
+        content: initial,
+    });
     out.push(string_frame(host));
     out.push(end_frame());
 }

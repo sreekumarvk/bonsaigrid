@@ -61,7 +61,10 @@ fn put_then_ack_over_loopback() {
 
     let b_stop = stop.clone();
     let b = std::thread::spawn(move || {
-        Transport::bind(1, &PORTS).unwrap().run(Backup { stop: b_stop }).unwrap();
+        Transport::bind(1, &PORTS)
+            .unwrap()
+            .run(Backup { stop: b_stop })
+            .unwrap();
     });
     // Let member 1's listener come up before member 0 connects.
     std::thread::sleep(Duration::from_millis(200));
@@ -71,7 +74,11 @@ fn put_then_ack_over_loopback() {
     let a = std::thread::spawn(move || {
         Transport::bind(0, &PORTS)
             .unwrap()
-            .run(Sender { sent: false, got_ack: a_ack, stop: a_stop })
+            .run(Sender {
+                sent: false,
+                got_ack: a_ack,
+                stop: a_stop,
+            })
             .unwrap();
     });
 
@@ -79,7 +86,10 @@ fn put_then_ack_over_loopback() {
     while Instant::now() < deadline && !got_ack.load(SeqCst) {
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert!(got_ack.load(SeqCst), "member 0 did not receive the Ack within 5s");
+    assert!(
+        got_ack.load(SeqCst),
+        "member 0 did not receive the Ack within 5s"
+    );
 
     stop.store(true, SeqCst);
     a.join().unwrap();

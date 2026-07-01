@@ -28,7 +28,13 @@ const ACK_TIMEOUT_TICKS: u32 = 5000;
 
 pub enum MemberJob {
     /// Replicate a write; deliver `response` to `conn_id` once backups ack.
-    Replicate { partition: i32, op_id: u64, msg: Msg, conn_id: u64, response: Vec<u8> },
+    Replicate {
+        partition: i32,
+        op_id: u64,
+        msg: Msg,
+        conn_id: u64,
+        response: Vec<u8>,
+    },
     /// Replace the member thread's membership view (after a manual promotion).
     Membership(Cluster),
 }
@@ -49,7 +55,11 @@ pub struct Replicator {
 
 impl Replicator {
     pub fn new(tx: spsc::Producer<MemberJob>, backups: usize) -> Replicator {
-        Replicator { tx, next_op: Cell::new(1), backups }
+        Replicator {
+            tx,
+            next_op: Cell::new(1),
+            backups,
+        }
     }
 
     /// True if this cluster keeps backups at all (callers skip the deferral path
@@ -74,7 +84,13 @@ impl Replicator {
         }
         let op_id = self.next_op.get();
         self.next_op.set(op_id.wrapping_add(1));
-        let job = MemberJob::Replicate { partition, op_id, msg: mk(op_id), conn_id, response };
+        let job = MemberJob::Replicate {
+            partition,
+            op_id,
+            msg: mk(op_id),
+            conn_id,
+            response,
+        };
         self.tx.push(job).is_ok()
     }
 
@@ -101,7 +117,10 @@ impl MemberHandler {
     /// Forward the current membership view to the reactor.
     fn emit_view(&self) {
         let (generation, members) = self.coord.view_recs();
-        let _ = self.events.push(ClusterEvent { generation, members });
+        let _ = self.events.push(ClusterEvent {
+            generation,
+            members,
+        });
     }
 
     /// Refresh the transport's peer addresses from the current cluster (so a
@@ -117,7 +136,11 @@ impl MemberHandler {
 
     /// React to a membership change: refresh peers, notify the reactor, and stream
     /// out the partitions this member must migrate.
-    fn apply_change(&mut self, ch: crate::cluster_coordinator::Change, outbox: &mut Vec<(usize, Msg)>) {
+    fn apply_change(
+        &mut self,
+        ch: crate::cluster_coordinator::Change,
+        outbox: &mut Vec<(usize, Msg)>,
+    ) {
         if !ch.changed {
             return;
         }
@@ -135,21 +158,58 @@ impl MemberHandler {
             by_part.entry(p).or_default().push((map, key, val, stamp));
         }
         for (partition, dest) in ch.migrations {
-            outbox.push((dest, Msg::MigrateStart { generation, partition }));
+            outbox.push((
+                dest,
+                Msg::MigrateStart {
+                    generation,
+                    partition,
+                },
+            ));
             if let Some(entries) = by_part.get(&partition) {
                 for chunk in entries.chunks(MIG_CHUNK) {
-                    outbox.push((dest, Msg::MigrateChunk { generation, partition, entries: chunk.to_vec() }));
+                    outbox.push((
+                        dest,
+                        Msg::MigrateChunk {
+                            generation,
+                            partition,
+                            entries: chunk.to_vec(),
+                        },
+                    ));
                 }
             }
             // Auxiliary-structure state for this partition (queues/lists/sets/...).
-            let aux = self.store.aux_state_for_partition(partition, crate::handlers::PARTITION_COUNT);
-            outbox.push((dest, Msg::MigrateAux { generation, partition, payload: aux }));
+            let aux = self
+                .store
+                .aux_state_for_partition(partition, crate::handlers::PARTITION_COUNT);
+            outbox.push((
+                dest,
+                Msg::MigrateAux {
+                    generation,
+                    partition,
+                    payload: aux,
+                },
+            ));
             // MultiMap entries (key-partitioned) for this partition.
-            let mm = self.store.mm_entries_for_partition(partition, crate::handlers::PARTITION_COUNT);
+            let mm = self
+                .store
+                .mm_entries_for_partition(partition, crate::handlers::PARTITION_COUNT);
             if !mm.is_empty() {
-                outbox.push((dest, Msg::MigrateMm { generation, partition, entries: mm }));
+                outbox.push((
+                    dest,
+                    Msg::MigrateMm {
+                        generation,
+                        partition,
+                        entries: mm,
+                    },
+                ));
             }
-            outbox.push((dest, Msg::MigrateEnd { generation, partition }));
+            outbox.push((
+                dest,
+                Msg::MigrateEnd {
+                    generation,
+                    partition,
+                },
+            ));
         }
     }
 }
@@ -166,21 +226,33 @@ impl Handler for MemberHandler {
                     self.broker.enqueue(conn, resp);
                 }
             }
-            Msg::Heartbeat { from_join_id, generation } => {
+            Msg::Heartbeat {
+                from_join_id,
+                generation,
+            } => {
                 self.coord.on_heartbeat(from_join_id, generation);
             }
-            Msg::MemberView { generation, members } => {
+            Msg::MemberView {
+                generation,
+                members,
+            } => {
                 let ch = self.coord.on_view(generation, members);
                 self.apply_change(ch, outbox);
             }
-            Msg::JoinRequest { uuid, host, client_port, member_port } => {
+            Msg::JoinRequest {
+                uuid,
+                host,
+                client_port,
+                member_port,
+            } => {
                 let info = MemberInfo::new(uuid, host, client_port, member_port, 0);
                 let ch = self.coord.on_join(info, outbox);
                 self.apply_change(ch, outbox);
             }
             Msg::MigrateChunk { entries, .. } => {
                 for (map, key, val, stamp) in entries {
-                    self.store.put_merge(&map, &key, &val, 0, stamp, self.merge_latest);
+                    self.store
+                        .put_merge(&map, &key, &val, 0, stamp, self.merge_latest);
                 }
             }
             Msg::BackupState { op_id, payload, .. } => {
@@ -190,7 +262,12 @@ impl Handler for MemberHandler {
             Msg::MigrateAux { payload, .. } => {
                 self.store.install_aux_state(&payload);
             }
-            Msg::BackupMm { op_id, name, key, values } => {
+            Msg::BackupMm {
+                op_id,
+                name,
+                key,
+                values,
+            } => {
                 self.store.mm_install(&name, key, values);
                 outbox.push((src, Msg::Ack { op_id }));
             }
@@ -207,7 +284,13 @@ impl Handler for MemberHandler {
     fn on_tick(&mut self, outbox: &mut Vec<(usize, Msg)>) -> bool {
         while let Some(job) = self.rx.pop() {
             match job {
-                MemberJob::Replicate { partition, op_id, msg, conn_id, response } => {
+                MemberJob::Replicate {
+                    partition,
+                    op_id,
+                    msg,
+                    conn_id,
+                    response,
+                } => {
                     let backups = self.coord.cluster.backups_of(partition);
                     if backups.is_empty() {
                         self.broker.enqueue(conn_id, response); // nobody to wait on
@@ -216,7 +299,8 @@ impl Handler for MemberHandler {
                             outbox.push((*b, msg.clone()));
                         }
                         if let Some((conn, resp)) =
-                            self.pending.register(op_id, backups.len() as u32, conn_id, response)
+                            self.pending
+                                .register(op_id, backups.len() as u32, conn_id, response)
                         {
                             self.broker.enqueue(conn, resp);
                         }
@@ -255,7 +339,10 @@ pub fn spawn(
         let transport = match Transport::bind(self_index, &member_ports) {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("member transport bind failed on port {}: {e}", member_ports[self_index]);
+                eprintln!(
+                    "member transport bind failed on port {}: {e}",
+                    member_ports[self_index]
+                );
                 return;
             }
         };
@@ -264,8 +351,16 @@ pub fn spawn(
         if let Some(info) = join_as {
             coord.set_pending_join(info);
         }
-        let handler =
-            MemberHandler { store, broker, rx, coord, pending: Pending::new(), events, merge_latest, peers };
+        let handler = MemberHandler {
+            store,
+            broker,
+            rx,
+            coord,
+            pending: Pending::new(),
+            events,
+            merge_latest,
+            peers,
+        };
         let _ = transport.run(handler);
     })
 }
@@ -288,15 +383,22 @@ mod tests {
 
         let (tx, rx) = spsc::channel::<MemberJob>(8);
         let with_backup = Replicator::new(tx, 1);
-        assert!(with_backup.replicate(3, 7, vec![1, 2], |op| Msg::BackupPut {
-            op_id: op,
-            name: "m".into(),
-            key: b"k".to_vec(),
-            value: b"v".to_vec(),
-            ttl_ms: 0
-        }));
+        assert!(
+            with_backup.replicate(3, 7, vec![1, 2], |op| Msg::BackupPut {
+                op_id: op,
+                name: "m".into(),
+                key: b"k".to_vec(),
+                value: b"v".to_vec(),
+                ttl_ms: 0
+            })
+        );
         match rx.pop() {
-            Some(MemberJob::Replicate { partition, op_id, conn_id, .. }) => {
+            Some(MemberJob::Replicate {
+                partition,
+                op_id,
+                conn_id,
+                ..
+            }) => {
                 assert_eq!(partition, 3);
                 assert_eq!(conn_id, 7);
                 assert!(op_id >= 1);

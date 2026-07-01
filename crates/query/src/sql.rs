@@ -127,7 +127,11 @@ fn parse_col_expr(t: &mut Tokenizer) -> Option<ColExpr> {
     t.skip_ws();
     if t.keyword("count").is_some() {
         t.symbol("(");
-        let arg = if t.symbol("*") { "*".to_string() } else { t.col_ref()? };
+        let arg = if t.symbol("*") {
+            "*".to_string()
+        } else {
+            t.col_ref()?
+        };
         t.symbol(")");
         Some(ColExpr::Count(arg))
     } else if t.keyword("sum").is_some() {
@@ -178,12 +182,20 @@ fn parse_select_body(t: &mut Tokenizer) -> Option<Select> {
         let b = t.col_ref()?;
         // Normalize: left col belongs to `map`, right col to `right`.
         let (left_col, right_col) = split_join_cols(&map, &right, &a, &b);
-        Some(Join { right, left_col, right_col })
+        Some(Join {
+            right,
+            left_col,
+            right_col,
+        })
     } else {
         None
     };
-    let filter = if t.keyword("where").is_some() { Some(parse_conds(t)?) } else { None };
-    
+    let filter = if t.keyword("where").is_some() {
+        Some(parse_conds(t)?)
+    } else {
+        None
+    };
+
     let mut group_by = None;
     if t.keyword("group").is_some() {
         t.keyword("by")?;
@@ -193,7 +205,7 @@ fn parse_select_body(t: &mut Tokenizer) -> Option<Select> {
         }
         group_by = Some(gcols);
     }
-    
+
     let mut order_by = None;
     if t.keyword("order").is_some() {
         t.keyword("by")?;
@@ -206,7 +218,7 @@ fn parse_select_body(t: &mut Tokenizer) -> Option<Select> {
         };
         order_by = Some((col, is_desc));
     }
-    
+
     let mut limit = None;
     if t.keyword("limit").is_some() {
         t.skip_ws();
@@ -217,8 +229,18 @@ fn parse_select_body(t: &mut Tokenizer) -> Option<Select> {
         let num_str = std::str::from_utf8(&t.s[start..t.i]).ok()?;
         limit = Some(num_str.parse::<usize>().ok()?);
     }
-    
-    Some(Select { is_distinct, cols, star, map, join, filter, group_by, order_by, limit })
+
+    Some(Select {
+        is_distinct,
+        cols,
+        star,
+        map,
+        join,
+        filter,
+        group_by,
+        order_by,
+        limit,
+    })
 }
 
 /// Given `a` and `b` from `ON a = b`, return (col-on-left, col-on-right) using the
@@ -265,7 +287,12 @@ fn parse_create_mapping(t: &mut Tokenizer) -> Option<Mapping> {
             t.symbol(",");
         }
     }
-    Some(Mapping { name, kind, columns, options })
+    Some(Mapping {
+        name,
+        kind,
+        columns,
+        options,
+    })
 }
 
 fn parse_coltype(t: &mut Tokenizer) -> Option<ColType> {
@@ -356,15 +383,20 @@ pub fn execute_with(
     let matchall = Predicate::And(vec![]); // empty AND matches everything
     let filter = select.filter.as_ref().unwrap_or(&matchall);
 
-    let matched: Vec<&(Vec<u8>, Vec<u8>)> =
-        entries.iter().filter(|(_, v)| eval(filter, v, schemas, ex)).collect();
+    let matched: Vec<&(Vec<u8>, Vec<u8>)> = entries
+        .iter()
+        .filter(|(_, v)| eval(filter, v, schemas, ex))
+        .collect();
 
     let mut columns = Vec::new();
     if select.star {
         if !star_cols.is_empty() {
             columns = star_cols.to_vec();
         } else {
-            columns = matched.first().and_then(|(_, v)| schema_fields(v, schemas)).unwrap_or_default();
+            columns = matched
+                .first()
+                .and_then(|(_, v)| schema_fields(v, schemas))
+                .unwrap_or_default();
         }
     } else {
         for c in &select.cols {
@@ -385,7 +417,7 @@ pub fn execute_with(
     if has_aggregates || select.group_by.is_some() {
         let group_cols = select.group_by.clone().unwrap_or_default();
         let mut groups: HashMap<Vec<Option<String>>, Vec<&(Vec<u8>, Vec<u8>)>> = HashMap::new();
-        
+
         for entry in &matched {
             let mut group_key = Vec::new();
             for col in &group_cols {
@@ -398,7 +430,7 @@ pub fn execute_with(
             }
             groups.entry(group_key).or_default().push(entry);
         }
-        
+
         for (group_key, group_entries) in groups {
             let mut row = Vec::new();
             if select.star {
@@ -436,9 +468,18 @@ pub fn execute_with(
                                 ex.extract(&entry.1, schemas, &b)
                             };
                             match val {
-                                FieldValue::I32(v) => { sum += v as f64; has_val = true; }
-                                FieldValue::I64(v) => { sum += v as f64; has_val = true; }
-                                FieldValue::F64(v) => { sum += v; has_val = true; }
+                                FieldValue::I32(v) => {
+                                    sum += v as f64;
+                                    has_val = true;
+                                }
+                                FieldValue::I64(v) => {
+                                    sum += v as f64;
+                                    has_val = true;
+                                }
+                                FieldValue::F64(v) => {
+                                    sum += v;
+                                    has_val = true;
+                                }
                                 _ => {}
                             }
                         }
@@ -455,13 +496,26 @@ pub fn execute_with(
                                 ex.extract(&entry.1, schemas, &b)
                             };
                             match val {
-                                FieldValue::I32(v) => { sum += v as f64; count += 1; }
-                                FieldValue::I64(v) => { sum += v as f64; count += 1; }
-                                FieldValue::F64(v) => { sum += v; count += 1; }
+                                FieldValue::I32(v) => {
+                                    sum += v as f64;
+                                    count += 1;
+                                }
+                                FieldValue::I64(v) => {
+                                    sum += v as f64;
+                                    count += 1;
+                                }
+                                FieldValue::F64(v) => {
+                                    sum += v;
+                                    count += 1;
+                                }
                                 _ => {}
                             }
                         }
-                        row.push(if count > 0 { Some((sum / count as f64).to_string()) } else { None });
+                        row.push(if count > 0 {
+                            Some((sum / count as f64).to_string())
+                        } else {
+                            None
+                        });
                     }
                     ColExpr::Min(n) => {
                         let b = bare_col(n);
@@ -551,8 +605,10 @@ pub fn execute_with(
             rows.sort_by(|a, b| {
                 let val_a = &a[col_idx];
                 let val_b = &b[col_idx];
-                let ord = match (val_a.as_ref().and_then(|s| s.parse::<f64>().ok()), 
-                                 val_b.as_ref().and_then(|s| s.parse::<f64>().ok())) {
+                let ord = match (
+                    val_a.as_ref().and_then(|s| s.parse::<f64>().ok()),
+                    val_b.as_ref().and_then(|s| s.parse::<f64>().ok()),
+                ) {
                     (Some(na), Some(nb)) => na.total_cmp(&nb),
                     _ => val_a.cmp(val_b),
                 };
@@ -614,9 +670,7 @@ pub fn eval_fields(pred: &Predicate, fields: &[(String, FieldValue)]) -> bool {
         Predicate::Not(inner) => !eval_fields(inner, fields),
         Predicate::Between { field, from, to } => match get(field) {
             Some(fv) => match (fv.compare(from), fv.compare(to)) {
-                (Some(o_from), Some(o_to)) => {
-                    o_from != Ordering::Less && o_to != Ordering::Greater
-                }
+                (Some(o_from), Some(o_to)) => o_from != Ordering::Less && o_to != Ordering::Greater,
                 _ => false,
             },
             None => false,
@@ -673,7 +727,10 @@ pub fn eval_fields(pred: &Predicate, fields: &[(String, FieldValue)]) -> bool {
 /// Apply `select`'s WHERE to a combined field row and project its output columns.
 /// Returns the output `(column, value)` row, or None if filtered out. `SELECT *`
 /// emits all fields in order.
-pub fn project_row(select: &Select, fields: &[(String, FieldValue)]) -> Option<Vec<(String, FieldValue)>> {
+pub fn project_row(
+    select: &Select,
+    fields: &[(String, FieldValue)],
+) -> Option<Vec<(String, FieldValue)>> {
     let matchall = Predicate::And(vec![]);
     let filter = select.filter.as_ref().unwrap_or(&matchall);
     if !eval_fields(filter, fields) {
@@ -694,7 +751,11 @@ pub fn project_row(select: &Select, fields: &[(String, FieldValue)]) -> Option<V
     Some(
         cols.iter()
             .map(|c| {
-                let v = fields.iter().find(|(k, _)| k == c).map(|(_, v)| v.clone()).unwrap_or(FieldValue::Null);
+                let v = fields
+                    .iter()
+                    .find(|(k, _)| k == c)
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or(FieldValue::Null);
                 (c.clone(), v)
             })
             .collect(),
@@ -707,7 +768,9 @@ fn schema_fields(value: &[u8], schemas: &SchemaService) -> Option<Vec<String>> {
     }
     let payload = &value[serialization::DATA_OFFSET..];
     let id = i64::from_be_bytes(payload[0..8].try_into().ok()?);
-    schemas.get(id).map(|s| s.fields.iter().map(|f| f.name.clone()).collect())
+    schemas
+        .get(id)
+        .map(|s| s.fields.iter().map(|f| f.name.clone()).collect())
 }
 
 fn fmt(v: FieldValue) -> Option<String> {
@@ -733,7 +796,10 @@ struct Tokenizer<'a> {
 }
 impl<'a> Tokenizer<'a> {
     fn new(s: &'a str) -> Tokenizer<'a> {
-        Tokenizer { s: s.as_bytes(), i: 0 }
+        Tokenizer {
+            s: s.as_bytes(),
+            i: 0,
+        }
     }
     fn skip_ws(&mut self) {
         while self.i < self.s.len() && self.s[self.i].is_ascii_whitespace() {
@@ -806,7 +872,13 @@ impl<'a> Tokenizer<'a> {
     }
     fn op(&mut self) -> Option<Op> {
         self.skip_ws();
-        for (sym, op) in [(">=", Op::Ge), ("<=", Op::Le), ("=", Op::Eq), (">", Op::Gt), ("<", Op::Lt)] {
+        for (sym, op) in [
+            (">=", Op::Ge),
+            ("<=", Op::Le),
+            ("=", Op::Eq),
+            (">", Op::Gt),
+            ("<", Op::Lt),
+        ] {
             if self.symbol(sym) {
                 return Some(op);
             }
@@ -845,9 +917,13 @@ mod tests {
 
     #[test]
     fn parse_select_with_where() {
-        let s = parse_select("SELECT name, age FROM people WHERE age > 30 AND name = 'alice'").unwrap();
+        let s =
+            parse_select("SELECT name, age FROM people WHERE age > 30 AND name = 'alice'").unwrap();
         assert_eq!(s.map, "people");
-        assert_eq!(s.cols, vec![ColExpr::Col("name".into()), ColExpr::Col("age".into())]);
+        assert_eq!(
+            s.cols,
+            vec![ColExpr::Col("name".into()), ColExpr::Col("age".into())]
+        );
         assert_eq!(s.star, false);
         match s.filter.unwrap() {
             Predicate::And(v) => assert_eq!(v.len(), 2),
@@ -867,11 +943,14 @@ mod tests {
     fn parse_aggregations_and_modifiers() {
         let s = parse_select("SELECT DISTINCT count(*), sum(age), avg(salary) FROM people GROUP BY dept ORDER BY age DESC LIMIT 10").unwrap();
         assert_eq!(s.is_distinct, true);
-        assert_eq!(s.cols, vec![
-            ColExpr::Count("*".into()),
-            ColExpr::Sum("age".into()),
-            ColExpr::Avg("salary".into()),
-        ]);
+        assert_eq!(
+            s.cols,
+            vec![
+                ColExpr::Count("*".into()),
+                ColExpr::Sum("age".into()),
+                ColExpr::Avg("salary".into()),
+            ]
+        );
         assert_eq!(s.group_by, Some(vec!["dept".into()]));
         assert_eq!(s.order_by, Some(("age".into(), true)));
         assert_eq!(s.limit, Some(10));
@@ -888,7 +967,13 @@ mod tests {
             Statement::CreateMapping(m) => {
                 assert_eq!(m.name, "recommender");
                 assert_eq!(m.kind, MappingKind::Imap);
-                assert_eq!(m.columns, vec![("user_id".into(), ColType::Varchar), ("starter".into(), ColType::Varchar)]);
+                assert_eq!(
+                    m.columns,
+                    vec![
+                        ("user_id".into(), ColType::Varchar),
+                        ("starter".into(), ColType::Varchar)
+                    ]
+                );
                 assert_eq!(m.value_format(), "json-flat");
             }
             _ => panic!("expected CreateMapping"),
@@ -897,7 +982,8 @@ mod tests {
 
     #[test]
     fn parse_insert_and_job() {
-        match parse("INSERT INTO recommender VALUES ('user_1','Soup'), ('user_2','Salad')").unwrap() {
+        match parse("INSERT INTO recommender VALUES ('user_1','Soup'), ('user_2','Salad')").unwrap()
+        {
             Statement::Insert(i) => {
                 assert_eq!(i.mapping, "recommender");
                 assert_eq!(i.rows.len(), 2);
@@ -959,11 +1045,20 @@ mod tests {
         let schemas = SchemaService::new();
         schemas.put(Schema::new(
             "person".into(),
-            vec![FieldDescriptor::new("name".into(), STRING), FieldDescriptor::new("age".into(), INT32)],
+            vec![
+                FieldDescriptor::new("name".into(), STRING),
+                FieldDescriptor::new("age".into(), INT32),
+            ],
         ));
         let payload: Vec<u8> = (0.."eac7fcf34f8f1c720000000d0000002300000005616c69636504".len())
             .step_by(2)
-            .map(|i| u8::from_str_radix(&"eac7fcf34f8f1c720000000d0000002300000005616c69636504"[i..i + 2], 16).unwrap())
+            .map(|i| {
+                u8::from_str_radix(
+                    &"eac7fcf34f8f1c720000000d0000002300000005616c69636504"[i..i + 2],
+                    16,
+                )
+                .unwrap()
+            })
             .collect();
         let mut v = vec![0u8; serialization::DATA_OFFSET];
         v.extend_from_slice(&payload);
@@ -990,20 +1085,23 @@ mod tests {
             ],
         );
         schemas.put(schema);
-        
+
         let helper = |dept: &str, salary: i32| {
             let mut payload = Vec::new();
-            let schema = Schema::new("employee".into(), vec![
-                FieldDescriptor::new("dept".into(), STRING),
-                FieldDescriptor::new("salary".into(), INT32),
-            ]);
+            let schema = Schema::new(
+                "employee".into(),
+                vec![
+                    FieldDescriptor::new("dept".into(), STRING),
+                    FieldDescriptor::new("salary".into(), INT32),
+                ],
+            );
             payload.extend_from_slice(&schema.id.to_be_bytes());
             payload.extend_from_slice(&4u32.to_be_bytes());
             payload.extend_from_slice(&salary.to_be_bytes());
             payload.push(5);
             payload.extend_from_slice(&(dept.len() as u32).to_be_bytes());
             payload.extend_from_slice(dept.as_bytes());
-            
+
             let mut v = vec![0u8; serialization::DATA_OFFSET];
             v.extend_from_slice(&payload);
             (vec![0], v)
@@ -1017,12 +1115,21 @@ mod tests {
         ];
 
         // 1. Group by dept, avg salary
-        let sel = parse_select("SELECT dept, avg(salary), count(*) FROM employees GROUP BY dept ORDER BY dept").unwrap();
+        let sel = parse_select(
+            "SELECT dept, avg(salary), count(*) FROM employees GROUP BY dept ORDER BY dept",
+        )
+        .unwrap();
         let (cols, mut rows) = execute(&sel, &entries, &schemas);
         assert_eq!(cols, vec!["dept", "avg(salary)", "count(*)"]);
         rows.sort();
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0], vec![Some("eng".into()), Some("350".into()), Some("2".into())]);
-        assert_eq!(rows[1], vec![Some("sales".into()), Some("150".into()), Some("2".into())]);
+        assert_eq!(
+            rows[0],
+            vec![Some("eng".into()), Some("350".into()), Some("2".into())]
+        );
+        assert_eq!(
+            rows[1],
+            vec![Some("sales".into()), Some("150".into()), Some("2".into())]
+        );
     }
 }

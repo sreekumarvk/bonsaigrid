@@ -17,15 +17,35 @@ impl ExecutorService {
     }
 
     /// Submit a task to a specific partition owner (us).
-    pub fn submit_to_partition(&self, name: &str, _uuid: (i64, i64), callable: Vec<u8>) -> Option<Vec<u8>> {
-        self.tasks.lock().unwrap().entry(name.to_string()).or_default().push(callable);
+    pub fn submit_to_partition(
+        &self,
+        name: &str,
+        _uuid: (i64, i64),
+        callable: Vec<u8>,
+    ) -> Option<Vec<u8>> {
+        self.tasks
+            .lock()
+            .unwrap()
+            .entry(name.to_string())
+            .or_default()
+            .push(callable);
         // For now, we don't have built-in task evaluation logic implemented, so return None.
         None
     }
 
     /// Submit a task to a specific member (us).
-    pub fn submit_to_member(&self, name: &str, _uuid: (i64, i64), callable: Vec<u8>) -> Option<Vec<u8>> {
-        self.tasks.lock().unwrap().entry(name.to_string()).or_default().push(callable);
+    pub fn submit_to_member(
+        &self,
+        name: &str,
+        _uuid: (i64, i64),
+        callable: Vec<u8>,
+    ) -> Option<Vec<u8>> {
+        self.tasks
+            .lock()
+            .unwrap()
+            .entry(name.to_string())
+            .or_default()
+            .push(callable);
         None
     }
 }

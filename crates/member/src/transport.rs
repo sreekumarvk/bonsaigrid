@@ -82,7 +82,11 @@ impl Transport {
         for (i, p) in ports.iter().enumerate() {
             map.insert(i, format!("127.0.0.1:{p}").parse().unwrap());
         }
-        Ok(Transport { self_index, peers: Rc::new(RefCell::new(map)), listener })
+        Ok(Transport {
+            self_index,
+            peers: Rc::new(RefCell::new(map)),
+            listener,
+        })
     }
 
     /// Handle to the shared peer table so the handler can register new members'
@@ -93,7 +97,11 @@ impl Transport {
 
     /// Run the loop, driving `handler`. Returns when `on_tick` returns `false`.
     pub fn run(self, mut handler: impl Handler) -> std::io::Result<()> {
-        let Transport { self_index, peers, listener } = self;
+        let Transport {
+            self_index,
+            peers,
+            listener,
+        } = self;
         let lfd = listener.as_raw_fd();
         let mut ring = IoUring::new(256)?;
         let mut conns: Vec<Option<MConn>> = Vec::new();
@@ -102,15 +110,21 @@ impl Transport {
         let mut pending: Vec<io_uring::squeue::Entry> = Vec::new();
         let mut outbox: Vec<(usize, Msg)> = Vec::new();
 
-        pending.push(opcode::AcceptMulti::new(types::Fd(lfd)).build().user_data(ACCEPT_UD));
+        pending.push(
+            opcode::AcceptMulti::new(types::Fd(lfd))
+                .build()
+                .user_data(ACCEPT_UD),
+        );
         let tick = types::Timespec::new().sec(0).nsec(1_000_000); // 1 ms
         pending.push(opcode::Timeout::new(&tick).build().user_data(TIMEOUT_UD));
 
         loop {
             flush(&mut ring, &mut pending);
             ring.submit_and_wait(1)?;
-            let cqes: Vec<(u64, i32, u32)> =
-                ring.completion().map(|c| (c.user_data(), c.result(), c.flags())).collect();
+            let cqes: Vec<(u64, i32, u32)> = ring
+                .completion()
+                .map(|c| (c.user_data(), c.result(), c.flags()))
+                .collect();
 
             let mut do_tick = false;
             for (ud, res, flags) in cqes {
@@ -122,7 +136,9 @@ impl Transport {
                 if ud == ACCEPT_UD {
                     if !io_uring::cqueue::more(flags) {
                         pending.push(
-                            opcode::AcceptMulti::new(types::Fd(lfd)).build().user_data(ACCEPT_UD),
+                            opcode::AcceptMulti::new(types::Fd(lfd))
+                                .build()
+                                .user_data(ACCEPT_UD),
                         );
                     }
                     if res >= 0 {
@@ -139,8 +155,23 @@ impl Transport {
                 if is_send {
                     on_send(&mut conns, slot, res, &mut pending);
                 } else {
-                    on_recv(&mut conns, slot, res, &mut handler, &mut outbox, &mut pending);
-                    deliver(&mut outbox, &mut conns, &mut free, &mut outbound, self_index, &peers, &mut pending);
+                    on_recv(
+                        &mut conns,
+                        slot,
+                        res,
+                        &mut handler,
+                        &mut outbox,
+                        &mut pending,
+                    );
+                    deliver(
+                        &mut outbox,
+                        &mut conns,
+                        &mut free,
+                        &mut outbound,
+                        self_index,
+                        &peers,
+                        &mut pending,
+                    );
                 }
                 if !conns[slot].as_ref().map(|c| c.open).unwrap_or(false) {
                     if let Some(c) = conns[slot].take() {
@@ -157,7 +188,15 @@ impl Transport {
 
             if do_tick {
                 let cont = handler.on_tick(&mut outbox);
-                deliver(&mut outbox, &mut conns, &mut free, &mut outbound, self_index, &peers, &mut pending);
+                deliver(
+                    &mut outbox,
+                    &mut conns,
+                    &mut free,
+                    &mut outbound,
+                    self_index,
+                    &peers,
+                    &mut pending,
+                );
                 if !cont {
                     return Ok(());
                 }
@@ -221,7 +260,12 @@ fn arm_send(conns: &mut [Option<MConn>], slot: usize, pending: &mut Vec<io_uring
     );
 }
 
-fn on_send(conns: &mut [Option<MConn>], slot: usize, res: i32, pending: &mut Vec<io_uring::squeue::Entry>) {
+fn on_send(
+    conns: &mut [Option<MConn>],
+    slot: usize,
+    res: i32,
+    pending: &mut Vec<io_uring::squeue::Entry>,
+) {
     if res < 0 {
         conns[slot].as_mut().unwrap().open = false;
         return;
@@ -250,7 +294,9 @@ fn on_recv(
     }
     loop {
         let c = conns[slot].as_mut().unwrap();
-        let Some((msg, n)) = decode(&c.acc) else { break };
+        let Some((msg, n)) = decode(&c.acc) else {
+            break;
+        };
         c.acc.drain(0..n);
         match msg {
             Msg::Hello { index } => c.peer = Some(index as usize),
@@ -275,7 +321,8 @@ fn deliver(
     pending: &mut Vec<io_uring::squeue::Entry>,
 ) {
     for (dest, msg) in outbox.drain(..) {
-        let Some(slot) = ensure_outbound(dest, conns, free, outbound, self_index, peers, pending) else {
+        let Some(slot) = ensure_outbound(dest, conns, free, outbound, self_index, peers, pending)
+        else {
             continue; // peer not reachable yet; ack-timeout will cover the write
         };
         let bytes = encode(&msg);
@@ -294,7 +341,12 @@ fn ensure_outbound(
     pending: &mut Vec<io_uring::squeue::Entry>,
 ) -> Option<usize> {
     if let Some(&slot) = outbound.get(&dest) {
-        if conns.get(slot).and_then(|c| c.as_ref()).map(|c| c.open).unwrap_or(false) {
+        if conns
+            .get(slot)
+            .and_then(|c| c.as_ref())
+            .map(|c| c.open)
+            .unwrap_or(false)
+        {
             return Some(slot);
         }
         outbound.remove(&dest);
@@ -307,7 +359,9 @@ fn ensure_outbound(
     {
         let c = conns[slot].as_mut().unwrap();
         c.peer = Some(dest);
-        c.out.extend_from_slice(&encode(&Msg::Hello { index: self_index as u32 }));
+        c.out.extend_from_slice(&encode(&Msg::Hello {
+            index: self_index as u32,
+        }));
     }
     outbound.insert(dest, slot);
     arm_recv(conns, slot, pending);

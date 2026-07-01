@@ -72,21 +72,37 @@ mod tests {
         let mut initial = vec![0u8; 16];
         write_i32_le(&mut initial, 0, 65792); // a MapPut-ish header
         let real = vec![
-            Frame { flags: UNFRAGMENTED, content: initial },
-            Frame { flags: 0, content: vec![1, 2, 3] },
-            Frame { flags: 0, content: vec![4, 5, 6, 7] },
+            Frame {
+                flags: UNFRAGMENTED,
+                content: initial,
+            },
+            Frame {
+                flags: 0,
+                content: vec![1, 2, 3],
+            },
+            Frame {
+                flags: 0,
+                content: vec![4, 5, 6, 7],
+            },
         ];
         let expected = write_message(&real);
 
         // Split into two fragments (frag id 99): [fragFrame(BEGIN), real[0], real[1]]
         // and [fragFrame(END), real[2]]. Each fragment is its own wire message.
-        let frag1 = write_message(&[frag_frame(BEGIN_FRAGMENT, 99), real[0].clone(), real[1].clone()]);
+        let frag1 = write_message(&[
+            frag_frame(BEGIN_FRAGMENT, 99),
+            real[0].clone(),
+            real[1].clone(),
+        ]);
         let frag2 = write_message(&[frag_frame(END_FRAGMENT, 99), real[2].clone()]);
 
         let mut r = Reassembler::new();
         assert!(r.push(&frag1).is_none(), "first fragment is incomplete");
         let assembled = r.push(&frag2).expect("END fragment completes the message");
-        assert_eq!(assembled, expected, "reassembled bytes equal the original message");
+        assert_eq!(
+            assembled, expected,
+            "reassembled bytes equal the original message"
+        );
     }
 
     #[test]

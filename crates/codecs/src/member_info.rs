@@ -28,7 +28,10 @@ pub fn encode(
     let mut initial = vec![0u8; 18];
     write_uuid(&mut initial, 0, Some(uuid));
     initial[17] = if lite { 1 } else { 0 };
-    out.push(Frame { flags: 0, content: initial });
+    out.push(Frame {
+        flags: 0,
+        content: initial,
+    });
 
     address::encode(out, host, port);
 
@@ -38,7 +41,10 @@ pub fn encode(
 
     // MemberVersion: BEGIN, [major, minor, patch], END
     out.push(begin_frame());
-    out.push(Frame { flags: 0, content: vec![version.0, version.1, version.2] });
+    out.push(Frame {
+        flags: 0,
+        content: vec![version.0, version.1, version.2],
+    });
     out.push(end_frame());
 
     // empty addressMap
@@ -69,7 +75,14 @@ mod tests {
     #[test]
     fn member_encodes_begin_uuid_lite_then_nested_then_end() {
         let mut f = Vec::new();
-        encode(&mut f, (123456789, 987654321), "127.0.0.1", 5701, false, (5, 8, 0));
+        encode(
+            &mut f,
+            (123456789, 987654321),
+            "127.0.0.1",
+            5701,
+            false,
+            (5, 8, 0),
+        );
         assert!(f[0].flags & BEGIN_DS != 0);
         assert_eq!(read_uuid(&f[1].content, 0), Some((123456789, 987654321)));
         assert_eq!(f[1].content[17], 0); // not lite
@@ -79,7 +92,10 @@ mod tests {
     #[test]
     fn member_list_wraps_in_begin_end() {
         let mut f = Vec::new();
-        encode_list(&mut f, &[((1, 1), "127.0.0.1".into(), 5701, false, (5, 8, 0))]);
+        encode_list(
+            &mut f,
+            &[((1, 1), "127.0.0.1".into(), 5701, false, (5, 8, 0))],
+        );
         assert!(f[0].flags & BEGIN_DS != 0);
         assert!(f.last().unwrap().flags & END_DS != 0);
     }

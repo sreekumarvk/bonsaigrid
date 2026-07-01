@@ -8,22 +8,28 @@
 
 pub mod address;
 pub mod auth;
+pub mod cache;
 pub mod cluster_view;
+pub mod executor;
 pub mod map;
+pub mod mc;
 pub mod member_info;
 pub mod partition_table;
 pub mod schema;
 pub mod sql;
-pub mod mc;
-pub mod cache;
-pub mod executor;
 pub mod txn;
 
 use protocol::frame::{Frame, BEGIN_DS, END_DS};
 
 pub fn begin_frame() -> Frame {
-    Frame { flags: BEGIN_DS, content: Vec::new() }
+    Frame {
+        flags: BEGIN_DS,
+        content: Vec::new(),
+    }
 }
 pub fn end_frame() -> Frame {
-    Frame { flags: END_DS, content: Vec::new() }
+    Frame {
+        flags: END_DS,
+        content: Vec::new(),
+    }
 }

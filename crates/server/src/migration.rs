@@ -40,7 +40,10 @@ fn holder_uuids(c: &Cluster, p: i32) -> Vec<(i64, i64)> {
 }
 
 fn alive_in(c: &Cluster, uuid: (i64, i64)) -> bool {
-    c.members.iter().zip(&c.alive).any(|(m, &a)| a && m.uuid == uuid)
+    c.members
+        .iter()
+        .zip(&c.alive)
+        .any(|(m, &a)| a && m.uuid == uuid)
 }
 
 /// Migrations `self_uuid` must send after a change from `old` to `new`. A
@@ -58,7 +61,9 @@ pub fn plan(old: &Cluster, new: &Cluster, count: i32, self_uuid: (i64, i64)) -> 
     for p in 0..count {
         let old_holders = holder_uuids(old, p);
         // The sole sender is the first old holder that survives into `new`.
-        let Some(&sender) = old_holders.iter().find(|&&u| alive_in(new, u)) else { continue };
+        let Some(&sender) = old_holders.iter().find(|&&u| alive_in(new, u)) else {
+            continue;
+        };
         if sender != self_uuid {
             continue;
         }
@@ -80,7 +85,13 @@ mod tests {
     use crate::membership::MemberInfo;
 
     fn m(i: u64) -> MemberInfo {
-        MemberInfo::new((1, i as i64 + 1), "127.0.0.1".into(), 5701 + i as i32, 7701 + i as i32, i)
+        MemberInfo::new(
+            (1, i as i64 + 1),
+            "127.0.0.1".into(),
+            5701 + i as i32,
+            7701 + i as i32,
+            i,
+        )
     }
 
     #[test]
@@ -103,10 +114,15 @@ mod tests {
         let old = Cluster::new(vec![m(0), m(1), m(2)], 1, 1);
         let mut new = old.clone();
         new.remove_member_by_uuid((1, 1)); // member 0 dead
-        // Member 1 (the surviving backup → new owner) sends to member 2 (fresh backup).
+                                           // Member 1 (the surviving backup → new owner) sends to member 2 (fresh backup).
         let from1 = plan(&old, &new, 271, (1, 2));
-        assert!(!from1.is_empty(), "restore-K must re-replicate to a fresh backup");
-        assert!(from1.iter().all(|(_, dest)| new.members[*dest].uuid == (1, 3)));
+        assert!(
+            !from1.is_empty(),
+            "restore-K must re-replicate to a fresh backup"
+        );
+        assert!(from1
+            .iter()
+            .all(|(_, dest)| new.members[*dest].uuid == (1, 3)));
     }
 
     #[test]
@@ -118,7 +134,10 @@ mod tests {
     #[test]
     fn merge_policy_from_str() {
         assert_eq!(MergePolicy::parse("PutIfAbsent"), MergePolicy::PutIfAbsent);
-        assert_eq!(MergePolicy::parse("LatestUpdate"), MergePolicy::LatestUpdate);
+        assert_eq!(
+            MergePolicy::parse("LatestUpdate"),
+            MergePolicy::LatestUpdate
+        );
         assert_eq!(MergePolicy::parse("garbage"), MergePolicy::LatestUpdate);
         assert!(MergePolicy::LatestUpdate.latest_update());
         assert!(!MergePolicy::PutIfAbsent.latest_update());

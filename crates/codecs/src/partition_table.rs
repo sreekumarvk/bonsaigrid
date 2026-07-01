@@ -28,7 +28,10 @@ pub fn encode(out: &mut Vec<Frame>, entries: &[((i64, i64), Vec<i32>)]) {
     for (i, (uuid, _)) in entries.iter().enumerate() {
         write_uuid(&mut keys, i * UUID_SIZE, Some(*uuid));
     }
-    out.push(Frame { flags: 0, content: keys });
+    out.push(Frame {
+        flags: 0,
+        content: keys,
+    });
 }
 
 #[cfg(test)]

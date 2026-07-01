@@ -89,7 +89,10 @@ impl Slab {
                 let buf = &mut self.classes[ci].bytes[off..off + len];
                 buf[..a.len()].copy_from_slice(a);
                 buf[a.len()..].copy_from_slice(b);
-                Handle { class: ci as u16, slot }
+                Handle {
+                    class: ci as u16,
+                    slot,
+                }
             }
             None => {
                 let mut v = Vec::with_capacity(len);
@@ -102,7 +105,10 @@ impl Slab {
                     self.overflow.push(v);
                     (self.overflow.len() - 1) as u32
                 };
-                Handle { class: OVERFLOW, slot }
+                Handle {
+                    class: OVERFLOW,
+                    slot,
+                }
             }
         }
     }

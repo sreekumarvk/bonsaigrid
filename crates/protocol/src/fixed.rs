@@ -62,8 +62,15 @@ mod tests {
     #[test]
     fn uuid_present_roundtrips() {
         let mut b = [0u8; UUID_SIZE];
-        write_uuid(&mut b, 0, Some((0x1122334455667788, 0x99AABBCCDDEEFF00u64 as i64)));
+        write_uuid(
+            &mut b,
+            0,
+            Some((0x1122334455667788, 0x99AABBCCDDEEFF00u64 as i64)),
+        );
         assert_eq!(b[0], 0); // isNull = false
-        assert_eq!(read_uuid(&b, 0), Some((0x1122334455667788, 0x99AABBCCDDEEFF00u64 as i64)));
+        assert_eq!(
+            read_uuid(&b, 0),
+            Some((0x1122334455667788, 0x99AABBCCDDEEFF00u64 as i64))
+        );
     }
 }

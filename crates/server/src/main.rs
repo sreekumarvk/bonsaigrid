@@ -32,7 +32,10 @@ fn reuseport_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
 }
 
 fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
 /// Auth config: cluster name (default "dev") + optional username/password.
@@ -88,9 +91,17 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
     // Synchronous backup count K (default 1, capped at N-1).
     let backups = env_usize("BONSAI_BACKUPS", 1).min(total.saturating_sub(1));
     let quorum = env_usize("BONSAI_QUORUM", 1);
-    let cluster = Rc::new(RefCell::new(Cluster::new(bootstrap_members(total), backups, quorum)));
+    let cluster = Rc::new(RefCell::new(Cluster::new(
+        bootstrap_members(total),
+        backups,
+        quorum,
+    )));
     let self_uuid = cfg.members[self_index].uuid;
-    let join_as = if joining { Some(cluster.borrow().members[self_index].clone()) } else { None };
+    let join_as = if joining {
+        Some(cluster.borrow().members[self_index].clone())
+    } else {
+        None
+    };
     let store = Arc::new(store::Store::with_shards_seed(1, (self_index as u64) << 48));
     server::jobs::set_store(store.clone()); // streaming SQL jobs look up the IMap here
     let broker = Arc::new(server::events::EventBroker::new(self_uuid));
@@ -130,8 +141,11 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
         job_rx,
         ev_tx,
     );
-    let replicator =
-        Rc::new(if backups > 0 { Some(server::member_thread::Replicator::new(job_tx, backups)) } else { None });
+    let replicator = Rc::new(if backups > 0 {
+        Some(server::member_thread::Replicator::new(job_tx, backups))
+    } else {
+        None
+    });
 
     let n = members;
     let (eb, cb) = (broker.clone(), broker.clone());
@@ -178,7 +192,20 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
         move |msg, conn_id, out| {
             md.inc_request();
             let cluster = cl_d.borrow();
-            server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, &schemas, &cluster, rep_d.as_ref().as_ref(), &exec_d, &txn_d, &jet_d, out)
+            server::handlers::dispatch_bytes(
+                msg,
+                conn_id,
+                &store,
+                &cfg,
+                &broker,
+                &schemas,
+                &cluster,
+                rep_d.as_ref().as_ref(),
+                &exec_d,
+                &txn_d,
+                &jet_d,
+                out,
+            )
         },
         move |path| {
             if let Some(dead) = parse_promote(path) {
@@ -210,10 +237,15 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
 fn cluster_view_push(cluster: &Cluster, corr: i64) -> Vec<Vec<u8>> {
     use protocol::frame::write_message;
     use protocol::message::set_correlation_id;
-    let mut mv = codecs::cluster_view::members_view_event(cluster.member_list_version, &cluster.member_tuples());
+    let mut mv = codecs::cluster_view::members_view_event(
+        cluster.member_list_version,
+        &cluster.member_tuples(),
+    );
     set_correlation_id(&mut mv, corr);
-    let mut pv =
-        codecs::cluster_view::partitions_view_event(cluster.partition_list_version, &cluster.partition_table());
+    let mut pv = codecs::cluster_view::partitions_view_event(
+        cluster.partition_list_version,
+        &cluster.partition_table(),
+    );
     set_correlation_id(&mut pv, corr);
     vec![write_message(&mv), write_message(&pv)]
 }
@@ -222,12 +254,18 @@ fn cluster_view_push(cluster: &Cluster, corr: i64) -> Vec<Vec<u8>> {
 /// detector will call the same `Cluster::promote`).
 fn parse_promote(path: &str) -> Option<usize> {
     let rest = path.strip_prefix("/cluster/promote")?;
-    let q = rest.strip_prefix("?dead=").or_else(|| rest.strip_prefix("/?dead="))?;
+    let q = rest
+        .strip_prefix("?dead=")
+        .or_else(|| rest.strip_prefix("/?dead="))?;
     q.parse().ok()
 }
 
 /// HTTP routing on the main port: health endpoints + a Prometheus `/metrics`.
-fn http_route(path: &str, cluster_size: usize, metrics: &server::metrics::Metrics) -> (u16, &'static str, String) {
+fn http_route(
+    path: &str,
+    cluster_size: usize,
+    metrics: &server::metrics::Metrics,
+) -> (u16, &'static str, String) {
     if path == "/metrics" {
         (200, "text/plain", metrics.prometheus(cluster_size))
     } else {
@@ -243,7 +281,11 @@ fn run_single_node() -> std::io::Result<()> {
     let tpc_ports: Vec<i32> = (0..cores as i32).map(|i| TPC_BASE + i).collect();
     let (cluster_name, username, password) = auth_cfg();
     let cfg = Arc::new(Cfg {
-        members: vec![Member { uuid: (1, 1), host: "127.0.0.1".into(), port: BASE_PORT }],
+        members: vec![Member {
+            uuid: (1, 1),
+            host: "127.0.0.1".into(),
+            port: BASE_PORT,
+        }],
         self_index: 0,
         tpc_ports: tpc_ports.clone(),
         cluster_name,
@@ -252,7 +294,7 @@ fn run_single_node() -> std::io::Result<()> {
     });
     let store = Arc::new(store::Store::with_shards(cores));
     server::jobs::set_store(store.clone()); // streaming SQL jobs look up the IMap here
-    // Single-member cluster, no backups; shared read-only across cores.
+                                            // Single-member cluster, no backups; shared read-only across cores.
     let cluster = Arc::new(Cluster::new(bootstrap_members(1), 0, 1));
     let broker = Arc::new(server::events::EventBroker::new(cfg.members[0].uuid));
     let metrics = Arc::new(server::metrics::Metrics::new());
@@ -278,7 +320,9 @@ fn run_single_node() -> std::io::Result<()> {
         let jet_service = jet_service.clone();
         let cluster = cluster.clone();
         let main_listener = reuseport_listener(addr)?;
-        let tpc_addr: SocketAddr = format!("127.0.0.1:{}", TPC_BASE + i as i32).parse().unwrap();
+        let tpc_addr: SocketAddr = format!("127.0.0.1:{}", TPC_BASE + i as i32)
+            .parse()
+            .unwrap();
         let tpc_listener = reuseport_listener(tpc_addr)?;
         let core_id = core_ids.get(i).copied();
         handles.push(std::thread::spawn(move || {
@@ -294,7 +338,10 @@ fn run_single_node() -> std::io::Result<()> {
                 vec![main_listener, tpc_listener],
                 move |msg, conn_id, out| {
                     md.inc_request();
-                    server::handlers::dispatch_bytes(msg, conn_id, &store, &cfg, &broker, &schemas, &cluster, None, &exec_d, &txn_d, &jet_d, out)
+                    server::handlers::dispatch_bytes(
+                        msg, conn_id, &store, &cfg, &broker, &schemas, &cluster, None, &exec_d,
+                        &txn_d, &jet_d, out,
+                    )
                 },
                 move |path| http_route(path, 1, &mh),
                 move |conn_id, out| {

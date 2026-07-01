@@ -137,7 +137,9 @@ pub fn run(
                 // Multishot: only re-arm if the kernel won't keep delivering.
                 if !io_uring::cqueue::more(flags) {
                     pending.push(
-                        opcode::AcceptMulti::new(types::Fd(fds[idx])).build().user_data(ud),
+                        opcode::AcceptMulti::new(types::Fd(fds[idx]))
+                            .build()
+                            .user_data(ud),
                     );
                 }
                 if res >= 0 {
@@ -166,7 +168,15 @@ pub fn run(
             if is_send {
                 on_send(&mut conns, id, res, &mut pending);
             } else {
-                on_recv(&mut conns, id, res, &mut pending, &mut dispatch, &http, &drain_events);
+                on_recv(
+                    &mut conns,
+                    id,
+                    res,
+                    &mut pending,
+                    &mut dispatch,
+                    &http,
+                    &drain_events,
+                );
             }
 
             if !conns[id].as_ref().map(|c| c.open).unwrap_or(false) {
@@ -186,7 +196,8 @@ pub fn run(
             // authoritative cluster, and enqueue cluster-view events to listeners.
             on_tick();
             for id in 0..conns.len() {
-                let ready = matches!(conns.get(id), Some(Some(c)) if c.open && c.mode == Mode::Binary);
+                let ready =
+                    matches!(conns.get(id), Some(Some(c)) if c.open && c.mode == Mode::Binary);
                 if !ready {
                     continue;
                 }
@@ -222,7 +233,11 @@ fn arm_recv(conns: &mut [Option<Conn>], id: usize, pending: &mut Vec<io_uring::s
     pending.push(entry);
 }
 
-fn maybe_arm_send(conns: &mut [Option<Conn>], id: usize, pending: &mut Vec<io_uring::squeue::Entry>) {
+fn maybe_arm_send(
+    conns: &mut [Option<Conn>],
+    id: usize,
+    pending: &mut Vec<io_uring::squeue::Entry>,
+) {
     let c = conns[id].as_mut().unwrap();
     if c.inflight_send > 0 {
         return; // a send is already in flight on `sendbuf`
@@ -292,11 +307,15 @@ fn on_recv(
         Mode::Binary => {
             loop {
                 let c = conns[id].as_mut().unwrap();
-                let Some(len) = message_len(&c.acc) else { break };
+                let Some(len) = message_len(&c.acc) else {
+                    break;
+                };
                 // First-frame flags: both fragment bits set == a complete,
                 // unfragmented message (the common, fast path).
                 if read_u16_le(&c.acc, 4) & UNFRAGMENTED == UNFRAGMENTED {
-                    let Conn { acc, out, conn_id, .. } = c;
+                    let Conn {
+                        acc, out, conn_id, ..
+                    } = c;
                     dispatch(&acc[..len], *conn_id, out);
                     acc.drain(0..len);
                 } else {
@@ -350,7 +369,12 @@ fn write_http_response(out: &mut Vec<u8>, status: u16, ctype: &str, body: &str) 
     out.extend_from_slice(body.as_bytes());
 }
 
-fn on_send(conns: &mut [Option<Conn>], id: usize, res: i32, pending: &mut Vec<io_uring::squeue::Entry>) {
+fn on_send(
+    conns: &mut [Option<Conn>],
+    id: usize,
+    res: i32,
+    pending: &mut Vec<io_uring::squeue::Entry>,
+) {
     if res < 0 {
         conns[id].as_mut().unwrap().open = false;
         return;

@@ -13,7 +13,13 @@ use store::Store;
 const PORTS: [i32; 2] = [17811, 17812];
 
 fn member(i: u64, member_port: i32) -> MemberInfo {
-    MemberInfo::new((1, i as i64 + 1), "127.0.0.1".into(), 5901 + i as i32, member_port, i)
+    MemberInfo::new(
+        (1, i as i64 + 1),
+        "127.0.0.1".into(),
+        5901 + i as i32,
+        member_port,
+        i,
+    )
 }
 
 #[test]
@@ -30,14 +36,40 @@ fn sync_backup_applies_and_delivers_deferred_response() {
     let broker1 = Arc::new(EventBroker::new((1, 2)));
     let (_tx1, rx1) = spsc::channel::<MemberJob>(64);
     let (ev1, _evrx1) = spsc::channel::<ClusterEvent>(64);
-    spawn(1, ports.clone(), cluster.clone(), (1, 2), hb_i, hb_t, true, None, store1.clone(), broker1, rx1, ev1);
+    spawn(
+        1,
+        ports.clone(),
+        cluster.clone(),
+        (1, 2),
+        hb_i,
+        hb_t,
+        true,
+        None,
+        store1.clone(),
+        broker1,
+        rx1,
+        ev1,
+    );
 
     // Primary (member 0): the deferred response is enqueued on broker0.
     let store0 = Arc::new(Store::new());
     let broker0 = Arc::new(EventBroker::new((1, 1)));
     let (tx0, rx0) = spsc::channel::<MemberJob>(64);
     let (ev0, _evrx0) = spsc::channel::<ClusterEvent>(64);
-    spawn(0, ports.clone(), cluster.clone(), (1, 1), hb_i, hb_t, true, None, store0.clone(), broker0.clone(), rx0, ev0);
+    spawn(
+        0,
+        ports.clone(),
+        cluster.clone(),
+        (1, 1),
+        hb_i,
+        hb_t,
+        true,
+        None,
+        store0.clone(),
+        broker0.clone(),
+        rx0,
+        ev0,
+    );
 
     // Let both listeners come up.
     std::thread::sleep(Duration::from_millis(300));
@@ -74,6 +106,13 @@ fn sync_backup_applies_and_delivers_deferred_response() {
         std::thread::sleep(Duration::from_millis(20));
     }
 
-    assert!(backup_ok, "backup member did not apply the replicated value");
-    assert_eq!(delivered, vec![response], "deferred response not delivered after ack");
+    assert!(
+        backup_ok,
+        "backup member did not apply the replicated value"
+    );
+    assert_eq!(
+        delivered,
+        vec![response],
+        "deferred response not delivered after ack"
+    );
 }

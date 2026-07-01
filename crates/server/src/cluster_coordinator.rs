@@ -37,7 +37,12 @@ pub struct Coordinator {
 }
 
 impl Coordinator {
-    pub fn new(cluster: Cluster, self_uuid: (i64, i64), hb_interval: u64, hb_timeout: u64) -> Coordinator {
+    pub fn new(
+        cluster: Cluster,
+        self_uuid: (i64, i64),
+        hb_interval: u64,
+        hb_timeout: u64,
+    ) -> Coordinator {
         // last_seen starts empty: a member is only eligible for death once we've
         // actually heard a heartbeat from it. Otherwise a freshly-joined member
         // (whom the others don't heartbeat yet) would falsely declare them dead.
@@ -62,7 +67,10 @@ impl Coordinator {
     }
 
     fn self_join_id(&self) -> u64 {
-        self.cluster.index_of_uuid(self.self_uuid).map(|i| self.cluster.members[i].join_id).unwrap_or(0)
+        self.cluster
+            .index_of_uuid(self.self_uuid)
+            .map(|i| self.cluster.members[i].join_id)
+            .unwrap_or(0)
     }
 
     fn alive_peer_indices(&self) -> Vec<usize> {
@@ -99,7 +107,13 @@ impl Coordinator {
         let generation = self.cluster.generation;
         let recs = self.recs();
         for i in self.alive_peer_indices() {
-            outbox.push((i, Msg::MemberView { generation, members: recs.clone() }));
+            outbox.push((
+                i,
+                Msg::MemberView {
+                    generation,
+                    members: recs.clone(),
+                },
+            ));
         }
     }
 
@@ -125,7 +139,10 @@ impl Coordinator {
         // re-requesting; only an actual admission plans migrations.
         self.broadcast_view(outbox);
         if added {
-            Change { changed: true, migrations: self.outgoing(&old) }
+            Change {
+                changed: true,
+                migrations: self.outgoing(&old),
+            }
         } else {
             Change::default()
         }
@@ -151,7 +168,10 @@ impl Coordinator {
             self.joined = true;
             self.pending_join = None;
         }
-        Change { changed: true, migrations: self.outgoing(&old) }
+        Change {
+            changed: true,
+            migrations: self.outgoing(&old),
+        }
     }
 
     pub fn on_tick(&mut self, outbox: &mut Vec<(usize, Msg)>) -> Change {
@@ -162,7 +182,13 @@ impl Coordinator {
             let generation = self.cluster.generation;
             let from = self.self_join_id();
             for i in self.alive_peer_indices() {
-                outbox.push((i, Msg::Heartbeat { from_join_id: from, generation }));
+                outbox.push((
+                    i,
+                    Msg::Heartbeat {
+                        from_join_id: from,
+                        generation,
+                    },
+                ));
             }
             // A joiner re-asks the master to admit it until it appears in a view.
             if !self.joined {
@@ -212,7 +238,10 @@ impl Coordinator {
         self.broadcast_view(outbox);
         // Restore-K: re-replicate so every partition again has its backups (the
         // generalized plan emits owner→fresh-backup sends after a death).
-        Change { changed: true, migrations: self.outgoing(&old) }
+        Change {
+            changed: true,
+            migrations: self.outgoing(&old),
+        }
     }
 
     /// The uuid that would be master if `dead` were removed.
@@ -232,7 +261,13 @@ mod tests {
     use super::*;
 
     fn m(i: u64) -> MemberInfo {
-        MemberInfo::new((1, i as i64 + 1), "127.0.0.1".into(), 5701 + i as i32, 7701 + i as i32, i)
+        MemberInfo::new(
+            (1, i as i64 + 1),
+            "127.0.0.1".into(),
+            5701 + i as i32,
+            7701 + i as i32,
+            i,
+        )
     }
 
     #[test]
@@ -254,9 +289,19 @@ mod tests {
             changed |= co.on_tick(&mut outbox).changed;
         }
         assert!(changed, "member 1 should finalize member 0's death");
-        assert_eq!(co.cluster.index_of_uuid((1, 1)).map(|i| co.cluster.alive[i]), Some(false));
-        assert_eq!(co.cluster.master().map(|i| co.cluster.members[i].uuid), Some((1, 2)));
-        assert!(outbox.iter().any(|(_, msg)| matches!(msg, Msg::MemberView { .. })));
+        assert_eq!(
+            co.cluster
+                .index_of_uuid((1, 1))
+                .map(|i| co.cluster.alive[i]),
+            Some(false)
+        );
+        assert_eq!(
+            co.cluster.master().map(|i| co.cluster.members[i].uuid),
+            Some((1, 2))
+        );
+        assert!(outbox
+            .iter()
+            .any(|(_, msg)| matches!(msg, Msg::MemberView { .. })));
     }
 
     #[test]
@@ -283,8 +328,13 @@ mod tests {
         let ch = co.on_join(m(2), &mut outbox);
         assert!(ch.changed);
         assert_eq!(co.cluster.len(), 3);
-        assert!(outbox.iter().any(|(_, msg)| matches!(msg, Msg::MemberView { .. })));
+        assert!(outbox
+            .iter()
+            .any(|(_, msg)| matches!(msg, Msg::MemberView { .. })));
         // Member 0 owned partitions that now move; some go to the new member.
-        assert!(!ch.migrations.is_empty(), "join must plan migrations from the master");
+        assert!(
+            !ch.migrations.is_empty(),
+            "join must plan migrations from the master"
+        );
     }
 }

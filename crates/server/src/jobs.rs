@@ -58,9 +58,19 @@ fn run(job: Job, store: Arc<Store>) {
         eprintln!("JOB {}: missing source/sink/right mapping", job.name);
         return;
     };
-    let src_brokers = src.option("bootstrap.servers").unwrap_or("127.0.0.1:9092").to_string();
-    let sink_brokers = sink_m.option("bootstrap.servers").unwrap_or("127.0.0.1:9092").to_string();
-    let right_key = right.columns.first().map(|(n, _)| n.clone()).unwrap_or_else(|| "__key".into());
+    let src_brokers = src
+        .option("bootstrap.servers")
+        .unwrap_or("127.0.0.1:9092")
+        .to_string();
+    let sink_brokers = sink_m
+        .option("bootstrap.servers")
+        .unwrap_or("127.0.0.1:9092")
+        .to_string();
+    let right_key = right
+        .columns
+        .first()
+        .map(|(n, _)| n.clone())
+        .unwrap_or_else(|| "__key".into());
 
     let mut source = match KafkaSource::new(&src_brokers, &select.map) {
         Ok(s) => s,
@@ -76,15 +86,20 @@ fn run(job: Job, store: Arc<Store>) {
             return;
         }
     };
-    eprintln!("JOB {} started: {} JOIN {} -> {}", job.name, select.map, join.right, job.sink);
+    eprintln!(
+        "JOB {} started: {} JOIN {} -> {}",
+        job.name, select.map, join.right, job.sink
+    );
 
     loop {
         for rec in source.poll(500) {
             let json = String::from_utf8_lossy(&rec);
             let left = query::json::json_record_fields(&json);
             // Join key value from the streamed record.
-            let Some(jkey) =
-                left.iter().find(|(c, _)| *c == join.left_col).and_then(|(_, v)| query::sql::fmt_value(v))
+            let Some(jkey) = left
+                .iter()
+                .find(|(c, _)| *c == join.left_col)
+                .and_then(|(_, v)| query::sql::fmt_value(v))
             else {
                 continue;
             };
@@ -92,7 +107,8 @@ fn run(job: Job, store: Arc<Store>) {
             let Some(rval) = store.get(&join.right, &query::json::string_data(&jkey)) else {
                 continue; // no recommendation for this user
             };
-            let right_fields = query::json::jsonflat_fields(&query::json::string_data(&jkey), &rval, &right_key);
+            let right_fields =
+                query::json::jsonflat_fields(&query::json::string_data(&jkey), &rval, &right_key);
             let mut combined = left.clone();
             combined.extend(right_fields);
             if let Some(row) = query::sql::project_row(select, &combined) {

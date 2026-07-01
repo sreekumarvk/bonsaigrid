@@ -51,9 +51,18 @@ pub fn compile_regex(user_regex: &str) -> Result<regex::Regex, regex::Error> {
 
 /// True if `value` (a serialized record) satisfies `predicate`. A field that is
 /// absent, null, or not comparable to the predicate constant does not match.
-pub fn eval(predicate: &Predicate, value: &[u8], schemas: &SchemaService, ex: &dyn FieldExtractor) -> bool {
+pub fn eval(
+    predicate: &Predicate,
+    value: &[u8],
+    schemas: &SchemaService,
+    ex: &dyn FieldExtractor,
+) -> bool {
     match predicate {
-        Predicate::Compare { field, op, value: pv } => {
+        Predicate::Compare {
+            field,
+            op,
+            value: pv,
+        } => {
             let fv = ex.extract(value, schemas, field);
             match fv.compare(pv) {
                 Some(ord) => match op {
@@ -162,7 +171,10 @@ mod tests {
         let s = SchemaService::new();
         s.put(Schema::new(
             "person".into(),
-            vec![FieldDescriptor::new("name".into(), STRING), FieldDescriptor::new("age".into(), INT32)],
+            vec![
+                FieldDescriptor::new("name".into(), STRING),
+                FieldDescriptor::new("age".into(), INT32),
+            ],
         ));
         s
     }
@@ -191,8 +203,18 @@ mod tests {
             op: Op::Eq,
             value: serialization::compact::FieldValue::Str("alice".into()),
         };
-        assert!(eval(&Predicate::And(vec![gt30.clone(), name_alice.clone()]), &v, &sc, &ex));
-        assert!(!eval(&Predicate::And(vec![gt40.clone(), name_alice.clone()]), &v, &sc, &ex));
+        assert!(eval(
+            &Predicate::And(vec![gt30.clone(), name_alice.clone()]),
+            &v,
+            &sc,
+            &ex
+        ));
+        assert!(!eval(
+            &Predicate::And(vec![gt40.clone(), name_alice.clone()]),
+            &v,
+            &sc,
+            &ex
+        ));
         assert!(eval(&Predicate::Or(vec![gt40, name_alice]), &v, &sc, &ex));
 
         assert!(!eval(&Predicate::MatchNone, &v, &sc, &ex));
@@ -248,7 +270,11 @@ mod tests {
         // age in [30, 35, 40] (true)
         let in_list = Predicate::In {
             field: "age".into(),
-            values: vec![FieldValue::I32(30), FieldValue::I32(35), FieldValue::I32(40)],
+            values: vec![
+                FieldValue::I32(30),
+                FieldValue::I32(35),
+                FieldValue::I32(40),
+            ],
         };
         assert!(eval(&in_list, &v, &sc, &ex));
 
@@ -272,8 +298,6 @@ mod tests {
             expr: "al_e".into(),
         };
         assert!(!eval(&like_alice_four_chars, &v, &sc, &ex));
-
-
 
         // name like "AL%CE" (false due to case)
         let like_alice_case = Predicate::Like {

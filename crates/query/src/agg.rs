@@ -24,7 +24,7 @@ pub fn decode_aggregator(data: &[u8]) -> Option<Aggregator> {
         return None;
     }
     let class_id = i32::from_be_bytes(payload[5..9].try_into().unwrap());
-    
+
     let ty = match class_id {
         4 => AggregationType::Count,
         1 | 3 | 7 | 8 | 9 | 11 | 13 => AggregationType::Sum,
@@ -33,13 +33,13 @@ pub fn decode_aggregator(data: &[u8]) -> Option<Aggregator> {
         15 => AggregationType::Min,
         _ => return None,
     };
-    
+
     let is_present = payload[9];
     let attribute_path = if is_present != 0 {
         if payload.len() >= 14 {
             let len = i32::from_be_bytes(payload[10..14].try_into().unwrap()) as usize;
             if 14 + len <= payload.len() {
-                Some(String::from_utf8_lossy(&payload[14..14+len]).into_owned())
+                Some(String::from_utf8_lossy(&payload[14..14 + len]).into_owned())
             } else {
                 None
             }
@@ -49,7 +49,7 @@ pub fn decode_aggregator(data: &[u8]) -> Option<Aggregator> {
     } else {
         None
     };
-    
+
     Some(Aggregator { ty, attribute_path })
 }
 
@@ -60,7 +60,7 @@ pub fn execute_aggregation(
 ) -> FieldValue {
     let ex = serialization::compact::AutoExtractor;
     let attr = agg.attribute_path.as_deref().unwrap_or("");
-    
+
     match agg.ty {
         AggregationType::Count => {
             let count = if attr.is_empty() {
@@ -69,7 +69,8 @@ pub fn execute_aggregation(
                 entries
                     .iter()
                     .filter(|(_, v)| {
-                        serialization::compact::FieldExtractor::extract(&ex, v, schemas, attr) != FieldValue::Null
+                        serialization::compact::FieldExtractor::extract(&ex, v, schemas, attr)
+                            != FieldValue::Null
                     })
                     .count()
             };
@@ -84,9 +85,18 @@ pub fn execute_aggregation(
             for (_, v) in entries {
                 let fv = serialization::compact::FieldExtractor::extract(&ex, v, schemas, attr);
                 match fv {
-                    FieldValue::I32(i) => { sum += i as f64; has_val = true; }
-                    FieldValue::I64(i) => { sum += i as f64; has_val = true; }
-                    FieldValue::F64(f) => { sum += f; has_val = true; }
+                    FieldValue::I32(i) => {
+                        sum += i as f64;
+                        has_val = true;
+                    }
+                    FieldValue::I64(i) => {
+                        sum += i as f64;
+                        has_val = true;
+                    }
+                    FieldValue::F64(f) => {
+                        sum += f;
+                        has_val = true;
+                    }
                     _ => {}
                 }
             }
@@ -105,9 +115,18 @@ pub fn execute_aggregation(
             for (_, v) in entries {
                 let fv = serialization::compact::FieldExtractor::extract(&ex, v, schemas, attr);
                 match fv {
-                    FieldValue::I32(i) => { sum += i as f64; count += 1; }
-                    FieldValue::I64(i) => { sum += i as f64; count += 1; }
-                    FieldValue::F64(f) => { sum += f; count += 1; }
+                    FieldValue::I32(i) => {
+                        sum += i as f64;
+                        count += 1;
+                    }
+                    FieldValue::I64(i) => {
+                        sum += i as f64;
+                        count += 1;
+                    }
+                    FieldValue::F64(f) => {
+                        sum += f;
+                        count += 1;
+                    }
                     _ => {}
                 }
             }
@@ -183,7 +202,7 @@ pub fn extract_attribute_from_projection(data: &[u8]) -> Option<String> {
         if is_present != 0 {
             let len = i32::from_be_bytes(payload[10..14].try_into().unwrap()) as usize;
             if 14 + len <= payload.len() {
-                return Some(String::from_utf8_lossy(&payload[14..14+len]).into_owned());
+                return Some(String::from_utf8_lossy(&payload[14..14 + len]).into_owned());
             }
         }
     }

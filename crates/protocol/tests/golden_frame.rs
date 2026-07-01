@@ -34,6 +34,14 @@ fn golden_parses_into_many_complete_messages() {
         let (_f, used) = read_message(&bytes[off..]).unwrap();
         off += used;
     }
-    assert_eq!(off, bytes.len(), "consumed the whole fixture with no trailing bytes");
-    assert!(msgs.len() > 100, "fixture contains every codec's messages, got {}", msgs.len());
+    assert_eq!(
+        off,
+        bytes.len(),
+        "consumed the whole fixture with no trailing bytes"
+    );
+    assert!(
+        msgs.len() > 100,
+        "fixture contains every codec's messages, got {}",
+        msgs.len()
+    );
 }

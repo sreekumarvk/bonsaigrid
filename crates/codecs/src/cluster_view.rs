@@ -19,7 +19,10 @@ fn event_initial(msg_type: i32, version: i32) -> Frame {
     write_i32_le(&mut c, 0, msg_type);
     write_i32_le(&mut c, 12, -1); // partitionId
     write_i32_le(&mut c, 16, version);
-    Frame { flags: UNFRAGMENTED | IS_EVENT, content: c }
+    Frame {
+        flags: UNFRAGMENTED | IS_EVENT,
+        content: c,
+    }
 }
 
 pub fn members_view_event(version: i32, members: &[MemberTuple]) -> Vec<Frame> {

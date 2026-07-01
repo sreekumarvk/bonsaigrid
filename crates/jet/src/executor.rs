@@ -1,9 +1,9 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
-use crate::processor::{Item, Processor, MapProcessor, FilterProcessor};
+use crate::processor::{FilterProcessor, Item, MapProcessor, Processor};
 
 pub struct Tasklet {
     pub processor: Box<dyn Processor + Send + Sync>,
@@ -35,15 +35,15 @@ impl JetService {
             status: 1, // RUNNING
         };
         self.jobs.lock().unwrap().insert(id, job);
-        
+
         // E8.T4-T5: Fault Tolerance & Parallelism
         // Spawn N background execution threads to simulate local parallelism
         let local_parallelism = 2; // e.g., 2 cores for this job locally
         let mut handles = Vec::new();
-        
+
         for worker_id in 0..local_parallelism {
             let jobs_arc = self.jobs.clone();
-            
+
             handles.push(thread::spawn(move || {
                 let mut tasklets = vec![
                     Tasklet {
@@ -68,7 +68,7 @@ impl JetService {
 
                 let mut all_done = false;
                 let mut snapshot_captured = false;
-                
+
                 while !all_done {
                     all_done = true;
                     let mut any_progress = false;

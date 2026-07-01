@@ -9,14 +9,16 @@
 use crate::events::EventBroker;
 use crate::member_thread::Replicator;
 use crate::membership::Cluster;
-use member::wire::Msg;
 use codecs::auth::{self, AuthResponse};
 use codecs::{cache, cluster_view, map, mc};
-use serialization::compact::AutoExtractor;
-use serialization::schema::SchemaService;
-use protocol::fixed::{read_i32_le, read_i64_le, write_i32_le, write_i64_le, write_u16_le, write_uuid};
+use member::wire::Msg;
+use protocol::fixed::{
+    read_i32_le, read_i64_le, write_i32_le, write_i64_le, write_u16_le, write_uuid,
+};
 use protocol::frame::{read_message, write_message, Frame, IS_FINAL, IS_NULL, UNFRAGMENTED};
 use protocol::message::{correlation_id, msg_type, set_correlation_id};
+use serialization::compact::AutoExtractor;
+use serialization::schema::SchemaService;
 use store::Store;
 
 // ---- Zero-allocation hot path (MapGet) -------------------------------------
@@ -64,14 +66,22 @@ fn encode_get_into(out: &mut Vec<u8>, corr: i64, v: Option<&[u8]>) {
 }
 
 fn try_fast_get(msg: &[u8], store: &Store, out: &mut Vec<u8>) -> bool {
-    let Some((c0, off1)) = frame_at(msg, 0) else { return false };
+    let Some((c0, off1)) = frame_at(msg, 0) else {
+        return false;
+    };
     if c0.len() < 12 || read_i32_le(c0, 0) != 66048 {
         return false; // not MapGet
     }
     let corr = read_i64_le(c0, 4);
-    let Some((name_b, off2)) = frame_at(msg, off1) else { return false };
-    let Some((key_b, _)) = frame_at(msg, off2) else { return false };
-    let Ok(name) = std::str::from_utf8(name_b) else { return false };
+    let Some((name_b, off2)) = frame_at(msg, off1) else {
+        return false;
+    };
+    let Some((key_b, _)) = frame_at(msg, off2) else {
+        return false;
+    };
+    let Ok(name) = std::str::from_utf8(name_b) else {
+        return false;
+    };
     store.get_with(name, key_b, |v| encode_get_into(out, corr, v));
     true
 }
@@ -119,7 +129,19 @@ pub fn dispatch_bytes(
         return;
     }
     if let Some((frames, _)) = read_message(msg) {
-        for reply in dispatch(frames, conn_id, store, cfg, broker, schemas, cluster, replicator, executor, txn_service, jet_service) {
+        for reply in dispatch(
+            frames,
+            conn_id,
+            store,
+            cfg,
+            broker,
+            schemas,
+            cluster,
+            replicator,
+            executor,
+            txn_service,
+            jet_service,
+        ) {
             out.extend_from_slice(&write_message(&reply));
         }
     }
@@ -160,7 +182,11 @@ impl Cfg {
     /// Single-node, single-member cluster.
     pub fn single() -> Cfg {
         Cfg {
-            members: vec![Member { uuid: (1, 1), host: "127.0.0.1".into(), port: 5701 }],
+            members: vec![Member {
+                uuid: (1, 1),
+                host: "127.0.0.1".into(),
+                port: 5701,
+            }],
             self_index: 0,
             tpc_ports: Vec::new(),
             cluster_name: "dev".into(),
@@ -226,7 +252,10 @@ fn auth_response(cfg: &Cfg, cluster: &Cluster, status: u8) -> Vec<Frame> {
 fn empty_response(msg_type: i32) -> Vec<Frame> {
     let mut c = vec![0u8; 13]; // type@0, corr@4, backupAcks@12
     write_i32_le(&mut c, 0, msg_type);
-    vec![Frame { flags: UNFRAGMENTED, content: c }]
+    vec![Frame {
+        flags: UNFRAGMENTED,
+        content: c,
+    }]
 }
 
 /// Execute a `SELECT ... FROM left JOIN right ON l = r [WHERE ...]` over two
@@ -243,11 +272,15 @@ fn sql_join(sel: &query::sql::Select, store: &Store) -> (Vec<String>, Vec<Vec<Op
     let lkc = key_col(&sel.map);
     let rkc = key_col(&join.right);
     let field_str = |fields: &[(String, FieldValue)], col: &str| {
-        fields.iter().find(|(c, _)| *c == col).and_then(|(_, v)| query::sql::fmt_value(v))
+        fields
+            .iter()
+            .find(|(c, _)| *c == col)
+            .and_then(|(_, v)| query::sql::fmt_value(v))
     };
 
     // Index right rows by their join-column value.
-    let mut index: std::collections::HashMap<String, Vec<(String, FieldValue)>> = std::collections::HashMap::new();
+    let mut index: std::collections::HashMap<String, Vec<(String, FieldValue)>> =
+        std::collections::HashMap::new();
     for (k, v) in store.entries(&join.right) {
         let rf = query::json::jsonflat_fields(&k, &v, &rkc);
         if let Some(j) = field_str(&rf, &join.right_col) {
@@ -259,7 +292,9 @@ fn sql_join(sel: &query::sql::Select, store: &Store) -> (Vec<String>, Vec<Vec<Op
     let mut rows: Vec<Vec<Option<String>>> = Vec::new();
     for (k, v) in store.entries(&sel.map) {
         let lf = query::json::jsonflat_fields(&k, &v, &lkc);
-        let Some(j) = field_str(&lf, &join.left_col) else { continue };
+        let Some(j) = field_str(&lf, &join.left_col) else {
+            continue;
+        };
         let Some(rf) = index.get(&j) else { continue };
         let mut combined = lf.clone();
         combined.extend(rf.iter().cloned());
@@ -267,7 +302,11 @@ fn sql_join(sel: &query::sql::Select, store: &Store) -> (Vec<String>, Vec<Vec<Op
             if cols.is_empty() {
                 cols = row.iter().map(|(c, _)| c.clone()).collect();
             }
-            rows.push(row.iter().map(|(_, val)| query::sql::fmt_value(val)).collect());
+            rows.push(
+                row.iter()
+                    .map(|(_, val)| query::sql::fmt_value(val))
+                    .collect(),
+            );
         }
     }
     (cols, rows)
@@ -310,16 +349,22 @@ fn error_response(error_code: i32, class_name: &str, message: &str) -> Vec<Frame
     let mut code = vec![0u8; 4];
     write_i32_le(&mut code, 0, error_code);
     vec![
-        Frame { flags: UNFRAGMENTED, content: hdr },
-        begin_frame(),                              // List<ErrorHolder> BEGIN
-        begin_frame(),                              // ErrorHolder BEGIN
-        Frame { flags: 0, content: code },          // error_code @0
+        Frame {
+            flags: UNFRAGMENTED,
+            content: hdr,
+        },
+        begin_frame(), // List<ErrorHolder> BEGIN
+        begin_frame(), // ErrorHolder BEGIN
+        Frame {
+            flags: 0,
+            content: code,
+        }, // error_code @0
         string_frame(class_name),
-        string_frame(message),                      // non-null message
-        begin_frame(),                              // stack-trace list BEGIN
-        end_frame(),                                // stack-trace list END (empty)
-        end_frame(),                                // ErrorHolder END
-        end_frame(),                                // List END
+        string_frame(message), // non-null message
+        begin_frame(),         // stack-trace list BEGIN
+        end_frame(),           // stack-trace list END (empty)
+        end_frame(),           // ErrorHolder END
+        end_frame(),           // List END
     ]
 }
 
@@ -334,7 +379,7 @@ fn is_quorum_gated_write(msg_type: i32) -> bool {
             | 196864 | 197888 | 197632 | 200448 // queue: offer, poll, remove, clear
             | 131328 | 131840                // multimap: put, remove (key-partitioned)
             | 1508864                        // ringbuffer: add
-            | 1901056                        // pncounter: add
+            | 1901056 // pncounter: add
     )
 }
 
@@ -353,10 +398,12 @@ fn replicate_state(
     if !rep.has_backups() || cluster.backups_of(partition).is_empty() {
         return false;
     }
-    rep.replicate(partition, conn_id, write_message(resp), move |op| Msg::BackupState {
-        op_id: op,
-        partition,
-        payload,
+    rep.replicate(partition, conn_id, write_message(resp), move |op| {
+        Msg::BackupState {
+            op_id: op,
+            partition,
+            payload,
+        }
     })
 }
 
@@ -379,11 +426,13 @@ fn mm_reply(
     let deferred = match replicator {
         Some(rep) if rep.has_backups() && !cluster.backups_of(partition).is_empty() => {
             let values = store.mm_get(&name, &key);
-            rep.replicate(partition, conn_id, write_message(&resp), move |op| Msg::BackupMm {
-                op_id: op,
-                name,
-                key,
-                values,
+            rep.replicate(partition, conn_id, write_message(&resp), move |op| {
+                Msg::BackupMm {
+                    op_id: op,
+                    name,
+                    key,
+                    values,
+                }
             })
         }
         _ => false,
@@ -461,7 +510,10 @@ fn uuid_response(msg_type: i32, uuid: (i64, i64)) -> Vec<Frame> {
     let mut c = vec![0u8; 30]; // type@0, corr@4, backupAcks@12, uuid@13 (17B)
     write_i32_le(&mut c, 0, msg_type);
     write_uuid(&mut c, 13, Some(uuid));
-    vec![Frame { flags: UNFRAGMENTED, content: c }]
+    vec![Frame {
+        flags: UNFRAGMENTED,
+        content: c,
+    }]
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -497,12 +549,18 @@ pub fn dispatch(
         4864 => {
             let schema = codecs::schema::decode_schema(&req, 1);
             schemas.put(schema);
-            vec![codecs::schema::encode_uuid_list_response(4865, &[cfg.members[cfg.self_index].uuid])]
+            vec![codecs::schema::encode_uuid_list_response(
+                4865,
+                &[cfg.members[cfg.self_index].uuid],
+            )]
         }
         // ClientFetchSchema -> the schema (schemaId is a long @16)
         5120 => {
             let id = read_i64_le(&req[0].content, 16);
-            vec![codecs::schema::encode_fetch_schema_response(5121, schemas.get(id).as_ref())]
+            vec![codecs::schema::encode_fetch_schema_response(
+                5121,
+                schemas.get(id).as_ref(),
+            )]
         }
         // ClientSendAllSchemas -> empty ack (the Python client uses SendSchema)
         5376 => vec![empty_response(5377)],
@@ -526,8 +584,16 @@ pub fn dispatch(
         }
         // MapAddEntryListenerWithPredicate
         71424 => {
-            let (name, flags, include_value, predicate_data) = map::decode_add_entry_listener_with_predicate(&req);
-            broker.register_with_predicate(&name, conn_id, corr, flags, include_value, predicate_data);
+            let (name, flags, include_value, predicate_data) =
+                map::decode_add_entry_listener_with_predicate(&req);
+            broker.register_with_predicate(
+                &name,
+                conn_id,
+                corr,
+                flags,
+                include_value,
+                predicate_data,
+            );
             vec![uuid_response(71425, REGISTRATION_UUID)]
         }
         // MapAddPartitionLostListener
@@ -570,19 +636,32 @@ pub fn dispatch(
                     if let Some(v) = new_val {
                         store.put_ttl(&name, key.to_vec(), v.clone(), 0);
                         if broker.has_listeners(&name) {
-                            broker.publish(&name, if old.is_some() { map::UPDATED } else { map::ADDED }, key, Some(&v), old.as_deref(), store.schemas());
+                            broker.publish(
+                                &name,
+                                if old.is_some() {
+                                    map::UPDATED
+                                } else {
+                                    map::ADDED
+                                },
+                                key,
+                                Some(&v),
+                                old.as_deref(),
+                                store.schemas(),
+                            );
                         }
                         if broker.has_near_cache(&name) {
                             broker.invalidate(&name, key);
                         }
                         let mut resp = map::encode_execute_on_key_response(result.as_deref());
                         set_correlation_id(&mut resp, corr);
-                        if replicate_write(replicator, cluster, conn_id, &resp, key, |op| Msg::BackupPut {
-                            op_id: op,
-                            name: name.clone(),
-                            key: key.to_vec(),
-                            value: v,
-                            ttl_ms: 0,
+                        if replicate_write(replicator, cluster, conn_id, &resp, key, |op| {
+                            Msg::BackupPut {
+                                op_id: op,
+                                name: name.clone(),
+                                key: key.to_vec(),
+                                value: v,
+                                ttl_ms: 0,
+                            }
                         }) {
                             vec![]
                         } else {
@@ -614,7 +693,11 @@ pub fn dispatch(
                 let owner = computed % n;
                 eprintln!(
                     "PARTITION {} computed={computed} owner={owner} self={}",
-                    if owner == cfg.self_index as i32 { "OK" } else { "MISMATCH" },
+                    if owner == cfg.self_index as i32 {
+                        "OK"
+                    } else {
+                        "MISMATCH"
+                    },
                     cfg.self_index
                 );
             }
@@ -623,20 +706,33 @@ pub fn dispatch(
             let nc = broker.has_near_cache(&r.name);
             let old = store.put_ttl(&r.name, r.key.clone(), r.value.clone(), ttl);
             if el {
-                let etype = if old.is_some() { map::UPDATED } else { map::ADDED };
-                broker.publish(&r.name, etype, &r.key, Some(&r.value), old.as_deref(), store.schemas());
+                let etype = if old.is_some() {
+                    map::UPDATED
+                } else {
+                    map::ADDED
+                };
+                broker.publish(
+                    &r.name,
+                    etype,
+                    &r.key,
+                    Some(&r.value),
+                    old.as_deref(),
+                    store.schemas(),
+                );
             }
             if nc {
                 broker.invalidate(&r.name, &r.key);
             }
             let mut resp = map::encode_put_response(old.as_deref());
             set_correlation_id(&mut resp, corr);
-            if replicate_write(replicator, cluster, conn_id, &resp, &r.key, |op| Msg::BackupPut {
-                op_id: op,
-                name: r.name.clone(),
-                key: r.key.clone(),
-                value: r.value.clone(),
-                ttl_ms: ttl,
+            if replicate_write(replicator, cluster, conn_id, &resp, &r.key, |op| {
+                Msg::BackupPut {
+                    op_id: op,
+                    name: r.name.clone(),
+                    key: r.key.clone(),
+                    value: r.value.clone(),
+                    ttl_ms: ttl,
+                }
             }) {
                 vec![] // deferred: response delivered after backups ack
             } else {
@@ -655,7 +751,14 @@ pub fn dispatch(
             let old = store.remove(&r.name, &r.key);
             if old.is_some() {
                 if broker.has_listeners(&r.name) {
-                    broker.publish(&r.name, map::REMOVED, &r.key, None, old.as_deref(), store.schemas());
+                    broker.publish(
+                        &r.name,
+                        map::REMOVED,
+                        &r.key,
+                        None,
+                        old.as_deref(),
+                        store.schemas(),
+                    );
                 }
                 if broker.has_near_cache(&r.name) {
                     broker.invalidate(&r.name, &r.key);
@@ -663,10 +766,12 @@ pub fn dispatch(
             }
             let mut resp = map::data_response(66305, old.as_deref());
             set_correlation_id(&mut resp, corr);
-            if replicate_write(replicator, cluster, conn_id, &resp, &r.key, |op| Msg::BackupRemove {
-                op_id: op,
-                name: r.name.clone(),
-                key: r.key.clone(),
+            if replicate_write(replicator, cluster, conn_id, &resp, &r.key, |op| {
+                Msg::BackupRemove {
+                    op_id: op,
+                    name: r.name.clone(),
+                    key: r.key.clone(),
+                }
             }) {
                 vec![]
             } else {
@@ -679,7 +784,14 @@ pub fn dispatch(
             let old = store.remove(&r.name, &r.key);
             if old.is_some() {
                 if broker.has_listeners(&r.name) {
-                    broker.publish(&r.name, map::REMOVED, &r.key, None, old.as_deref(), store.schemas());
+                    broker.publish(
+                        &r.name,
+                        map::REMOVED,
+                        &r.key,
+                        None,
+                        old.as_deref(),
+                        store.schemas(),
+                    );
                 }
                 if broker.has_near_cache(&r.name) {
                     broker.invalidate(&r.name, &r.key);
@@ -687,10 +799,12 @@ pub fn dispatch(
             }
             let mut resp = empty_response(67841);
             set_correlation_id(&mut resp, corr);
-            if replicate_write(replicator, cluster, conn_id, &resp, &r.key, |op| Msg::BackupRemove {
-                op_id: op,
-                name: r.name.clone(),
-                key: r.key.clone(),
+            if replicate_write(replicator, cluster, conn_id, &resp, &r.key, |op| {
+                Msg::BackupRemove {
+                    op_id: op,
+                    name: r.name.clone(),
+                    key: r.key.clone(),
+                }
             }) {
                 vec![]
             } else {
@@ -700,12 +814,18 @@ pub fn dispatch(
         // MapContainsKey -> bool
         67072 => {
             let r = map::decode_get(&req);
-            vec![map::bool_response(67073, store.contains_key(&r.name, &r.key))]
+            vec![map::bool_response(
+                67073,
+                store.contains_key(&r.name, &r.key),
+            )]
         }
         // MapContainsValue -> bool
         67328 => {
             let (name, value) = map::decode_name_value(&req);
-            vec![map::bool_response(67329, store.contains_value(&name, &value))]
+            vec![map::bool_response(
+                67329,
+                store.contains_value(&name, &value),
+            )]
         }
         // MapSize -> int
         76288 => {
@@ -842,7 +962,8 @@ pub fn dispatch(
         // MapProject -> List<Data>
         80640 => {
             let (name, projection_data) = codecs::map::decode_project(&req);
-            if let Some(attr_path) = query::agg::extract_attribute_from_projection(&projection_data) {
+            if let Some(attr_path) = query::agg::extract_attribute_from_projection(&projection_data)
+            {
                 let entries = store.entries(&name);
                 let projected = query::agg::execute_projection(&attr_path, &entries, schemas);
                 vec![codecs::map::encode_project_response(&projected)]
@@ -852,8 +973,10 @@ pub fn dispatch(
         }
         // MapProjectWithPredicate -> List<Data>
         80896 => {
-            let (name, projection_data, predicate_data) = codecs::map::decode_project_with_predicate(&req);
-            if let Some(attr_path) = query::agg::extract_attribute_from_projection(&projection_data) {
+            let (name, projection_data, predicate_data) =
+                codecs::map::decode_project_with_predicate(&req);
+            if let Some(attr_path) = query::agg::extract_attribute_from_projection(&projection_data)
+            {
                 let matches = store.query(&name, &query::decode(&predicate_data), schemas);
                 let projected = query::agg::execute_projection(&attr_path, &matches, schemas);
                 vec![codecs::map::encode_project_response(&projected)]
@@ -870,20 +993,25 @@ pub fn dispatch(
                 let data = serialization::compact::encode_scalar(&val);
                 vec![codecs::map::encode_aggregate_response(&data)]
             } else {
-                let null_data = serialization::compact::encode_scalar(&serialization::compact::FieldValue::Null);
+                let null_data = serialization::compact::encode_scalar(
+                    &serialization::compact::FieldValue::Null,
+                );
                 vec![codecs::map::encode_aggregate_response(&null_data)]
             }
         }
         // MapAggregateWithPredicate -> Data
         87808 => {
-            let (name, aggregator_data, predicate_data) = codecs::map::decode_aggregate_with_predicate(&req);
+            let (name, aggregator_data, predicate_data) =
+                codecs::map::decode_aggregate_with_predicate(&req);
             if let Some(agg) = query::agg::decode_aggregator(&aggregator_data) {
                 let matches = store.query(&name, &query::decode(&predicate_data), schemas);
                 let val = query::agg::execute_aggregation(&agg, &matches, schemas);
                 let data = serialization::compact::encode_scalar(&val);
                 vec![codecs::map::encode_aggregate_response(&data)]
             } else {
-                let null_data = serialization::compact::encode_scalar(&serialization::compact::FieldValue::Null);
+                let null_data = serialization::compact::encode_scalar(
+                    &serialization::compact::FieldValue::Null,
+                );
                 vec![codecs::map::encode_aggregate_response(&null_data)]
             }
         }
@@ -895,7 +1023,8 @@ pub fn dispatch(
         }
         // MCGetTimedMemberState
         2099968 => {
-            let json = format!(r#"{{
+            let json = format!(
+                r#"{{
                 "memberState": {{
                     "address": "127.0.0.1:5701",
                     "uuid": "{}",
@@ -904,7 +1033,12 @@ pub fn dispatch(
                 }},
                 "clusterState": "ACTIVE",
                 "master": true
-            }}"#, format!("{:016x}{:016x}", cfg.members[cfg.self_index].uuid.0, cfg.members[cfg.self_index].uuid.1));
+            }}"#,
+                format!(
+                    "{:016x}{:016x}",
+                    cfg.members[cfg.self_index].uuid.0, cfg.members[cfg.self_index].uuid.1
+                )
+            );
             vec![mc::encode_get_timed_member_state_response(&json)]
         }
         // CacheGet
@@ -917,7 +1051,11 @@ pub fn dispatch(
         1250048 => {
             let (name, key, value, get) = cache::decode_cache_put(&req);
             let old = store.put(&name, key, value);
-            vec![cache::encode_cache_put_response(if get { old.as_deref() } else { None })]
+            vec![cache::encode_cache_put_response(if get {
+                old.as_deref()
+            } else {
+                None
+            })]
         }
         // CacheRemove
         1250816 => {
@@ -938,16 +1076,24 @@ pub fn dispatch(
         525568 => {
             let (name, uuid, callable) = codecs::executor::decode_submit_to_partition(&req);
             let response = executor.submit_to_partition(&name, uuid, callable);
-            vec![codecs::executor::encode_submit_response(525569, response.as_deref())]
+            vec![codecs::executor::encode_submit_response(
+                525569,
+                response.as_deref(),
+            )]
         }
         // ExecutorServiceSubmitToMember
         525824 => {
-            let (name, uuid, callable, _member_uuid) = codecs::executor::decode_submit_to_member(&req);
+            let (name, uuid, callable, _member_uuid) =
+                codecs::executor::decode_submit_to_member(&req);
             let response = executor.submit_to_member(&name, uuid, callable);
-            vec![codecs::executor::encode_submit_response(525825, response.as_deref())]
+            vec![codecs::executor::encode_submit_response(
+                525825,
+                response.as_deref(),
+            )]
         }
         // TransactionCreate (1376768)
-        1376768 | 1312000 => { // TransactionCreate and XATransactionCreate
+        1376768 | 1312000 => {
+            // TransactionCreate and XATransactionCreate
             let uuid = txn_service.begin();
             vec![codecs::txn::encode_transaction_create_response(uuid)]
         }
@@ -968,7 +1114,9 @@ pub fn dispatch(
             let (name, txn_id, key, value) = codecs::txn::decode_transactional_map_put(&req);
             let old = store.get(&name, &key);
             txn_service.buffer_put(txn_id, name, key, value);
-            vec![codecs::txn::encode_transactional_map_put_response(old.as_deref())]
+            vec![codecs::txn::encode_transactional_map_put_response(
+                old.as_deref(),
+            )]
         }
         // JetSubmitJob (16646400)
         16646400 => {
@@ -1005,7 +1153,10 @@ pub fn dispatch(
         }
         393728 => {
             let (name, value) = map::decode_name_value(&req);
-            vec![map::bool_response(393729, store.set_contains(&name, &value))]
+            vec![map::bool_response(
+                393729,
+                store.set_contains(&name, &value),
+            )]
         }
         393472 => {
             let name = map::decode_name(&req);
@@ -1013,12 +1164,23 @@ pub fn dispatch(
         }
         395776 => {
             let name = map::decode_name(&req);
-            vec![map::encode_data_list_response(395777, &store.set_get_all(&name))]
+            vec![map::encode_data_list_response(
+                395777,
+                &store.set_get_all(&name),
+            )]
         }
         395520 => {
             let name = map::decode_name(&req);
             store.set_clear(&name);
-            aux_reply(&name, empty_response(395521), corr, store, cluster, replicator, conn_id)
+            aux_reply(
+                &name,
+                empty_response(395521),
+                corr,
+                store,
+                cluster,
+                replicator,
+                conn_id,
+            )
         }
         // ---- MultiMap (Set semantics) ----
         131328 => {
@@ -1026,11 +1188,23 @@ pub fn dispatch(
             let key = req[2].content.clone();
             let value = req[3].content.clone();
             let ok = store.mm_put(&name, key.clone(), value);
-            mm_reply(name, key, map::bool_response(131329, ok), corr, store, cluster, replicator, conn_id)
+            mm_reply(
+                name,
+                key,
+                map::bool_response(131329, ok),
+                corr,
+                store,
+                cluster,
+                replicator,
+                conn_id,
+            )
         }
         131584 => {
             let (name, key) = map::decode_name_key(&req);
-            vec![map::encode_data_list_response(131585, &store.mm_get(&name, &key))]
+            vec![map::encode_data_list_response(
+                131585,
+                &store.mm_get(&name, &key),
+            )]
         }
         131840 => {
             let (name, key) = map::decode_name_key(&req);
@@ -1046,7 +1220,10 @@ pub fn dispatch(
         }
         134144 => {
             let (name, key) = map::decode_name_key(&req);
-            vec![map::int_response(134145, store.mm_value_count(&name, &key) as i32)]
+            vec![map::int_response(
+                134145,
+                store.mm_value_count(&name, &key) as i32,
+            )]
         }
         // ---- Distributed List ----
         328704 => {
@@ -1057,7 +1234,10 @@ pub fn dispatch(
         331520 => {
             let name = map::decode_name(&req);
             let index = read_i32_le(&req[0].content, 16); // ListGet index @16
-            vec![map::data_response(331521, store.list_get(&name, index).as_deref())]
+            vec![map::data_response(
+                331521,
+                store.list_get(&name, index).as_deref(),
+            )]
         }
         327936 => {
             let name = map::decode_name(&req);
@@ -1065,7 +1245,10 @@ pub fn dispatch(
         }
         328192 => {
             let (name, value) = map::decode_name_value(&req);
-            vec![map::bool_response(328193, store.list_contains(&name, &value))]
+            vec![map::bool_response(
+                328193,
+                store.list_contains(&name, &value),
+            )]
         }
         328960 => {
             let (name, value) = map::decode_name_value(&req);
@@ -1074,7 +1257,10 @@ pub fn dispatch(
         }
         330240 => {
             let name = map::decode_name(&req);
-            vec![map::encode_data_list_response(330241, &store.list_get_all(&name))]
+            vec![map::encode_data_list_response(
+                330241,
+                &store.list_get_all(&name),
+            )]
         }
         331008 => {
             let name = map::decode_name(&req);
@@ -1083,7 +1269,15 @@ pub fn dispatch(
         329984 => {
             let name = map::decode_name(&req);
             store.list_clear(&name);
-            aux_reply(&name, empty_response(329985), corr, store, cluster, replicator, conn_id)
+            aux_reply(
+                &name,
+                empty_response(329985),
+                corr,
+                store,
+                cluster,
+                replicator,
+                conn_id,
+            )
         }
         // ---- Distributed Queue ----
         196864 => {
@@ -1098,7 +1292,10 @@ pub fn dispatch(
         }
         198400 => {
             let name = map::decode_name(&req);
-            vec![map::data_response(198401, store.queue_peek(&name).as_deref())]
+            vec![map::data_response(
+                198401,
+                store.queue_peek(&name).as_deref(),
+            )]
         }
         197376 => {
             let name = map::decode_name(&req);
@@ -1111,7 +1308,10 @@ pub fn dispatch(
         }
         199424 => {
             let (name, value) = map::decode_name_value(&req);
-            vec![map::bool_response(199425, store.queue_contains(&name, &value))]
+            vec![map::bool_response(
+                199425,
+                store.queue_contains(&name, &value),
+            )]
         }
         201728 => {
             let name = map::decode_name(&req);
@@ -1120,7 +1320,15 @@ pub fn dispatch(
         200448 => {
             let name = map::decode_name(&req);
             store.queue_clear(&name);
-            aux_reply(&name, empty_response(200449), corr, store, cluster, replicator, conn_id)
+            aux_reply(
+                &name,
+                empty_response(200449),
+                corr,
+                store,
+                cluster,
+                replicator,
+                conn_id,
+            )
         }
         // ---- ReplicatedMap (single-node: an IMap in a private namespace) ----
         852224 => {
@@ -1130,32 +1338,58 @@ pub fn dispatch(
         }
         853504 => {
             let (n, k) = map::decode_name_key(&req);
-            vec![map::data_response(853505, store.get(&repl(&n), &k).as_deref())]
+            vec![map::data_response(
+                853505,
+                store.get(&repl(&n), &k).as_deref(),
+            )]
         }
         853760 => {
             let (n, k) = map::decode_name_key(&req);
-            vec![map::data_response(853761, store.remove(&repl(&n), &k).as_deref())]
+            vec![map::data_response(
+                853761,
+                store.remove(&repl(&n), &k).as_deref(),
+            )]
         }
         852992 => {
             let (n, k) = map::decode_name_key(&req);
-            vec![map::bool_response(852993, store.contains_key(&repl(&n), &k))]
+            vec![map::bool_response(
+                852993,
+                store.contains_key(&repl(&n), &k),
+            )]
         }
         853248 => {
             let (n, v) = map::decode_name_value(&req);
-            vec![map::bool_response(853249, store.contains_value(&repl(&n), &v))]
+            vec![map::bool_response(
+                853249,
+                store.contains_value(&repl(&n), &v),
+            )]
         }
-        852480 => vec![map::int_response(852481, store.size(&repl(&map::decode_name(&req))) as i32)],
-        852736 => vec![map::bool_response(852737, store.is_empty(&repl(&map::decode_name(&req))))],
+        852480 => vec![map::int_response(
+            852481,
+            store.size(&repl(&map::decode_name(&req))) as i32,
+        )],
+        852736 => vec![map::bool_response(
+            852737,
+            store.is_empty(&repl(&map::decode_name(&req))),
+        )],
         854272 => {
             store.clear(&repl(&map::decode_name(&req)));
             vec![empty_response(854273)]
         }
         855808 => {
-            let ks: Vec<Vec<u8>> = store.entries(&repl(&map::decode_name(&req))).into_iter().map(|(k, _)| k).collect();
+            let ks: Vec<Vec<u8>> = store
+                .entries(&repl(&map::decode_name(&req)))
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect();
             vec![map::encode_data_list_response(855809, &ks)]
         }
         856064 => {
-            let vs: Vec<Vec<u8>> = store.entries(&repl(&map::decode_name(&req))).into_iter().map(|(_, v)| v).collect();
+            let vs: Vec<Vec<u8>> = store
+                .entries(&repl(&map::decode_name(&req)))
+                .into_iter()
+                .map(|(_, v)| v)
+                .collect();
             vec![map::encode_data_list_response(856065, &vs)]
         }
         856320 => {
@@ -1171,19 +1405,40 @@ pub fn dispatch(
         1509120 => {
             let n = map::decode_name(&req);
             let seq = read_i64_le(&req[0].content, 16);
-            vec![map::data_response(1509121, store.rb_read_one(&n, seq).as_deref())]
+            vec![map::data_response(
+                1509121,
+                store.rb_read_one(&n, seq).as_deref(),
+            )]
         }
-        1507584 => vec![map::long_response(1507585, store.rb_size(&map::decode_name(&req)))],
-        1508352 => vec![map::long_response(1508353, store.rb_capacity(&map::decode_name(&req)))],
-        1507840 => vec![map::long_response(1507841, store.rb_tail(&map::decode_name(&req)))],
-        1508096 => vec![map::long_response(1508097, store.rb_head(&map::decode_name(&req)))],
+        1507584 => vec![map::long_response(
+            1507585,
+            store.rb_size(&map::decode_name(&req)),
+        )],
+        1508352 => vec![map::long_response(
+            1508353,
+            store.rb_capacity(&map::decode_name(&req)),
+        )],
+        1507840 => vec![map::long_response(
+            1507841,
+            store.rb_tail(&map::decode_name(&req)),
+        )],
+        1508096 => vec![map::long_response(
+            1508097,
+            store.rb_head(&map::decode_name(&req)),
+        )],
         // ---- PNCounter ----
         // PNCounterGetConfiguredReplicaCount -> int (we run a single replica)
         1901312 => vec![map::int_response(1901313, 1)],
         1900800 => {
             let uuid = cfg.members[cfg.self_index].uuid;
             let v = store.pn_get(&map::decode_name(&req));
-            vec![map::pncounter_response(1900801, v, 1, uuid, store.pn_tick())]
+            vec![map::pncounter_response(
+                1900801,
+                v,
+                1,
+                uuid,
+                store.pn_tick(),
+            )]
         }
         1901056 => {
             let n = map::decode_name(&req);
@@ -1217,15 +1472,36 @@ pub fn dispatch(
                         store.entries(&sel.map)
                     };
                     let mapping = crate::catalog::get_mapping(&sel.map);
-                    let star_cols: Vec<String> =
-                        mapping.as_ref().map(|m| m.columns.iter().map(|(n, _)| n.clone()).collect()).unwrap_or_default();
+                    let star_cols: Vec<String> = mapping
+                        .as_ref()
+                        .map(|m| m.columns.iter().map(|(n, _)| n.clone()).collect())
+                        .unwrap_or_default();
                     // First mapping column is the key (our INSERT convention).
-                    let key_col = mapping.as_ref().and_then(|m| m.columns.first().map(|(n, _)| n.clone()));
-                    let json = mapping.as_ref().map(|m| m.value_format() == "json-flat").unwrap_or(false);
+                    let key_col = mapping
+                        .as_ref()
+                        .and_then(|m| m.columns.first().map(|(n, _)| n.clone()));
+                    let json = mapping
+                        .as_ref()
+                        .map(|m| m.value_format() == "json-flat")
+                        .unwrap_or(false);
                     let (cols, rows) = if json {
-                        query::sql::execute_with(&sel, &entries, schemas, &query::json::JsonExtractor, &star_cols, key_col.as_deref())
+                        query::sql::execute_with(
+                            &sel,
+                            &entries,
+                            schemas,
+                            &query::json::JsonExtractor,
+                            &star_cols,
+                            key_col.as_deref(),
+                        )
                     } else {
-                        query::sql::execute_with(&sel, &entries, schemas, &AutoExtractor, &star_cols, key_col.as_deref())
+                        query::sql::execute_with(
+                            &sel,
+                            &entries,
+                            schemas,
+                            &AutoExtractor,
+                            &star_cols,
+                            key_col.as_deref(),
+                        )
                     };
                     vec![codecs::sql::encode_execute_response(&cols, &rows)]
                 }
@@ -1264,7 +1540,10 @@ pub fn dispatch(
         // not hang (covers e.g. CreateProxy). The live client reveals any op
         // that needs a richer reply (per plan's empirical-risk note).
         other => {
-            eprintln!("UNKNOWN op type {other} (0x{other:06x}) -> empty ack {}", other + 1);
+            eprintln!(
+                "UNKNOWN op type {other} (0x{other:06x}) -> empty ack {}",
+                other + 1
+            );
             vec![empty_response(other + 1)]
         }
     };
@@ -1281,7 +1560,10 @@ mod tests {
     fn request(msg_type: i32, corr: i64) -> Vec<Frame> {
         let mut c = vec![0u8; 16];
         write_i32_le(&mut c, 0, msg_type);
-        let mut f = vec![Frame { flags: UNFRAGMENTED, content: c }];
+        let mut f = vec![Frame {
+            flags: UNFRAGMENTED,
+            content: c,
+        }];
         set_correlation_id(&mut f, corr);
         f
     }
@@ -1290,7 +1572,10 @@ mod tests {
         let mut c = vec![0u8; 36];
         write_i32_le(&mut c, 0, 256);
         let mut f = vec![
-            Frame { flags: UNFRAGMENTED, content: c },
+            Frame {
+                flags: UNFRAGMENTED,
+                content: c,
+            },
             protocol::primitives::string_frame("dev"), // clusterName matches default
             protocol::primitives::null_frame(),        // username
             protocol::primitives::null_frame(),        // password
@@ -1323,7 +1608,13 @@ mod tests {
         Cluster::new(
             (0..n)
                 .map(|i| {
-                    MemberInfo::new((1, (i + 1) as i64), "127.0.0.1".into(), 5701 + i as i32, 7701 + i as i32, i as u64)
+                    MemberInfo::new(
+                        (1, (i + 1) as i64),
+                        "127.0.0.1".into(),
+                        5701 + i as i32,
+                        7701 + i as i32,
+                        i as u64,
+                    )
                 })
                 .collect(),
             1,
@@ -1334,7 +1625,11 @@ mod tests {
     /// Single-member cluster matching `Cfg::single()`.
     fn single_cluster() -> Cluster {
         use crate::membership::MemberInfo;
-        Cluster::new(vec![MemberInfo::new((1, 1), "127.0.0.1".into(), 5701, 7701, 0)], 0, 1)
+        Cluster::new(
+            vec![MemberInfo::new((1, 1), "127.0.0.1".into(), 5701, 7701, 0)],
+            0,
+            1,
+        )
     }
 
     #[test]
@@ -1342,7 +1637,10 @@ mod tests {
         let table = cluster_of(3).partition_table();
         assert_eq!(table.len(), 3);
         let total: usize = table.iter().map(|(_, p)| p.len()).sum();
-        assert_eq!(total, PARTITION_COUNT as usize, "every partition assigned exactly once");
+        assert_eq!(
+            total, PARTITION_COUNT as usize,
+            "every partition assigned exactly once"
+        );
         for (i, (_, parts)) in table.iter().enumerate() {
             for &p in parts {
                 assert_eq!((p as usize) % 3, i, "member {i} owns p%3==i");
@@ -1354,19 +1652,40 @@ mod tests {
     fn auth_reports_self_member_identity() {
         // member index 2 should report its own uuid (1,3) in the response header.
         let cfg = cluster_cfg(3, 2);
-        let out = dispatch(auth_request(1), 0, &Store::new(), &cfg, &EventBroker::new((1, 1)), &SchemaService::new(), &cluster_of(3), None, &crate::executor::ExecutorService::new(), &crate::txn::TransactionService::new(), &jet::executor::JetService::new());
+        let out = dispatch(
+            auth_request(1),
+            0,
+            &Store::new(),
+            &cfg,
+            &EventBroker::new((1, 1)),
+            &SchemaService::new(),
+            &cluster_of(3),
+            None,
+            &crate::executor::ExecutorService::new(),
+            &crate::txn::TransactionService::new(),
+            &jet::executor::JetService::new(),
+        );
         assert_eq!(msg_type(&out[0]), 257);
         // member_uuid lives at offset 14 (after backupAcks@12 + status@13).
-        assert_eq!(protocol::fixed::read_uuid(&out[0][0].content, 14), Some((1, 3)));
+        assert_eq!(
+            protocol::fixed::read_uuid(&out[0][0].content, 14),
+            Some((1, 3))
+        );
     }
 
     #[test]
     fn http_health_endpoints() {
         assert_eq!(http_health("/hazelcast/health/node-state", 1).2, "ACTIVE");
-        assert_eq!(http_health("/hazelcast/health/cluster-state", 3).2, "ACTIVE");
+        assert_eq!(
+            http_health("/hazelcast/health/cluster-state", 3).2,
+            "ACTIVE"
+        );
         assert_eq!(http_health("/hazelcast/health/cluster-safe", 1).2, "TRUE");
         assert_eq!(http_health("/hazelcast/health/cluster-size", 3).2, "3");
-        assert_eq!(http_health("/hazelcast/health/migration-queue-size", 1).2, "0");
+        assert_eq!(
+            http_health("/hazelcast/health/migration-queue-size", 1).2,
+            "0"
+        );
         let (status, ctype, body) = http_health("/hazelcast/health", 5);
         assert_eq!(status, 200);
         assert_eq!(ctype, "application/json");
@@ -1377,7 +1696,19 @@ mod tests {
     #[test]
     fn auth_replies_257_with_echoed_correlation() {
         let store = Store::new();
-        let out = dispatch(auth_request(99), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster(), None, &crate::executor::ExecutorService::new(), &crate::txn::TransactionService::new(), &jet::executor::JetService::new());
+        let out = dispatch(
+            auth_request(99),
+            0,
+            &store,
+            &Cfg::single(),
+            &EventBroker::new((1, 1)),
+            &SchemaService::new(),
+            &single_cluster(),
+            None,
+            &crate::executor::ExecutorService::new(),
+            &crate::txn::TransactionService::new(),
+            &jet::executor::JetService::new(),
+        );
         assert_eq!(out.len(), 1);
         assert_eq!(msg_type(&out[0]), 257);
         assert_eq!(correlation_id(&out[0]), 99);
@@ -1386,7 +1717,19 @@ mod tests {
     #[test]
     fn cluster_view_replies_response_plus_two_events() {
         let store = Store::new();
-        let out = dispatch(request(768, 5), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster(), None, &crate::executor::ExecutorService::new(), &crate::txn::TransactionService::new(), &jet::executor::JetService::new());
+        let out = dispatch(
+            request(768, 5),
+            0,
+            &store,
+            &Cfg::single(),
+            &EventBroker::new((1, 1)),
+            &SchemaService::new(),
+            &single_cluster(),
+            None,
+            &crate::executor::ExecutorService::new(),
+            &crate::txn::TransactionService::new(),
+            &jet::executor::JetService::new(),
+        );
         assert_eq!(out.len(), 3);
         assert_eq!(msg_type(&out[0]), 769);
         assert_eq!(msg_type(&out[1]), 770);
@@ -1402,7 +1745,15 @@ mod tests {
         // 3 members, quorum 2; kill two so only one is live.
         let mut cluster = Cluster::new(
             (0..3)
-                .map(|i| MemberInfo::new((1, i + 1), "127.0.0.1".into(), 5701 + i as i32, 7701 + i as i32, i as u64))
+                .map(|i| {
+                    MemberInfo::new(
+                        (1, i + 1),
+                        "127.0.0.1".into(),
+                        5701 + i as i32,
+                        7701 + i as i32,
+                        i as u64,
+                    )
+                })
                 .collect(),
             1,
             2,
@@ -1411,7 +1762,19 @@ mod tests {
         cluster.remove_member_by_uuid((1, 3));
         assert!(!cluster.has_quorum());
         let store = Store::new();
-        let out = dispatch(put_request("m", &[1], &[9], 7), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &cluster, None, &crate::executor::ExecutorService::new(), &crate::txn::TransactionService::new(), &jet::executor::JetService::new());
+        let out = dispatch(
+            put_request("m", &[1], &[9], 7),
+            0,
+            &store,
+            &Cfg::single(),
+            &EventBroker::new((1, 1)),
+            &SchemaService::new(),
+            &cluster,
+            None,
+            &crate::executor::ExecutorService::new(),
+            &crate::txn::TransactionService::new(),
+            &jet::executor::JetService::new(),
+        );
         assert_eq!(out.len(), 1);
         assert_eq!(msg_type(&out[0]), 0, "below quorum -> exception (type 0)");
         assert_eq!(correlation_id(&out[0]), 7);
@@ -1423,7 +1786,10 @@ mod tests {
         let mut c = vec![0u8; 32]; // threadId@16, ttl@24
         write_i32_le(&mut c, 0, 65792);
         let mut f = vec![
-            Frame { flags: UNFRAGMENTED, content: c },
+            Frame {
+                flags: UNFRAGMENTED,
+                content: c,
+            },
             protocol::primitives::string_frame(name),
             protocol::primitives::data_frame(key),
             protocol::primitives::data_frame(value),
@@ -1436,7 +1802,10 @@ mod tests {
         let mut c = vec![0u8; 24]; // threadId@16
         write_i32_le(&mut c, 0, 66048);
         let mut f = vec![
-            Frame { flags: UNFRAGMENTED, content: c },
+            Frame {
+                flags: UNFRAGMENTED,
+                content: c,
+            },
             protocol::primitives::string_frame(name),
             protocol::primitives::data_frame(key),
         ];
@@ -1448,7 +1817,19 @@ mod tests {
     fn local_backup_listener_replies_3841_with_uuid() {
         use protocol::fixed::read_uuid;
         let store = Store::new();
-        let out = dispatch(request(3840, 7), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster(), None, &crate::executor::ExecutorService::new(), &crate::txn::TransactionService::new(), &jet::executor::JetService::new());
+        let out = dispatch(
+            request(3840, 7),
+            0,
+            &store,
+            &Cfg::single(),
+            &EventBroker::new((1, 1)),
+            &SchemaService::new(),
+            &single_cluster(),
+            None,
+            &crate::executor::ExecutorService::new(),
+            &crate::txn::TransactionService::new(),
+            &jet::executor::JetService::new(),
+        );
         assert_eq!(msg_type(&out[0]), 3841);
         // initial frame must be 30 bytes with the registration UUID at offset 13
         assert_eq!(out[0][0].content.len(), 30);
@@ -1459,7 +1840,19 @@ mod tests {
     #[test]
     fn create_proxy_replies_empty_1025() {
         let store = Store::new();
-        let out = dispatch(request(1024, 8), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster(), None, &crate::executor::ExecutorService::new(), &crate::txn::TransactionService::new(), &jet::executor::JetService::new());
+        let out = dispatch(
+            request(1024, 8),
+            0,
+            &store,
+            &Cfg::single(),
+            &EventBroker::new((1, 1)),
+            &SchemaService::new(),
+            &single_cluster(),
+            None,
+            &crate::executor::ExecutorService::new(),
+            &crate::txn::TransactionService::new(),
+            &jet::executor::JetService::new(),
+        );
         assert_eq!(msg_type(&out[0]), 1025);
         assert_eq!(correlation_id(&out[0]), 8);
     }
@@ -1467,20 +1860,44 @@ mod tests {
     #[test]
     fn put_then_get_roundtrips_through_store() {
         let store = Store::new();
-        let out = dispatch(put_request("m", &[1, 2], &[9], 1), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster(), None, &crate::executor::ExecutorService::new(), &crate::txn::TransactionService::new(), &jet::executor::JetService::new());
+        let out = dispatch(
+            put_request("m", &[1, 2], &[9], 1),
+            0,
+            &store,
+            &Cfg::single(),
+            &EventBroker::new((1, 1)),
+            &SchemaService::new(),
+            &single_cluster(),
+            None,
+            &crate::executor::ExecutorService::new(),
+            &crate::txn::TransactionService::new(),
+            &jet::executor::JetService::new(),
+        );
         assert_eq!(msg_type(&out[0]), 65793);
         assert!(out[0][1].is_null()); // no prior value
 
-        let out = dispatch(get_request("m", &[1, 2], 2), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &SchemaService::new(), &single_cluster(), None, &crate::executor::ExecutorService::new(), &crate::txn::TransactionService::new(), &jet::executor::JetService::new());
+        let out = dispatch(
+            get_request("m", &[1, 2], 2),
+            0,
+            &store,
+            &Cfg::single(),
+            &EventBroker::new((1, 1)),
+            &SchemaService::new(),
+            &single_cluster(),
+            None,
+            &crate::executor::ExecutorService::new(),
+            &crate::txn::TransactionService::new(),
+            &jet::executor::JetService::new(),
+        );
         assert_eq!(msg_type(&out[0]), 66049);
         assert_eq!(out[0][1].content, vec![9]);
     }
 
     #[test]
     fn test_project_and_aggregate_handlers() {
-        use serialization::schema::{FieldDescriptor, Schema, INT32, STRING};
         use protocol::primitives::{data_frame, string_frame};
-        
+        use serialization::schema::{FieldDescriptor, Schema, INT32, STRING};
+
         let store = Store::new();
         let schemas = SchemaService::new();
         let schema = Schema::new(
@@ -1500,14 +1917,38 @@ mod tests {
             payload.push(5);
             payload.extend_from_slice(&(dept.len() as u32).to_be_bytes());
             payload.extend_from_slice(dept.as_bytes());
-            
+
             let mut v = vec![0u8; serialization::DATA_OFFSET];
             v.extend_from_slice(&payload);
             v
         };
 
-        dispatch(put_request("emp", &[1], &helper("sales", 100), 1), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &schemas, &single_cluster(), None, &crate::executor::ExecutorService::new(), &crate::txn::TransactionService::new(), &jet::executor::JetService::new());
-        dispatch(put_request("emp", &[2], &helper("sales", 200), 2), 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &schemas, &single_cluster(), None, &crate::executor::ExecutorService::new(), &crate::txn::TransactionService::new(), &jet::executor::JetService::new());
+        dispatch(
+            put_request("emp", &[1], &helper("sales", 100), 1),
+            0,
+            &store,
+            &Cfg::single(),
+            &EventBroker::new((1, 1)),
+            &schemas,
+            &single_cluster(),
+            None,
+            &crate::executor::ExecutorService::new(),
+            &crate::txn::TransactionService::new(),
+            &jet::executor::JetService::new(),
+        );
+        dispatch(
+            put_request("emp", &[2], &helper("sales", 200), 2),
+            0,
+            &store,
+            &Cfg::single(),
+            &EventBroker::new((1, 1)),
+            &schemas,
+            &single_cluster(),
+            None,
+            &crate::executor::ExecutorService::new(),
+            &crate::txn::TransactionService::new(),
+            &jet::executor::JetService::new(),
+        );
 
         let mut proj_payload = Vec::new();
         proj_payload.extend_from_slice(&(-32i32).to_be_bytes());
@@ -1515,43 +1956,73 @@ mod tests {
         proj_payload.push(1);
         proj_payload.extend_from_slice(&6i32.to_be_bytes());
         proj_payload.extend_from_slice(b"salary");
-        
+
         let mut proj_data = vec![0u8; 4];
         proj_data.extend_from_slice(&(-2i32).to_be_bytes());
         proj_data.push(1);
         proj_data.extend_from_slice(&proj_payload);
 
         let mut project_req = vec![
-            Frame { flags: UNFRAGMENTED, content: vec![0u8; 24] },
+            Frame {
+                flags: UNFRAGMENTED,
+                content: vec![0u8; 24],
+            },
             string_frame("emp"),
             data_frame(&proj_data),
         ];
         write_i32_le(&mut project_req[0].content, 0, 80640);
         set_correlation_id(&mut project_req, 3);
 
-        let out = dispatch(project_req, 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &schemas, &single_cluster(), None, &crate::executor::ExecutorService::new(), &crate::txn::TransactionService::new(), &jet::executor::JetService::new());
+        let out = dispatch(
+            project_req,
+            0,
+            &store,
+            &Cfg::single(),
+            &EventBroker::new((1, 1)),
+            &schemas,
+            &single_cluster(),
+            None,
+            &crate::executor::ExecutorService::new(),
+            &crate::txn::TransactionService::new(),
+            &jet::executor::JetService::new(),
+        );
         assert_eq!(msg_type(&out[0]), 80641);
         assert_eq!(out[0].len(), 5);
-        
+
         let mut agg_payload = Vec::new();
         agg_payload.extend_from_slice(&(-26i32).to_be_bytes());
         agg_payload.extend_from_slice(&4i32.to_be_bytes());
         agg_payload.push(0);
-        
+
         let mut agg_data = vec![0u8; 4];
         agg_data.extend_from_slice(&(-2i32).to_be_bytes());
         agg_data.push(1);
         agg_data.extend_from_slice(&agg_payload);
 
         let mut agg_req = vec![
-            Frame { flags: UNFRAGMENTED, content: vec![0u8; 24] },
+            Frame {
+                flags: UNFRAGMENTED,
+                content: vec![0u8; 24],
+            },
             string_frame("emp"),
             data_frame(&agg_data),
         ];
         write_i32_le(&mut agg_req[0].content, 0, 87552);
         set_correlation_id(&mut agg_req, 4);
 
-        let out = dispatch(agg_req, 0, &store, &Cfg::single(), &EventBroker::new((1, 1)), &schemas, &single_cluster(), None, &crate::executor::ExecutorService::new(), &crate::txn::TransactionService::new(), &jet::executor::JetService::new());
+        let out = dispatch(
+            agg_req,
+            0,
+            &store,
+            &Cfg::single(),
+            &EventBroker::new((1, 1)),
+            &schemas,
+            &single_cluster(),
+            None,
+            &crate::executor::ExecutorService::new(),
+            &crate::txn::TransactionService::new(),
+            &jet::executor::JetService::new(),
+        );
         assert_eq!(msg_type(&out[0]), 87553);
         let result_data = &out[0][1].content;
         let type_id = i32::from_be_bytes(result_data[4..8].try_into().unwrap());

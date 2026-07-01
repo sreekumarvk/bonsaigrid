@@ -26,8 +26,20 @@ pub struct MemberInfo {
 }
 
 impl MemberInfo {
-    pub fn new(uuid: (i64, i64), host: String, client_port: i32, member_port: i32, join_id: u64) -> MemberInfo {
-        MemberInfo { uuid, host, client_port, member_port, join_id }
+    pub fn new(
+        uuid: (i64, i64),
+        host: String,
+        client_port: i32,
+        member_port: i32,
+        join_id: u64,
+    ) -> MemberInfo {
+        MemberInfo {
+            uuid,
+            host,
+            client_port,
+            member_port,
+            join_id,
+        }
     }
 }
 
@@ -175,7 +187,12 @@ impl Cluster {
     /// Apply a master's published view (members **with** alive flags / tombstones)
     /// if it is newer. Preserving tombstones is essential: ring ownership must
     /// shift a dead member's partitions to its backup, not reshuffle by modulo.
-    pub fn set_view(&mut self, generation: u64, members: Vec<MemberInfo>, alive: Vec<bool>) -> bool {
+    pub fn set_view(
+        &mut self,
+        generation: u64,
+        members: Vec<MemberInfo>,
+        alive: Vec<bool>,
+    ) -> bool {
         if generation <= self.generation {
             return false;
         }
@@ -233,7 +250,13 @@ mod tests {
     use super::*;
 
     fn m(i: u64) -> MemberInfo {
-        MemberInfo::new((1, i as i64 + 1), "127.0.0.1".into(), 5701 + i as i32, 7701 + i as i32, i)
+        MemberInfo::new(
+            (1, i as i64 + 1),
+            "127.0.0.1".into(),
+            5701 + i as i32,
+            7701 + i as i32,
+            i,
+        )
     }
 
     #[test]

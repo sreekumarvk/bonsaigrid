@@ -39,7 +39,10 @@ pub fn encode_schema(out: &mut Vec<Frame>, schema: &Schema) {
         out.push(begin_frame());
         let mut initial = vec![0u8; 4];
         write_i32_le(&mut initial, 0, f.kind);
-        out.push(Frame { flags: 0, content: initial });
+        out.push(Frame {
+            flags: 0,
+            content: initial,
+        });
         out.push(string_frame(&f.name));
         out.push(end_frame());
     }
@@ -68,7 +71,13 @@ pub fn encode_uuid_list_response(msg_type: i32, uuids: &[(i64, i64)]) -> Vec<Fra
     for (i, u) in uuids.iter().enumerate() {
         write_uuid(&mut list, i * 17, Some(*u));
     }
-    vec![initial_frame(c), Frame { flags: 0, content: list }]
+    vec![
+        initial_frame(c),
+        Frame {
+            flags: 0,
+            content: list,
+        },
+    ]
 }
 
 #[cfg(test)]
@@ -84,7 +93,10 @@ mod tests {
         write_i32_le(&mut initial, 0, kind);
         vec![
             begin_frame(),
-            Frame { flags: 0, content: initial },
+            Frame {
+                flags: 0,
+                content: initial,
+            },
             string_frame(name),
             end_frame(),
         ]
@@ -93,7 +105,10 @@ mod tests {
     #[test]
     fn decodes_a_two_field_schema() {
         // header frame + Schema(BEGIN, typeName, listBEGIN, field*, listEND, END)
-        let mut frames = vec![Frame { flags: protocol::frame::UNFRAGMENTED, content: vec![0u8; 16] }];
+        let mut frames = vec![Frame {
+            flags: protocol::frame::UNFRAGMENTED,
+            content: vec![0u8; 16],
+        }];
         frames.push(begin_frame()); // schema BEGIN
         frames.push(string_frame("person"));
         frames.push(begin_frame()); // list BEGIN

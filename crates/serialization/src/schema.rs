@@ -46,7 +46,13 @@ pub struct FieldDescriptor {
 
 impl FieldDescriptor {
     pub fn new(name: String, kind: i32) -> FieldDescriptor {
-        FieldDescriptor { name, kind, offset: -1, index: -1, bit: -1 }
+        FieldDescriptor {
+            name,
+            kind,
+            offset: -1,
+            index: -1,
+            bit: -1,
+        }
     }
 }
 
@@ -69,7 +75,9 @@ impl Schema {
             .filter(|&i| fixed_byte_size(fields[i].kind).is_some())
             .collect();
         fixed.sort_by(|&a, &b| {
-            fixed_byte_size(fields[b].kind).unwrap().cmp(&fixed_byte_size(fields[a].kind).unwrap())
+            fixed_byte_size(fields[b].kind)
+                .unwrap()
+                .cmp(&fixed_byte_size(fields[a].kind).unwrap())
         });
         let mut offset: i32 = 0;
         for &i in &fixed {
@@ -103,7 +111,13 @@ impl Schema {
         }
         let var_field_count = index as usize;
 
-        Schema { type_name, fields, id, fixed_size_length, var_field_count }
+        Schema {
+            type_name,
+            fields,
+            id,
+            fixed_size_length,
+            var_field_count,
+        }
     }
 
     pub fn field(&self, name: &str) -> Option<&FieldDescriptor> {
@@ -210,7 +224,10 @@ mod tests {
     #[test]
     fn fixed_fields_packed_descending_by_size() {
         // a:INT32(4), b:INT64(8), c:INT8(1) -> by size desc: b@0, a@8, c@12.
-        let s = Schema::new("t".into(), vec![fd("a", INT32), fd("b", INT64), fd("c", INT8)]);
+        let s = Schema::new(
+            "t".into(),
+            vec![fd("a", INT32), fd("b", INT64), fd("c", INT8)],
+        );
         assert_eq!(s.field("b").unwrap().offset, 0);
         assert_eq!(s.field("a").unwrap().offset, 8);
         assert_eq!(s.field("c").unwrap().offset, 12);
