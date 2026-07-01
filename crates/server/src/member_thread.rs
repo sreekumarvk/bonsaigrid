@@ -100,7 +100,7 @@ impl Replicator {
     }
 }
 
-struct MemberHandler {
+pub(crate) struct MemberHandler {
     store: Arc<Store>,
     broker: Arc<EventBroker>,
     rx: spsc::Consumer<MemberJob>,
@@ -114,6 +114,36 @@ struct MemberHandler {
 }
 
 impl MemberHandler {
+    /// Assemble a handler from its collaborators. Shared by the production
+    /// [`spawn`] path and the deterministic simulation harness (`sim`), so both
+    /// exercise the identical state machine.
+    pub(crate) fn new(
+        store: Arc<Store>,
+        broker: Arc<EventBroker>,
+        rx: spsc::Consumer<MemberJob>,
+        coord: Coordinator,
+        events: spsc::Producer<ClusterEvent>,
+        merge_latest: bool,
+        peers: Peers,
+    ) -> MemberHandler {
+        MemberHandler {
+            store,
+            broker,
+            rx,
+            coord,
+            pending: Pending::new(),
+            events,
+            merge_latest,
+            peers,
+        }
+    }
+
+    /// The membership view this member currently believes (test/sim only).
+    #[cfg(test)]
+    pub(crate) fn cluster(&self) -> &Cluster {
+        &self.coord.cluster
+    }
+
     /// Forward the current membership view to the reactor.
     fn emit_view(&self) {
         let (generation, members) = self.coord.view_recs();
@@ -351,16 +381,7 @@ pub fn spawn(
         if let Some(info) = join_as {
             coord.set_pending_join(info);
         }
-        let handler = MemberHandler {
-            store,
-            broker,
-            rx,
-            coord,
-            pending: Pending::new(),
-            events,
-            merge_latest,
-            peers,
-        };
+        let handler = MemberHandler::new(store, broker, rx, coord, events, merge_latest, peers);
         let _ = transport.run(handler);
     })
 }

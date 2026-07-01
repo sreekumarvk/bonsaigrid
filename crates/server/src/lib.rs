@@ -14,4 +14,6 @@ pub mod membership;
 pub mod metrics;
 pub mod migration;
 pub mod reactor;
+#[cfg(test)]
+mod sim;
 pub mod txn;
