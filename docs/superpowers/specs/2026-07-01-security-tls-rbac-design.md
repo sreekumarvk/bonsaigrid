@@ -49,10 +49,12 @@ Two independent concerns, cleanly separated so each can be understood, tested,
 and shipped on its own:
 
 - **Transport security** (encryption + peer authentication): kTLS on both the
-  client reactor and the member↔member transport. Cluster-wide and
-  **all-or-nothing** — when TLS is enabled, every client and member socket is
-  TLS; plaintext exists only when TLS is disabled (dev/testing). This matches
-  Hazelcast's model and removes any need to sniff TLS-vs-plaintext on a port.
+  client reactor and the member↔member transport, controlled by a **three-state
+  per-node TLS mode** (`disabled` / `permissive` / `required`). `disabled` is
+  plaintext-only (today); `required` is TLS-only; `permissive` accepts *both* per
+  connection and exists purely to enable a **zero-downtime rolling migration**
+  from plaintext to TLS (see "Enabling TLS on a live cluster"). Steady state is
+  always `disabled` or `required`; `permissive` is transitional.
 - **Access control** (who + what): authentication (principals + hashed
   credentials) and authorization (RBAC), enforced in the dispatch path,
   independent of how the transport was secured. An authenticated principal is
@@ -82,27 +84,39 @@ that core). Per-connection lifecycle:
 
 1. **Accept** — unchanged (`AcceptMulti`). New connections begin in a
    `Handshaking` state instead of `Established`.
-2. **Handshake — userspace rustls, driven over io_uring, non-blocking.**
+2. **Mode branch on the first bytes.** The action depends on the node's TLS mode:
+   - `required` → always TLS handshake (below); a plaintext first byte is rejected.
+   - `disabled` → always plaintext (skip to step 4); the handshake state is a
+     no-op.
+   - `permissive` → **peek the first inbound byte**: `0x16` (TLS handshake record)
+     → TLS handshake; the `CP2` preamble (`0x43 0x50 0x32`) → treat as plaintext
+     (skip to step 4). The two byte patterns are disjoint, so detection is
+     unambiguous. This peek runs *only* in `permissive` mode.
+3. **Handshake — userspace rustls, driven over io_uring, non-blocking.**
    Handshake records flow through the existing io_uring `Recv`/`Send`; the reactor
    feeds inbound bytes to a per-connection `rustls::ServerConnection` (member
    dials also use `rustls::ClientConnection`) and pumps its outbound bytes back.
    No blocking; a slow client cannot wedge the core. This is the primary new code.
-3. **Enable kTLS** — on handshake completion, export the negotiated session
+4. **Enable kTLS** — on handshake completion, export the negotiated session
    secrets and install them on the socket via `setsockopt(TLS_TX/TLS_RX)` using
    the `ktls` crate, which handles the rustls→kernel key handoff and drains any
    buffered records.
-4. **Established** — the connection flips to plaintext mode: io_uring `Send`/`Recv`
+5. **Established** — the connection flips to plaintext mode: io_uring `Send`/`Recv`
    move **plaintext** application buffers exactly as today; the kernel performs
-   per-record crypto. The CP2 preamble detection and all dispatch run unchanged,
-   now inside the kTLS session. The zero-alloc hot path is untouched.
+   per-record crypto (a plaintext-detected connection in `permissive`/`disabled`
+   mode simply skips kTLS and runs on the raw socket). The CP2 preamble detection
+   and all dispatch run unchanged. The zero-alloc hot path is untouched.
 
 ### Members / mTLS
 
 The member transport (`crates/member/src/transport.rs`) uses the identical
-machinery with **mutual TLS**: both ends present certs and verify the peer
-against the configured CA. A node without a CA-signed cert cannot complete the
-handshake, so it can neither join nor snoop. `BONSAI_TLS_MUTUAL=required` on the
-member path.
+machinery and the same three-state mode with **mutual TLS**: both ends present
+certs and verify the peer against the configured CA. A node without a CA-signed
+cert cannot complete the handshake, so it can neither join nor snoop. mTLS is
+required whenever a member connection *is* TLS; the `permissive` mode still
+accepts plaintext member connections during migration (inbound peek `0x16` vs
+member preamble), and a member dialing out in `permissive` mode may connect
+plaintext to a not-yet-upgraded peer and TLS to an upgraded one.
 
 ### Crypto material
 
@@ -168,7 +182,8 @@ Replaces the current single optional plaintext username/password compared in
 ## Configuration
 
 - **Toggles & paths via `BONSAI_*` env** (matches existing style):
-  `BONSAI_TLS_ENABLED`, `BONSAI_TLS_CERT` / `_KEY` / `_CA` (PEM paths),
+  `BONSAI_TLS_MODE` = `disabled|permissive|required` (default `disabled`),
+  `BONSAI_TLS_CERT` / `_KEY` / `_CA` (PEM paths; required when mode ≠ `disabled`),
   `BONSAI_TLS_MUTUAL` = `none|optional|required`, `BONSAI_SECURITY_CONFIG` (path
   to the file below).
 - **Principals & permissions via TOML** — `[[principal]]` with name + credential
@@ -176,6 +191,23 @@ Replaces the current single optional plaintext username/password compared in
   pattern, actions). Read once at startup into the immutable, per-core security
   context.
 - Members reuse the same CA for mTLS trust; one cert set per node.
+
+### Enabling TLS on a live cluster (zero-downtime rollout)
+
+The `permissive` mode makes turning TLS on a routine rolling upgrade, no
+maintenance window:
+
+1. **`disabled → permissive`**, one node at a time (rolling restart). A
+   `permissive` node accepts both TLS and plaintext, so it still talks plaintext
+   to not-yet-upgraded peers — the cluster stays fully up throughout.
+2. Once **all** nodes are `permissive`, members negotiate TLS between themselves,
+   and clients migrate to TLS **at their own pace** (permissive accepts either).
+3. When every member and client is on TLS, **`permissive → required`**, one node
+   at a time, to lock out plaintext and complete the cutover.
+
+Disabling TLS reverses the sequence (`required → permissive → disabled`). A
+direct `disabled ⇄ required` flip is only safe as a coordinated cold cutover
+(brief downtime), so operators should route through `permissive`.
 
 Example security config:
 
@@ -220,7 +252,12 @@ credential = { alg = "argon2id", hash = "…", salt = "…" }
   - **RBAC**: read-only principal → GET ok, PUT → `AccessControlException`; admin
     → all ops; unmapped op → default-deny.
   - Negative: wrong password, wrong CA, expired cert, plaintext client against a
-    TLS-enabled endpoint — all rejected.
+    `required` endpoint — all rejected.
+  - **Mode matrix**: `permissive` accepts *both* a TLS client and a plaintext
+    client on the same listener (first-byte peek picks the path); `required`
+    rejects plaintext; `disabled` rejects/ignores a TLS ClientHello as
+    unparseable. A mixed cluster (some `permissive` members plaintext, some TLS)
+    stays connected — the live-rollout invariant.
 - **Non-blocking handshake**: feeding partial handshake bytes proves a stalled
   client cannot wedge the core.
 
@@ -244,13 +281,16 @@ credential = { alg = "argon2id", hash = "…", salt = "…" }
    immediately testable. Includes the `msg_type` table.
 3. **Auth hardening** (`IdentityProvider` + hashed creds) replacing the plaintext
    compare.
-4. **kTLS on the client reactor** (non-blocking handshake state machine + kTLS
-   enable).
-5. **mTLS on the member transport.**
+4. **kTLS on the client reactor** — non-blocking handshake state machine + kTLS
+   enable, plus the `disabled`/`permissive`/`required` mode branch and the
+   first-byte peek.
+5. **mTLS on the member transport** — same three-state mode on the member path,
+   completing the zero-downtime rollout story.
 
-TLS is the riskiest work, so it lands last, behind `BONSAI_TLS_ENABLED`; authz
-and authN ship first over plaintext. Real Hazelcast clients are unaffected when
-TLS is off, and connect with standard SSL config when it is on.
+TLS is the riskiest work, so it lands last, behind `BONSAI_TLS_MODE`; authz and
+authN ship first over plaintext. Real Hazelcast clients are unaffected when the
+mode is `disabled`, connect with standard SSL config under `required`, and can be
+migrated one at a time under `permissive`.
 
 ## Open Questions / Risks
 
