@@ -21,6 +21,14 @@ use std::time::Instant;
 const EMPTY: u64 = 0;
 const TOMBSTONE: u64 = 1;
 
+// HLC update-stamp layout (high → low): `physical_ms:41 | counter:16 | member:7`.
+// Physical time dominates so LatestUpdate merges resolve by real time; the
+// counter is the cross-member causal tiebreak (advanced when a peer stamp is
+// observed); member id is the final deterministic tiebreak within one tick.
+const STAMP_MEMBER_BITS: u32 = 7;
+const STAMP_MEMBER_MASK: u64 = 0x7F;
+const STAMP_COUNTER_BITS: u32 = 16;
+
 /// Monotonic milliseconds since first use (for TTL).
 fn now_ms() -> u64 {
     static START: OnceLock<Instant> = OnceLock::new();
@@ -1204,37 +1212,53 @@ impl Store {
 
     /// Produce the next stamp for an explicit physical millisecond. Split out so
     /// the merge/failover simulations can drive time deterministically. Applies
-    /// the HLC rule: advance to `phys_ms` when it moves forward, otherwise bump
-    /// the counter (or the logical millisecond if the counter is exhausted), so
-    /// the stamp is always strictly greater than the previous one on this member.
+    /// the HLC rule over the combined `ms|counter` clock: advance to `phys_ms`
+    /// when it moves forward, otherwise bump the logical counter — so the stamp
+    /// is always strictly greater than the previous one on this member, and
+    /// (via [`observe_stamp`](Self::observe_stamp)) than any peer stamp seen.
     pub fn next_stamp_at(&self, phys_ms: u64) -> u64 {
         use std::sync::atomic::Ordering::{AcqRel, Acquire};
-        // Layout: ms:41 | member:7 | counter:16.
-        const MS_SHIFT: u32 = 23;
-        const MEMBER_SHIFT: u32 = 16;
-        const MEMBER_MASK: u64 = 0x7F;
-        const COUNTER_MASK: u64 = 0xFFFF;
-
-        let member_bits = (self.member_id & MEMBER_MASK) << MEMBER_SHIFT;
+        let now_clock = phys_ms << STAMP_COUNTER_BITS; // (ms|counter) with counter=0
+        let member_bits = self.member_id & STAMP_MEMBER_MASK;
         loop {
             let prev = self.stamp_seq.load(Acquire);
-            let prev_ms = prev >> MS_SHIFT;
-            let cand = if phys_ms > prev_ms {
-                (phys_ms << MS_SHIFT) | member_bits // new millisecond: counter resets
-            } else {
-                let ctr = prev & COUNTER_MASK;
-                if ctr < COUNTER_MASK {
-                    (prev & !COUNTER_MASK) | (ctr + 1) // same/back-stepped ms: ++counter
-                } else {
-                    ((prev_ms + 1) << MS_SHIFT) | member_bits // counter exhausted: ++logical ms
-                }
-            };
+            let prev_clock = prev >> STAMP_MEMBER_BITS;
+            // HLC: take the later of physical time and one past the last logical
+            // clock (the +1 bumps the counter, carrying into ms if it overflows).
+            let new_clock = std::cmp::max(prev_clock + 1, now_clock);
+            let cand = (new_clock << STAMP_MEMBER_BITS) | member_bits;
             if self
                 .stamp_seq
                 .compare_exchange_weak(prev, cand, AcqRel, Acquire)
                 .is_ok()
             {
                 return cand;
+            }
+        }
+    }
+
+    /// Absorb a stamp observed from another member (HLC receive rule): advance
+    /// this member's clock so its next stamp strictly exceeds `external`. This is
+    /// what makes a write that *happened-after* a peer's write (having seen it)
+    /// carry a higher stamp even if this member's wall clock lags — bounding the
+    /// effect of cross-member clock skew on LatestUpdate merges. Only the
+    /// `ms|counter` clock is absorbed; this member keeps its own tiebreak bits.
+    pub fn observe_stamp(&self, external: u64) {
+        use std::sync::atomic::Ordering::{AcqRel, Acquire};
+        let ext_clock = external >> STAMP_MEMBER_BITS;
+        let member_bits = self.member_id & STAMP_MEMBER_MASK;
+        loop {
+            let prev = self.stamp_seq.load(Acquire);
+            if prev >> STAMP_MEMBER_BITS >= ext_clock {
+                return; // already ahead of (or level with) the observed clock
+            }
+            let cand = (ext_clock << STAMP_MEMBER_BITS) | member_bits;
+            if self
+                .stamp_seq
+                .compare_exchange_weak(prev, cand, AcqRel, Acquire)
+                .is_ok()
+            {
+                return;
             }
         }
     }
@@ -1299,6 +1323,9 @@ impl Store {
         stamp: u64,
         latest_update: bool,
     ) {
+        // HLC receive: observing a peer's stamp advances our clock (whether or
+        // not this particular entry wins the merge).
+        self.observe_stamp(stamp);
         let schemas = self.schemas();
         self.shard(map, key).lock().unwrap().put_merge(
             map,
@@ -1829,6 +1856,28 @@ mod tests {
         // higher-indexed member's earlier write — time dominates member id.
         let low_later = Store::with_shards_seed(1, 1).next_stamp_at(2001);
         assert!(low_later > m5, "real time must dominate member index");
+    }
+
+    #[test]
+    fn hlc_absorbs_peer_stamp_so_causal_write_wins_under_skew() {
+        // Member A (higher index) writes at ms=100.
+        let a = Store::with_shards_seed(1, 5);
+        let sa = a.next_stamp_at(100);
+
+        // Member B (lower index) has a LAGGING wall clock (ms=50), but it merges
+        // A's entry first — observing A's stamp — and only then writes.
+        let b = Store::with_shards_seed(1, 0);
+        b.put_merge("m", b"k", b"from-a", 0, sa, true); // absorbs A's clock
+        let sb = b.next_stamp_at(50); // B's wall clock is behind A's
+
+        assert!(
+            sb > sa,
+            "a write that observed a peer stamp must outrank it despite clock skew"
+        );
+
+        // So B's causally-later write wins the merge (no lost update).
+        b.put_merge("m", b"k", b"from-b-after", 0, sb, true);
+        assert_eq!(b.get("m", b"k"), Some(b"from-b-after".to_vec()));
     }
 
     #[test]
