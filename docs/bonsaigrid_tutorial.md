@@ -187,3 +187,17 @@ To see this all in action in the repo:
    If it prints `PYTHON SMOKE OK`, you have successfully tricked a production-grade Java-ecosystem client into talking to your bare-metal Rust engine!
 
 Happy hacking, and welcome to distributed systems engineering!
+
+---
+
+## Appendix: Glossary of Acronyms
+
+- **CP (Consistency and Partition tolerance):** A reference to the CAP Theorem. A "CP Subsystem" guarantees that all clients see the exact same data at the same time (Strong Consistency), even if network connections fail (Partition tolerance), which is essential for distributed locks.
+- **GC (Garbage Collection):** An automated memory management process used by languages like Java and Python to clean up unused objects. It can cause unpredictable pauses ("GC pauses") that briefly freeze the application.
+- **JVM (Java Virtual Machine):** The runtime engine that executes Java code. It manages memory and execution automatically, which introduces overhead compared to languages that compile directly to machine code like Rust or C.
+- **mTLS (Mutual Transport Layer Security):** A security protocol where both the client and the server cryptographically verify each other's identities before communicating, ensuring all network traffic is encrypted and authenticated.
+- **RAM (Random Access Memory):** The short-term, blazing-fast physical memory in a computer where data is stored for quick $O(1)$ access by the CPU, as opposed to slower, long-term disk storage (like SSDs).
+- **RBAC (Role-Based Access Control):** A security mechanism that restricts network or database access based on the roles of individual users or clients (e.g., an "admin" role can write data, but a "guest" role can only read data).
+- **SPSC (Single-Producer Single-Consumer):** A type of lock-free queue or channel designed for exactly two threads: one thread that exclusively writes to it (the producer) and one thread that exclusively reads from it (the consumer).
+- **TCP (Transmission Control Protocol):** The foundational networking protocol of the internet that ensures data packets are delivered reliably, in order, and without errors between a client and a server.
+- **TPC (Thread-Per-Core):** An architectural model where exactly one software thread is pinned to one physical CPU core. It eliminates the need for threads to fight over resources or context-switch, maximizing CPU cache efficiency.
