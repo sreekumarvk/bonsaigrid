@@ -2,7 +2,7 @@
 //! ring, appends them to a WAL segment, group-commit fsyncs on a cadence, and
 //! periodically snapshots + truncates. Mirrors the member thread's offload.
 
-use persistence::record::{encode_map_put, encode_map_remove};
+use persistence::record::{encode_aux_state, encode_map_put, encode_map_remove};
 use persistence::{snapshot, wal::WalSegment};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -34,6 +34,11 @@ impl WalSink for Persister {
     fn map_remove(&self, stamp: u64, map: &str, key: &[u8]) {
         let mut buf = Vec::new();
         encode_map_remove(&mut buf, stamp, map, key);
+        let _ = self.tx.push(PersistJob(buf));
+    }
+    fn aux_state(&self, kind: u8, name: &str, state: &[u8]) {
+        let mut buf = Vec::new();
+        encode_aux_state(&mut buf, kind, name, state);
         let _ = self.tx.push(PersistJob(buf));
     }
 }

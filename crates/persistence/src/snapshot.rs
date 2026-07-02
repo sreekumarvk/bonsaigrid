@@ -13,6 +13,7 @@ use store::Store;
 const MAGIC: &[u8; 4] = b"BSNP";
 const VERSION: u16 = 1;
 const SECTION_MAP_ENTRIES: u16 = 1;
+const SECTION_AUX: u16 = 2;
 
 fn put_bytes(buf: &mut Vec<u8>, b: &[u8]) {
     buf.extend_from_slice(&(b.len() as u32).to_le_bytes());
@@ -52,6 +53,19 @@ pub fn write_snapshot(path: &Path, store: &Store) -> io::Result<()> {
     buf.extend_from_slice(&(sec.len() as u32).to_le_bytes());
     buf.extend_from_slice(&sec);
 
+    // Section: Aux (all non-map structures as (kind, name, state)).
+    let aux = store.all_aux();
+    let mut asec = Vec::new();
+    asec.extend_from_slice(&(aux.len() as u32).to_le_bytes());
+    for (kind, name, state) in &aux {
+        asec.push(*kind);
+        put_bytes(&mut asec, name.as_bytes());
+        put_bytes(&mut asec, state);
+    }
+    buf.extend_from_slice(&SECTION_AUX.to_le_bytes());
+    buf.extend_from_slice(&(asec.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&asec);
+
     let tmp = path.with_extension("tmp");
     {
         let mut f = File::create(&tmp)?;
@@ -90,6 +104,8 @@ pub fn load_snapshot(path: &Path, store: &Store) -> io::Result<()> {
         let body = &data[body_start..body_end];
         if stype == SECTION_MAP_ENTRIES {
             load_map_entries(body, store);
+        } else if stype == SECTION_AUX {
+            load_aux(body, store);
         }
         // unknown section types are skipped
         off = body_end;
@@ -121,6 +137,31 @@ fn load_map_entries(body: &[u8], store: &Store) {
             store.put_merge(m, key, value, 0, stamp, true);
         }
         off = o3 + 8;
+    }
+}
+
+fn load_aux(body: &[u8], store: &Store) {
+    if body.len() < 4 {
+        return;
+    }
+    let count = u32::from_le_bytes(body[0..4].try_into().unwrap()) as usize;
+    let mut off = 4;
+    for _ in 0..count {
+        if off >= body.len() {
+            break;
+        }
+        let kind = body[off];
+        off += 1;
+        let Some((name, o1)) = get_bytes(body, off) else {
+            break;
+        };
+        let Some((state, o2)) = get_bytes(body, o1) else {
+            break;
+        };
+        if let Ok(n) = std::str::from_utf8(name) {
+            store.install_aux(kind, n, state);
+        }
+        off = o2;
     }
 }
 

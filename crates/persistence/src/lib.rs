@@ -9,7 +9,7 @@ pub mod record;
 pub mod snapshot;
 pub mod wal;
 
-use record::{parse_map_put, parse_map_remove, RecordType};
+use record::{parse_aux_state, parse_map_put, parse_map_remove, RecordType};
 use std::io;
 use std::path::{Path, PathBuf};
 use store::Store;
@@ -115,6 +115,11 @@ pub fn recover(dir: &Path, store: &Store) -> io::Result<()> {
                     // Tail records are strictly after the snapshot point, so an
                     // ordered unconditional remove yields the correct final state.
                     store.remove(mr.map, mr.key);
+                }
+            }
+            RecordType::AuxState => {
+                if let Some(a) = parse_aux_state(payload) {
+                    store.install_aux(a.kind, a.name, a.state);
                 }
             }
         })?;

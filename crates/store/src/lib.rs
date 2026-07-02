@@ -728,6 +728,41 @@ pub struct Store {
 pub trait WalSink: Send + Sync {
     fn map_put(&self, stamp: u64, ttl_ms: u64, map: &str, key: &[u8], value: &[u8]);
     fn map_remove(&self, stamp: u64, map: &str, key: &[u8]);
+    /// Full post-mutation state of one non-map structure (`kind` = one of the
+    /// `AUX_*` constants). Replay installs it via [`Store::install_aux`].
+    fn aux_state(&self, kind: u8, name: &str, state: &[u8]);
+}
+
+fn enc_vecs<'a>(items: impl ExactSizeIterator<Item = &'a Vec<u8>>) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(&(items.len() as u32).to_le_bytes());
+    for it in items {
+        b.extend_from_slice(&(it.len() as u32).to_le_bytes());
+        b.extend_from_slice(it);
+    }
+    b
+}
+
+fn dec_vecs(data: &[u8], off: &mut usize) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    if *off + 4 > data.len() {
+        return out;
+    }
+    let n = u32::from_le_bytes(data[*off..*off + 4].try_into().unwrap()) as usize;
+    *off += 4;
+    for _ in 0..n {
+        if *off + 4 > data.len() {
+            break;
+        }
+        let l = u32::from_le_bytes(data[*off..*off + 4].try_into().unwrap()) as usize;
+        *off += 4;
+        if *off + l > data.len() {
+            break;
+        }
+        out.push(data[*off..*off + l].to_vec());
+        *off += l;
+    }
+    out
 }
 
 struct Ring {
@@ -786,6 +821,189 @@ impl Store {
         let _ = self.wal_sink.set(sink);
     }
 
+    /// Emit a structure's full state to the WAL sink after a mutation (no-op when
+    /// no sink). Serializes under the structure's lock; call after mutating.
+    fn emit_aux(&self, kind: u8, name: &str) {
+        if let Some(s) = self.wal_sink.get() {
+            s.aux_state(kind, name, &self.serialize_aux(kind, name));
+        }
+    }
+
+    /// Serialize one non-map structure's full contents (empty if absent).
+    pub fn serialize_aux(&self, kind: u8, name: &str) -> Vec<u8> {
+        match kind {
+            AUX_QUEUE => self
+                .queues
+                .lock()
+                .unwrap()
+                .get(name)
+                .map(|q| enc_vecs(q.iter()))
+                .unwrap_or_default(),
+            AUX_LIST => self
+                .lists
+                .lock()
+                .unwrap()
+                .get(name)
+                .map(|l| enc_vecs(l.iter()))
+                .unwrap_or_default(),
+            AUX_SET => self
+                .sets
+                .lock()
+                .unwrap()
+                .get(name)
+                .map(|s| enc_vecs(s.iter()))
+                .unwrap_or_default(),
+            AUX_MULTIMAP => {
+                let g = self.multimaps.lock().unwrap();
+                let Some(mm) = g.get(name) else {
+                    return Vec::new();
+                };
+                let mut b = (mm.len() as u32).to_le_bytes().to_vec();
+                for (k, vs) in mm {
+                    b.extend_from_slice(&(k.len() as u32).to_le_bytes());
+                    b.extend_from_slice(k);
+                    b.extend_from_slice(&enc_vecs(vs.iter()));
+                }
+                b
+            }
+            AUX_RINGBUFFER => {
+                let g = self.ringbuffers.lock().unwrap();
+                let Some(r) = g.get(name) else {
+                    return Vec::new();
+                };
+                let mut b = Vec::new();
+                b.extend_from_slice(&r.head.to_le_bytes());
+                b.extend_from_slice(&r.tail.to_le_bytes());
+                b.extend_from_slice(&r.cap.to_le_bytes());
+                b.extend_from_slice(&enc_vecs(r.items.iter()));
+                b
+            }
+            AUX_PNCOUNTER => self
+                .pncounters
+                .lock()
+                .unwrap()
+                .get(name)
+                .map(|v| v.to_le_bytes().to_vec())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Install a structure's full state (from `serialize_aux`), replacing any
+    /// existing. Used by recovery.
+    pub fn install_aux(&self, kind: u8, name: &str, data: &[u8]) {
+        match kind {
+            AUX_QUEUE => {
+                let mut off = 0;
+                let items = dec_vecs(data, &mut off);
+                self.queues
+                    .lock()
+                    .unwrap()
+                    .insert(name.to_string(), items.into());
+            }
+            AUX_LIST => {
+                let mut off = 0;
+                let items = dec_vecs(data, &mut off);
+                self.lists.lock().unwrap().insert(name.to_string(), items);
+            }
+            AUX_SET => {
+                let mut off = 0;
+                let items = dec_vecs(data, &mut off);
+                self.sets
+                    .lock()
+                    .unwrap()
+                    .insert(name.to_string(), items.into_iter().collect());
+            }
+            AUX_MULTIMAP => {
+                if data.len() < 4 {
+                    return;
+                }
+                let mut off = 4;
+                let n = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+                let mut mm: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
+                for _ in 0..n {
+                    if off + 4 > data.len() {
+                        break;
+                    }
+                    let kl = u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) as usize;
+                    off += 4;
+                    if off + kl > data.len() {
+                        break;
+                    }
+                    let key = data[off..off + kl].to_vec();
+                    off += kl;
+                    let vals = dec_vecs(data, &mut off);
+                    mm.insert(key, vals);
+                }
+                self.multimaps.lock().unwrap().insert(name.to_string(), mm);
+            }
+            AUX_RINGBUFFER => {
+                if data.len() < 24 {
+                    return;
+                }
+                let head = i64::from_le_bytes(data[0..8].try_into().unwrap());
+                let tail = i64::from_le_bytes(data[8..16].try_into().unwrap());
+                let cap = i64::from_le_bytes(data[16..24].try_into().unwrap());
+                let mut off = 24;
+                let items = dec_vecs(data, &mut off);
+                self.ringbuffers.lock().unwrap().insert(
+                    name.to_string(),
+                    Ring {
+                        items: items.into(),
+                        head,
+                        tail,
+                        cap,
+                    },
+                );
+            }
+            AUX_PNCOUNTER if data.len() >= 8 => {
+                let v = i64::from_le_bytes(data[0..8].try_into().unwrap());
+                self.pncounters.lock().unwrap().insert(name.to_string(), v);
+            }
+            _ => {}
+        }
+    }
+
+    /// Every non-map structure as `(kind, name, serialized_state)` — the snapshot
+    /// source for aux structures.
+    pub fn all_aux(&self) -> Vec<(u8, String, Vec<u8>)> {
+        // Snapshot the names first. This `let` binds a Vec; the lock-guard
+        // temporaries in the initializer all drop at the end of THIS statement,
+        // so the per-structure `serialize_aux` in the loop below never re-locks a
+        // still-held mutex (which would self-deadlock — unlike an array used
+        // directly as a for-loop iterator, whose temporaries live for the loop).
+        let kinds: Vec<(u8, Vec<String>)> = vec![
+            (
+                AUX_QUEUE,
+                self.queues.lock().unwrap().keys().cloned().collect(),
+            ),
+            (
+                AUX_LIST,
+                self.lists.lock().unwrap().keys().cloned().collect(),
+            ),
+            (AUX_SET, self.sets.lock().unwrap().keys().cloned().collect()),
+            (
+                AUX_MULTIMAP,
+                self.multimaps.lock().unwrap().keys().cloned().collect(),
+            ),
+            (
+                AUX_RINGBUFFER,
+                self.ringbuffers.lock().unwrap().keys().cloned().collect(),
+            ),
+            (
+                AUX_PNCOUNTER,
+                self.pncounters.lock().unwrap().keys().cloned().collect(),
+            ),
+        ];
+        let mut out = Vec::new();
+        for (kind, names) in kinds {
+            for name in names {
+                out.push((kind, name.clone(), self.serialize_aux(kind, &name)));
+            }
+        }
+        out
+    }
+
     pub fn set_schemas(&self, schemas: serialization::schema::SchemaService) {
         let _ = self.schemas.set(schemas);
     }
@@ -816,6 +1034,11 @@ impl Store {
 
     // ---- Ringbuffer ----
     pub fn rb_add(&self, name: &str, v: Vec<u8>) -> i64 {
+        let ret = self.rb_add_inner(name, v);
+        self.emit_aux(AUX_RINGBUFFER, name);
+        ret
+    }
+    fn rb_add_inner(&self, name: &str, v: Vec<u8>) -> i64 {
         let mut g = self.ringbuffers.lock().unwrap();
         let r = g.entry(name.to_string()).or_insert_with(|| Ring {
             items: VecDeque::new(),
@@ -879,15 +1102,19 @@ impl Store {
         *self.pncounters.lock().unwrap().get(name).unwrap_or(&0)
     }
     pub fn pn_add(&self, name: &str, delta: i64, get_before: bool) -> i64 {
-        let mut g = self.pncounters.lock().unwrap();
-        let c = g.entry(name.to_string()).or_insert(0);
-        let old = *c;
-        *c += delta;
-        if get_before {
-            old
-        } else {
-            *c
-        }
+        let ret = {
+            let mut g = self.pncounters.lock().unwrap();
+            let c = g.entry(name.to_string()).or_insert(0);
+            let old = *c;
+            *c += delta;
+            if get_before {
+                old
+            } else {
+                *c
+            }
+        };
+        self.emit_aux(AUX_PNCOUNTER, name);
+        ret
     }
 
     // ---- FlakeIdGenerator: hand out monotonic id batches (base, increment=1, size) ----
@@ -1002,6 +1229,7 @@ impl Store {
             .entry(name.to_string())
             .or_default()
             .push(v);
+        self.emit_aux(AUX_LIST, name);
         true
     }
     pub fn list_get(&self, name: &str, index: i32) -> Option<Vec<u8>> {
@@ -1025,13 +1253,20 @@ impl Store {
             .is_some_and(|l| l.iter().any(|x| x.as_slice() == v))
     }
     pub fn list_remove(&self, name: &str, v: &[u8]) -> bool {
-        if let Some(l) = self.lists.lock().unwrap().get_mut(name) {
-            if let Some(i) = l.iter().position(|x| x.as_slice() == v) {
-                l.remove(i);
-                return true;
-            }
+        let removed = {
+            let mut g = self.lists.lock().unwrap();
+            g.get_mut(name)
+                .and_then(|l| {
+                    l.iter().position(|x| x.as_slice() == v).map(|i| {
+                        l.remove(i);
+                    })
+                })
+                .is_some()
+        };
+        if removed {
+            self.emit_aux(AUX_LIST, name);
         }
-        false
+        removed
     }
     pub fn list_get_all(&self, name: &str) -> Vec<Vec<u8>> {
         self.lists
@@ -1045,6 +1280,7 @@ impl Store {
         if let Some(l) = self.lists.lock().unwrap().get_mut(name) {
             l.clear();
         }
+        self.emit_aux(AUX_LIST, name);
     }
     pub fn list_is_empty(&self, name: &str) -> bool {
         self.list_size(name) == 0
@@ -1052,19 +1288,27 @@ impl Store {
 
     // ---- Distributed Set ----
     pub fn set_add(&self, name: &str, v: Vec<u8>) -> bool {
-        self.sets
+        let added = self
+            .sets
             .lock()
             .unwrap()
             .entry(name.to_string())
             .or_default()
-            .insert(v)
+            .insert(v);
+        self.emit_aux(AUX_SET, name);
+        added
     }
     pub fn set_remove(&self, name: &str, v: &[u8]) -> bool {
-        self.sets
+        let removed = self
+            .sets
             .lock()
             .unwrap()
             .get_mut(name)
-            .is_some_and(|s| s.remove(v))
+            .is_some_and(|s| s.remove(v));
+        if removed {
+            self.emit_aux(AUX_SET, name);
+        }
+        removed
     }
     pub fn set_contains(&self, name: &str, v: &[u8]) -> bool {
         self.sets
@@ -1087,22 +1331,27 @@ impl Store {
         if let Some(s) = self.sets.lock().unwrap().get_mut(name) {
             s.clear();
         }
+        self.emit_aux(AUX_SET, name);
     }
 
     // ---- MultiMap (Set semantics) ----
     pub fn mm_put(&self, name: &str, key: Vec<u8>, value: Vec<u8>) -> bool {
-        let mut g = self.multimaps.lock().unwrap();
-        let values = g
-            .entry(name.to_string())
-            .or_default()
-            .entry(key)
-            .or_default();
-        if values.contains(&value) {
-            false
-        } else {
-            values.push(value);
-            true
-        }
+        let added = {
+            let mut g = self.multimaps.lock().unwrap();
+            let values = g
+                .entry(name.to_string())
+                .or_default()
+                .entry(key)
+                .or_default();
+            if values.contains(&value) {
+                false
+            } else {
+                values.push(value);
+                true
+            }
+        };
+        self.emit_aux(AUX_MULTIMAP, name);
+        added
     }
     pub fn mm_get(&self, name: &str, key: &[u8]) -> Vec<Vec<u8>> {
         self.multimaps
@@ -1114,12 +1363,15 @@ impl Store {
             .unwrap_or_default()
     }
     pub fn mm_remove(&self, name: &str, key: &[u8]) -> Vec<Vec<u8>> {
-        self.multimaps
+        let removed = self
+            .multimaps
             .lock()
             .unwrap()
             .get_mut(name)
             .and_then(|m| m.remove(key))
-            .unwrap_or_default()
+            .unwrap_or_default();
+        self.emit_aux(AUX_MULTIMAP, name);
+        removed
     }
     pub fn mm_value_count(&self, name: &str, key: &[u8]) -> usize {
         self.multimaps
@@ -1179,10 +1431,20 @@ impl Store {
             .entry(q.to_string())
             .or_default()
             .push_back(v);
+        self.emit_aux(AUX_QUEUE, q);
         true
     }
     pub fn queue_poll(&self, q: &str) -> Option<Vec<u8>> {
-        self.queues.lock().unwrap().get_mut(q)?.pop_front()
+        let out = self
+            .queues
+            .lock()
+            .unwrap()
+            .get_mut(q)
+            .and_then(|d| d.pop_front());
+        if out.is_some() {
+            self.emit_aux(AUX_QUEUE, q);
+        }
+        out
     }
     pub fn queue_peek(&self, q: &str) -> Option<Vec<u8>> {
         self.queues.lock().unwrap().get(q)?.front().cloned()
@@ -1191,13 +1453,20 @@ impl Store {
         self.queues.lock().unwrap().get(q).map_or(0, |d| d.len())
     }
     pub fn queue_remove(&self, q: &str, v: &[u8]) -> bool {
-        if let Some(d) = self.queues.lock().unwrap().get_mut(q) {
-            if let Some(i) = d.iter().position(|x| x.as_slice() == v) {
-                d.remove(i);
-                return true;
-            }
+        let removed = {
+            let mut g = self.queues.lock().unwrap();
+            g.get_mut(q)
+                .and_then(|d| {
+                    d.iter()
+                        .position(|x| x.as_slice() == v)
+                        .map(|i| d.remove(i))
+                })
+                .is_some()
+        };
+        if removed {
+            self.emit_aux(AUX_QUEUE, q);
         }
-        false
+        removed
     }
     pub fn queue_contains(&self, q: &str, v: &[u8]) -> bool {
         self.queues
@@ -1210,6 +1479,7 @@ impl Store {
         if let Some(d) = self.queues.lock().unwrap().get_mut(q) {
             d.clear();
         }
+        self.emit_aux(AUX_QUEUE, q);
     }
     pub fn queue_is_empty(&self, q: &str) -> bool {
         self.queue_size(q) == 0
@@ -1711,12 +1981,12 @@ impl Store {
 }
 
 // ---- Auxiliary-state blob codec ----
-const AUX_LIST: u8 = 1;
-const AUX_SET: u8 = 2;
-const AUX_QUEUE: u8 = 3;
-const AUX_MULTIMAP: u8 = 4;
-const AUX_RINGBUFFER: u8 = 5;
-const AUX_PNCOUNTER: u8 = 6;
+pub const AUX_LIST: u8 = 1;
+pub const AUX_SET: u8 = 2;
+pub const AUX_QUEUE: u8 = 3;
+pub const AUX_MULTIMAP: u8 = 4;
+pub const AUX_RINGBUFFER: u8 = 5;
+pub const AUX_PNCOUNTER: u8 = 6;
 const AUX_FLAKE: u8 = 7;
 
 /// The partition a distributed object's name maps to — matching the client, which

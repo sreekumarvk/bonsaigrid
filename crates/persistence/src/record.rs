@@ -12,6 +12,9 @@
 pub enum RecordType {
     MapPut = 1,
     MapRemove = 2,
+    /// Full post-mutation state of one non-map structure (queue/list/set/
+    /// multimap/ringbuffer/pncounter). Replay installs it (last-state-wins).
+    AuxState = 3,
 }
 
 impl RecordType {
@@ -19,6 +22,7 @@ impl RecordType {
         Some(match v {
             1 => RecordType::MapPut,
             2 => RecordType::MapRemove,
+            3 => RecordType::AuxState,
             _ => return None,
         })
     }
@@ -114,6 +118,38 @@ pub struct MapRemove<'a> {
     pub stamp: u64,
     pub map: &'a str,
     pub key: &'a [u8],
+}
+
+/// Encode an `AuxState` record: `kind:u8 | name | state`. `kind` identifies the
+/// structure family (queue/list/set/multimap/ringbuffer/pncounter); `state` is
+/// its full serialized contents after the mutation.
+pub fn encode_aux_state(buf: &mut Vec<u8>, kind: u8, name: &str, state: &[u8]) {
+    let mut p = Vec::with_capacity(1 + name.len() + state.len() + 8);
+    p.push(kind);
+    put_bytes(&mut p, name.as_bytes());
+    put_bytes(&mut p, state);
+    frame(buf, RecordType::AuxState, &p);
+}
+
+/// Decoded `AuxState` fields.
+pub struct AuxState<'a> {
+    pub kind: u8,
+    pub name: &'a str,
+    pub state: &'a [u8],
+}
+
+pub fn parse_aux_state(payload: &[u8]) -> Option<AuxState<'_>> {
+    if payload.is_empty() {
+        return None;
+    }
+    let kind = payload[0];
+    let (name, o1) = get_bytes(payload, 1)?;
+    let (state, _) = get_bytes(payload, o1)?;
+    Some(AuxState {
+        kind,
+        name: std::str::from_utf8(name).ok()?,
+        state,
+    })
 }
 
 pub fn parse_map_put(payload: &[u8]) -> Option<MapPut<'_>> {
