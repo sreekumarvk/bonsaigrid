@@ -97,19 +97,22 @@ When you boot the server, it scans your hardware. Let's say you have an 8-core C
 The server launches exactly 8 threads. It pins Thread 0 strictly to CPU Core 0, Thread 1 to Core 1, etc.
 Each thread spins up its own infinite loop using `io_uring` to constantly check for new network packets. There is no central "manager" thread slowing things down. They all work completely independently.
 
-### Phase 4: Cross-Core Routing & Hashing
-This is the magic of distributed systems. Let's trace a request:
-1. User sends `Put(Key="apple", Value="red")`. 
-2. The network load balancer randomly routes this TCP connection to **Core 0**.
-3. Core 0 reads the bytes and sees the key `"apple"`. 
-4. How do we know where `"apple"` lives? We use a deterministic mathematical function: MurmurHash3.
-   `Hash("apple") = 847291`
-5. We have 8 cores. We do a modulo operation: `847291 % 8 = 3`.
-6. `"apple"` belongs to **Core 3**.
-7. Because Core 0 and Core 3 do not share memory (remember Constraint 2!), Core 0 cannot write to Core 3's dictionary. Instead, Core 0 takes the network packet and drops it into a lock-free queue pointing to Core 3. 
-8. Core 3 picks it up from its queue, saves it in its private Slab Allocator, and sends the "Success" response back to the client.
+### Phase 4: Cross-Core and Cross-Machine Routing
+This is the magic of distributed systems. To scale beyond one machine, the entire keyspace is divided into a fixed number of "Partitions" (e.g., 271). Each partition is exclusively owned by a specific machine, and further assigned to exactly one CPU core on that machine.
 
-If we expand from 8 cores to an 8-machine cluster, the exact same math applies! `Hash % Number_of_Partitions`. This scales infinitely.
+Let's trace a request from a basic client that connects to a random node:
+1. User sends `Put(Key="apple", Value="red")`. 
+2. The network load balancer randomly routes this TCP connection to **Machine A, Core 0**.
+3. Core 0 reads the bytes and sees the key `"apple"`. 
+4. How do we know where `"apple"` lives? We use a deterministic mathematical function (MurmurHash3):
+   `Hash("apple") = 847291`
+5. We determine the partition: `847291 % 271 = Partition 42`.
+6. We check the cluster's partition table. Let's say Partition 42 is owned by **Machine B, Core 3**.
+7. Because Machine A does not share memory with Machine B (and Core 0 doesn't share with Core 3), Machine A cannot write the data. Instead, Core 0 forwards the request over the network to Machine B.
+8. Machine B receives the forwarded packet and drops it into the lock-free queue for Core 3. Core 3 saves it in its private Slab Allocator and sends the "Success" response back.
+
+**The Smart Client Optimization:**
+Bouncing requests between machines wastes time. To solve this, official "Smart Clients" download the partition table when they first connect. The client does the `Hash("apple") % 271` math *locally* and sends the TCP packet directly to the correct IP address and socket for **Machine B, Core 3**. This eliminates internal cluster hops, resulting in blazing fast, single-hop $O(1)$ latency whether you have 1 machine or 1,000 machines.
 
 ---
 
