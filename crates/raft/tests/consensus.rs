@@ -14,6 +14,22 @@ fn elects_a_single_leader() {
 }
 
 #[test]
+fn single_node_elects_and_commits_immediately() {
+    // A lone node is its own majority: it must elect itself and commit proposals
+    // with no peer acknowledgements.
+    let mut sim = Sim::new(1);
+    sim.run(60);
+    assert!(sim.leader() == Some(0), "the sole node leads");
+    assert!(sim.propose(b"x=1"), "leader accepts a proposal");
+    sim.run(20);
+    let cmds: Vec<Vec<u8>> = sim.applied[0].iter().map(|(_, c)| c.clone()).collect();
+    assert!(
+        cmds.contains(&b"x=1".to_vec()),
+        "single node commits + applies"
+    );
+}
+
+#[test]
 fn replicates_and_commits_to_all() {
     let mut sim = Sim::new(3);
     sim.run(80);

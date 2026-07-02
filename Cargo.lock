@@ -1014,6 +1014,7 @@ dependencies = [
  "persistence",
  "protocol",
  "query",
+ "raft",
  "rcgen",
  "rskafka",
  "rustls",

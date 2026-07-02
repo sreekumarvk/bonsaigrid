@@ -176,6 +176,9 @@ impl RaftNode {
             command,
         });
         self.match_index[self.id] = index;
+        // The leader's own replica may already be a majority (e.g. a single-node
+        // group), so try to commit now rather than only on an AppendEntries reply.
+        self.advance_commit();
         Some(index)
     }
 
