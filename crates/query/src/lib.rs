@@ -19,6 +19,7 @@
 //! `01 ffffffec 00000003 00000003 616765 fffffff9 0000001e`).
 
 pub mod agg;
+pub mod distributed;
 mod eval;
 pub mod index;
 pub mod json;
