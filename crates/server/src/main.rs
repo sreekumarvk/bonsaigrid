@@ -110,6 +110,38 @@ fn build_member_tls() -> Option<security::tls::MemberTls> {
     Some(tls)
 }
 
+/// Set up local durability (Hot Restart) for `store` if `BONSAI_PERSISTENCE` is
+/// enabled: recover from `BONSAI_PERSISTENCE_DIR` BEFORE serving, then attach the
+/// WAL sink and spawn the persistence thread. Returns the thread handle (kept
+/// alive by the caller). No-op / `None` when disabled.
+fn setup_persistence(store: &Arc<store::Store>) -> Option<std::thread::JoinHandle<()>> {
+    let durability =
+        persistence::Durability::parse(&std::env::var("BONSAI_PERSISTENCE").unwrap_or_default());
+    if !durability.enabled() {
+        return None;
+    }
+    let dir: std::path::PathBuf = std::env::var("BONSAI_PERSISTENCE_DIR")
+        .expect("BONSAI_PERSISTENCE_DIR required when persistence is enabled")
+        .into();
+    // Recover the in-memory state before any writes or listeners.
+    persistence::recover(&dir, store).expect("recovery failed");
+    let flush_ms = env_usize("BONSAI_PERSISTENCE_FLUSH_MS", 10) as u64;
+    let snapshot_bytes = env_usize("BONSAI_PERSISTENCE_SNAPSHOT_MB", 64) as u64 * 1024 * 1024;
+    let (tx, rx) = spsc::channel::<server::persist_thread::PersistJob>(1 << 20);
+    store.set_wal_sink(Arc::new(server::persist_thread::Persister::new(tx)));
+    eprintln!(
+        "BonsaiGrid persistence: {durability:?} at {}",
+        dir.display()
+    );
+    Some(server::persist_thread::spawn_persistence(
+        dir,
+        store.clone(),
+        rx,
+        flush_ms,
+        snapshot_bytes,
+    ))
+}
+
 fn cluster_members(n: usize) -> Vec<Member> {
     (0..n)
         .map(|i| Member {
@@ -169,6 +201,7 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
         None
     };
     let store = Arc::new(store::Store::with_shards_seed(1, self_index as u64));
+    let _persist = setup_persistence(&store); // recover + attach WAL sink before serving
     server::jobs::set_store(store.clone()); // streaming SQL jobs look up the IMap here
     let broker = Arc::new(server::events::EventBroker::new(self_uuid));
     let schemas = Arc::new(serialization::schema::SchemaService::new());
@@ -379,6 +412,7 @@ fn run_single_node() -> std::io::Result<()> {
         security: build_security(),
     });
     let store = Arc::new(store::Store::with_shards(cores));
+    let _persist = setup_persistence(&store); // recover + attach WAL sink before serving
     server::jobs::set_store(store.clone()); // streaming SQL jobs look up the IMap here
                                             // Single-member cluster, no backups; shared read-only across cores.
     let cluster = Arc::new(Cluster::new(bootstrap_members(1), 0, 1));

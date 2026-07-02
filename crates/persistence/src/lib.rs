@@ -61,6 +61,32 @@ fn numbered(dir: &Path, prefix: &str) -> Vec<(u64, PathBuf)> {
     out
 }
 
+/// The highest generation number in use across WAL segments and snapshots in
+/// `dir` (0 if none). The persistence thread starts a new segment at
+/// `latest_generation(dir) + 1` so it never appends to an already-replayed file.
+pub fn latest_generation(dir: &Path) -> u64 {
+    let w = numbered(dir, WAL_PREFIX)
+        .last()
+        .map(|(n, _)| *n)
+        .unwrap_or(0);
+    let s = numbered(dir, SNAPSHOT_PREFIX)
+        .last()
+        .map(|(n, _)| *n)
+        .unwrap_or(0);
+    w.max(s)
+}
+
+/// Delete WAL segments and snapshots with a generation strictly below `keep`.
+pub fn prune_below(dir: &Path, keep: u64) {
+    for prefix in [WAL_PREFIX, SNAPSHOT_PREFIX] {
+        for (n, path) in numbered(dir, prefix) {
+            if n < keep {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+}
+
 /// Recover `store` from `dir`: load the newest snapshot, then replay every WAL
 /// segment after it in order. Missing dir → Ok (fresh start). Idempotent.
 pub fn recover(dir: &Path, store: &Store) -> io::Result<()> {

@@ -717,6 +717,17 @@ pub struct Store {
     flake: Mutex<HashMap<String, i64>>,
     schemas: std::sync::OnceLock<serialization::schema::SchemaService>,
     map_stores: Mutex<HashMap<String, std::sync::Arc<dyn crate::mapstore::MapStore>>>,
+    /// Optional durability sink: when set (after recovery, before serving), each
+    /// map mutation emits a WAL record. `None` = no persistence (lock-free check).
+    wal_sink: std::sync::OnceLock<std::sync::Arc<dyn WalSink>>,
+}
+
+/// Durability seam: the store emits a record for every map mutation, capturing
+/// the assigned stamp. Implemented by the server's persistence layer (pushes to
+/// the persistence thread); the store crate stays persistence-agnostic.
+pub trait WalSink: Send + Sync {
+    fn map_put(&self, stamp: u64, ttl_ms: u64, map: &str, key: &[u8], value: &[u8]);
+    fn map_remove(&self, stamp: u64, map: &str, key: &[u8]);
 }
 
 struct Ring {
@@ -766,7 +777,13 @@ impl Store {
             flake: Mutex::new(HashMap::new()),
             schemas: std::sync::OnceLock::new(),
             map_stores: Mutex::new(HashMap::new()),
+            wal_sink: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Attach the durability sink (once, after recovery, before serving).
+    pub fn set_wal_sink(&self, sink: std::sync::Arc<dyn WalSink>) {
+        let _ = self.wal_sink.set(sink);
     }
 
     pub fn set_schemas(&self, schemas: serialization::schema::SchemaService) {
@@ -1269,10 +1286,17 @@ impl Store {
         }
         let stamp = self.next_stamp();
         let schemas = self.schemas();
-        self.shard(map, &key)
+        let old = self
+            .shard(map, &key)
             .lock()
             .unwrap()
-            .put(map, &key, &val, 0, stamp, schemas)
+            .put(map, &key, &val, 0, stamp, schemas);
+        // Emit the WAL record AFTER applying, so a truncation snapshot (which
+        // reads the store) can never miss a record whose segment it deletes.
+        if let Some(s) = self.wal_sink.get() {
+            s.map_put(stamp, 0, map, &key, &val);
+        }
+        old
     }
 
     /// Put with TTL in milliseconds (0 == no expiry).
@@ -1282,10 +1306,15 @@ impl Store {
         }
         let stamp = self.next_stamp();
         let schemas = self.schemas();
-        self.shard(map, &key)
+        let old = self
+            .shard(map, &key)
             .lock()
             .unwrap()
-            .put(map, &key, &val, ttl_ms, stamp, schemas)
+            .put(map, &key, &val, ttl_ms, stamp, schemas);
+        if let Some(s) = self.wal_sink.get() {
+            s.map_put(stamp, ttl_ms, map, &key, &val);
+        }
+        old
     }
 
     pub fn set_config(&self, map: &str, config: MapConfig) {
@@ -1336,6 +1365,11 @@ impl Store {
             latest_update,
             schemas,
         );
+        // Persist migrated/replicated entries too (recovery runs before the sink
+        // is attached, so replay never re-persists). Idempotent under the stamp.
+        if let Some(s) = self.wal_sink.get() {
+            s.map_put(stamp, ttl_ms, map, key, val);
+        }
     }
 
     /// Every live entry across all maps as (map, key, value, stamp) — the source
@@ -1453,10 +1487,15 @@ impl Store {
             let _ = store.delete(key);
         }
         let schemas = self.schemas();
-        self.shard(map, key)
+        let old = self
+            .shard(map, key)
             .lock()
             .unwrap()
-            .remove(map, key, schemas)
+            .remove(map, key, schemas);
+        if let Some(s) = self.wal_sink.get() {
+            s.map_remove(self.next_stamp(), map, key);
+        }
+        old
     }
 
     /// Insert only if absent; returns the existing value if present.

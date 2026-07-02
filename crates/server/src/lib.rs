@@ -13,6 +13,7 @@ pub mod member_thread;
 pub mod membership;
 pub mod metrics;
 pub mod migration;
+pub mod persist_thread;
 pub mod reactor;
 #[cfg(test)]
 mod sim;

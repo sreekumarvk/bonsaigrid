@@ -1004,6 +1004,7 @@ dependencies = [
  "jet",
  "libc",
  "member",
+ "persistence",
  "protocol",
  "query",
  "rcgen",
