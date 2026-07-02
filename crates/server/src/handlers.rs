@@ -608,6 +608,47 @@ fn uuid_response(msg_type: i32, uuid: (i64, i64)) -> Vec<Frame> {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Dispatch an AtomicLong CP request: decode it, map to the replicated command,
+/// and submit to the CP subsystem via the member thread. Returns an empty reply
+/// (the committed reply is delivered later by the member thread through the
+/// broker), or a CP-unavailable error when this node has no CP subsystem.
+fn cp_atomiclong(
+    msg_type: i32,
+    req: &[Frame],
+    conn_id: u64,
+    corr: i64,
+    replicator: Option<&Replicator>,
+) -> Vec<Vec<Frame>> {
+    use crate::member_thread::ReplyKind;
+    use codecs::atomiclong::AtomicLongOp as Op;
+    use raft::atomiclong::AlOp;
+
+    let Some(rep) = replicator else {
+        let mut e = error_response(
+            42,
+            "com.hazelcast.cp.exception.CPSubsystemException",
+            "CP subsystem is not enabled on this member",
+        );
+        set_correlation_id(&mut e, corr);
+        return vec![e];
+    };
+    let Some(dec) = codecs::atomiclong::decode_request(msg_type, req) else {
+        return vec![];
+    };
+    let resp_type = codecs::atomiclong::response_type(msg_type).unwrap_or(msg_type + 1);
+    let (op, kind) = match dec.op {
+        Op::Get => (AlOp::Get, ReplyKind::Long),
+        Op::Set(v) => (AlOp::Set(v), ReplyKind::Void),
+        Op::GetAndSet(v) => (AlOp::GetAndSet(v), ReplyKind::Long),
+        Op::AddAndGet(v) => (AlOp::AddAndGet(v), ReplyKind::Long),
+        Op::GetAndAdd(v) => (AlOp::GetAndAdd(v), ReplyKind::Long),
+        Op::CompareAndSet(e, u) => (AlOp::CompareAndSet(e, u), ReplyKind::Bool),
+    };
+    let command = raft::atomiclong::encode(&dec.name, &op);
+    rep.submit_cp(conn_id, corr, resp_type, kind, command);
+    vec![] // deferred: delivered after the op commits
+}
+
 pub fn dispatch(
     req: Vec<Frame>,
     conn_id: u64,
@@ -1624,6 +1665,12 @@ pub fn dispatch(
         1024 => vec![empty_response(1025)],
         // ClientStatistics: periodic client metrics push. Empty ack.
         3072 => vec![empty_response(3073)],
+        // ---- CP subsystem: AtomicLong (linearizable, via Raft) ----
+        // Submit to the default CP group; the reply is deferred and delivered by
+        // the member thread once the op commits (empty replies here = deferred).
+        t if codecs::atomiclong::is_atomiclong(t) => {
+            cp_atomiclong(t, &req, conn_id, corr, replicator)
+        }
         // Unknown op: ack with an empty response of type+1 so the client does
         // not hang (covers e.g. CreateProxy). The live client reveals any op
         // that needs a richer reply (per plan's empirical-risk note).

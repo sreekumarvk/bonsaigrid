@@ -240,8 +240,13 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
         job_rx,
         ev_tx,
         build_member_tls(),
+        std::env::var("BONSAI_CP").is_ok_and(|v| v != "0" && !v.is_empty()),
     );
-    let replicator = Rc::new(if backups > 0 {
+    // The reactor keeps a Replicator when there are IMap backups OR when CP is
+    // enabled (CP submits ride the same member-thread job channel; a 0-backup
+    // Replicator still forwards CpSubmit but never defers IMap writes).
+    let cp_enabled = std::env::var("BONSAI_CP").is_ok_and(|v| v != "0" && !v.is_empty());
+    let replicator = Rc::new(if backups > 0 || cp_enabled {
         Some(server::member_thread::Replicator::new(job_tx, backups))
     } else {
         None

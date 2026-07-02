@@ -211,6 +211,27 @@ impl Replicator {
     pub fn send_membership(&self, cluster: Cluster) {
         let _ = self.tx.push(MemberJob::Membership(cluster));
     }
+
+    /// Submit a client AtomicLong op to the CP subsystem; the reply is delivered
+    /// to `conn_id` once it commits. Returns `false` if the ring was full.
+    pub fn submit_cp(
+        &self,
+        conn_id: u64,
+        correlation: i64,
+        resp_type: i32,
+        kind: ReplyKind,
+        command: Vec<u8>,
+    ) -> bool {
+        self.tx
+            .push(MemberJob::CpSubmit {
+                conn_id,
+                correlation,
+                resp_type,
+                kind,
+                command,
+            })
+            .is_ok()
+    }
 }
 
 pub(crate) struct MemberHandler {
@@ -520,8 +541,10 @@ pub fn spawn(
     rx: spsc::Consumer<MemberJob>,
     events: spsc::Producer<ClusterEvent>,
     member_tls: Option<security::tls::MemberTls>,
+    cp_enabled: bool,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        let cp_group_size = cluster.len();
         let transport = match Transport::bind(self_index, &member_ports) {
             Ok(t) => t.with_tls(member_tls),
             Err(e) => {
@@ -537,7 +560,18 @@ pub fn spawn(
         if let Some(info) = join_as {
             coord.set_pending_join(info);
         }
-        let handler = MemberHandler::new(store, broker, rx, coord, events, merge_latest, peers);
+        let mut handler = MemberHandler::new(store, broker, rx, coord, events, merge_latest, peers);
+        if cp_enabled {
+            // Default CP group = all bootstrap members (NodeId = member index).
+            let node = raft::RaftNode::new(
+                self_index,
+                (0..cp_group_size).collect(),
+                raft::RaftLog::new(),
+                self_index as u64 + 1,
+            );
+            handler.set_cp(CpGroup::new(node));
+            eprintln!("BonsaiGrid CP: AtomicLong enabled (default group, {cp_group_size} members)");
+        }
         let _ = transport.run(handler);
     })
 }
