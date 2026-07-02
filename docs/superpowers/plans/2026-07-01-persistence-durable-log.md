@@ -154,6 +154,8 @@ Phase A core (A1–A4) is self-contained (codecs + recovery, no threads) and ful
 - ✅ **A1–A4 shipped** (`108bcef`) — crates/persistence: WAL record codec (CRC torn-tail), WAL segment writer/reader, sectioned snapshot (atomic rename), recover(); 9 unit + crash-recovery acid test.
 - ✅ **A5–A6 shipped** (`8b2e683`) — store `WalSink` seam (emits after apply; lock-free OnceLock; zero-alloc when unset), `Persister` + `spawn_persistence` (group-commit fsync, roll-before-snapshot truncation), main.rs recover+attach+spawn. End-to-end test: 500 writes+removes → thread → snapshot+truncate → recover.
 - ⏳ **A7 pending** — `sync` durability deferred-ack (defer the client reply until the persistence thread signals fsync-done). `async` (default recommended) is fully working.
-- ⏳ **Phase B pending** — remaining data structures (queue/list/set/multimap/ringbuffer/pncounter): WalSink methods + record types + snapshot sections + replay + op wiring. **Item completion gate.**
+- ✅ **Phase B shipped** (`8b9445c`) — all non-map structures (queue/list/set/multimap/ringbuffer/pncounter) persist + recover via an `AuxState` record (full post-mutation state, last-state-wins) and a snapshot `Aux` section. Fixed a self-deadlock in `all_aux` (array-as-for-iterator held lock guards across the loop). Tests: all six recover from WAL and from snapshot.
+
+**Completion gate met: all data structures persist and recover.** Only `sync` durability deferred-ack (A7) remains as a durability-mode enhancement (`async`, the default/recommended, is fully working).
 
 IMap async persistence works end-to-end on `main`; whole workspace green, zero-alloc hot path intact (sink unset = no cost).
