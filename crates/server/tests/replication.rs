@@ -49,6 +49,7 @@ fn sync_backup_applies_and_delivers_deferred_response() {
         broker1,
         rx1,
         ev1,
+        None,
     );
 
     // Primary (member 0): the deferred response is enqueued on broker0.
@@ -69,6 +70,7 @@ fn sync_backup_applies_and_delivers_deferred_response() {
         broker0.clone(),
         rx0,
         ev0,
+        None,
     );
 
     // Let both listeners come up.

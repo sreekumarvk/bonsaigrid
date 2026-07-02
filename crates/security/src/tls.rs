@@ -122,24 +122,45 @@ fn to_io<E: std::fmt::Display>(e: E) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e.to_string())
 }
 
-// ---- server-side handshake driver ------------------------------------------
+// ---- handshake driver (server or client side) ------------------------------
 
-/// Drives a server TLS handshake over an external byte transport (the io_uring
-/// reactor), then hands off to kTLS. rustls is fed **one complete TLS record at
-/// a time** so the transition to kTLS happens only at a clean record boundary —
-/// no application record is left half-consumed in userspace where the kernel
-/// couldn't see it.
-pub struct ServerHandshake {
-    conn: rustls::ServerConnection,
+/// The internal member-mesh server name. Member certificates must carry this as
+/// a SAN; the dialing side verifies the peer's server cert against it (mutual
+/// auth otherwise rests on the shared CA + client certificate).
+pub const MEMBER_SERVER_NAME: &str = "member.bonsaigrid";
+
+enum Side {
+    Server(rustls::ServerConnection),
+    Client(rustls::ClientConnection),
+}
+
+/// Drives a TLS handshake (either side) over an external byte transport (an
+/// io_uring loop), then hands off to kTLS. rustls is fed **one complete TLS
+/// record at a time** so the transition to kTLS happens only at a clean record
+/// boundary — no application record is left half-consumed in userspace where the
+/// kernel couldn't see it.
+pub struct Handshake {
+    side: Side,
     /// Incoming TLS bytes not yet framed into a complete record.
     buf: Vec<u8>,
 }
 
-impl ServerHandshake {
-    pub fn new(config: Arc<ServerConfig>) -> io::Result<ServerHandshake> {
-        let conn = rustls::ServerConnection::new(config).map_err(to_io)?;
-        Ok(ServerHandshake {
-            conn,
+impl Handshake {
+    /// Server side (we accepted the connection); the peer speaks first.
+    pub fn server(config: Arc<ServerConfig>) -> io::Result<Handshake> {
+        Ok(Handshake {
+            side: Side::Server(rustls::ServerConnection::new(config).map_err(to_io)?),
+            buf: Vec::new(),
+        })
+    }
+
+    /// Client side (we dialed out); we send the ClientHello first — call
+    /// [`pump`](Self::pump) with an empty slice right after construction to emit it.
+    pub fn client(config: Arc<ClientConfig>, server_name: &str) -> io::Result<Handshake> {
+        let name =
+            rustls::pki_types::ServerName::try_from(server_name.to_string()).map_err(to_io)?;
+        Ok(Handshake {
+            side: Side::Client(rustls::ClientConnection::new(config, name).map_err(to_io)?),
             buf: Vec::new(),
         })
     }
@@ -155,34 +176,76 @@ impl ServerHandshake {
         send: &mut Vec<u8>,
         plain: &mut Vec<u8>,
     ) -> io::Result<bool> {
-        use std::io::Read;
-        self.buf.extend_from_slice(incoming);
-
-        while let Some(rec_len) = complete_record_len(&self.buf) {
-            let mut rec: &[u8] = &self.buf[..rec_len];
-            self.conn.read_tls(&mut rec)?;
-            self.buf.drain(0..rec_len);
-            let state = self.conn.process_new_packets().map_err(to_io)?;
-            let n = state.plaintext_bytes_to_read();
-            if n > 0 {
-                let start = plain.len();
-                plain.resize(start + n, 0);
-                self.conn.reader().read_exact(&mut plain[start..])?;
-            }
+        match &mut self.side {
+            Side::Server(c) => pump_conn(c, &mut self.buf, incoming, send, plain),
+            Side::Client(c) => pump_conn(c, &mut self.buf, incoming, send, plain),
         }
-
-        while self.conn.wants_write() {
-            self.conn.write_tls(send)?;
-        }
-
-        Ok(!self.conn.is_handshaking() && self.buf.is_empty())
     }
 
-    /// Extract the negotiated session keys and install kTLS on `fd`.
+    /// Extract the negotiated session keys and install kTLS on `fd` immediately.
+    /// Only safe when no handshake output is still queued to send (the peer would
+    /// otherwise receive the last plaintext handshake record double-encrypted).
+    /// Use [`into_pending`](Self::into_pending) when a final flight (e.g. the
+    /// client's Finished) still has to go out first.
     pub fn into_ktls(self, fd: RawFd) -> io::Result<()> {
-        let secrets = self.conn.dangerous_extract_secrets().map_err(to_io)?;
-        enable_ktls(fd, secrets)
+        self.into_pending()?.install(fd)
     }
+
+    /// Extract the session keys without touching the socket yet. Install kTLS via
+    /// [`PendingKtls::install`] only after the last handshake flight has been
+    /// written to the wire.
+    pub fn into_pending(self) -> io::Result<PendingKtls> {
+        let secrets = match self.side {
+            Side::Server(c) => c.dangerous_extract_secrets(),
+            Side::Client(c) => c.dangerous_extract_secrets(),
+        }
+        .map_err(to_io)?;
+        Ok(PendingKtls { secrets })
+    }
+}
+
+/// Extracted session keys awaiting kTLS install once the final plaintext
+/// handshake flight has been flushed.
+pub struct PendingKtls {
+    secrets: ExtractedSecrets,
+}
+
+impl PendingKtls {
+    /// Install kTLS on `fd` (TLS ULP + TX/RX crypto info).
+    pub fn install(self, fd: RawFd) -> io::Result<()> {
+        enable_ktls(fd, self.secrets)
+    }
+}
+
+/// Shared handshake pump over either connection side.
+fn pump_conn<S: rustls::SideData>(
+    conn: &mut rustls::ConnectionCommon<S>,
+    buf: &mut Vec<u8>,
+    incoming: &[u8],
+    send: &mut Vec<u8>,
+    plain: &mut Vec<u8>,
+) -> io::Result<bool> {
+    use std::io::Read;
+    buf.extend_from_slice(incoming);
+
+    while let Some(rec_len) = complete_record_len(buf) {
+        let mut rec: &[u8] = &buf[..rec_len];
+        conn.read_tls(&mut rec)?;
+        buf.drain(0..rec_len);
+        let state = conn.process_new_packets().map_err(to_io)?;
+        let n = state.plaintext_bytes_to_read();
+        if n > 0 {
+            let start = plain.len();
+            plain.resize(start + n, 0);
+            conn.reader().read_exact(&mut plain[start..])?;
+        }
+    }
+
+    while conn.wants_write() {
+        conn.write_tls(send)?;
+    }
+
+    Ok(!conn.is_handshaking() && buf.is_empty())
 }
 
 /// Reactor-facing bundle: the node's TLS mode plus the server config to run
@@ -201,9 +264,56 @@ impl TlsAcceptor {
         self.mode
     }
     /// Start a fresh server-side handshake for a new connection.
-    pub fn handshake(&self) -> io::Result<ServerHandshake> {
-        ServerHandshake::new(self.config.clone())
+    pub fn handshake(&self) -> io::Result<Handshake> {
+        Handshake::server(self.config.clone())
     }
+}
+
+/// Member-mesh mutual-TLS bundle: this node presents its cert as both a server
+/// (to inbound peers) and a client (dialing out), verifying the peer against the
+/// shared CA in both directions. Cheap to clone.
+#[derive(Clone)]
+pub struct MemberTls {
+    mode: TlsMode,
+    server: Arc<ServerConfig>,
+    client: Arc<ClientConfig>,
+}
+
+impl MemberTls {
+    /// Build from this node's PEM cert chain + key and the peer-verifying CA.
+    pub fn new(
+        mode: TlsMode,
+        certs: Vec<CertificateDer<'static>>,
+        key: PrivateKeyDer<'static>,
+        ca: RootCertStore,
+    ) -> io::Result<MemberTls> {
+        // Reuse the same identity for both roles.
+        let (c2, k2) = (certs.clone(), clone_key(&key));
+        let server = server_config(certs, key, Some(ca.clone()))?; // require client certs (mTLS)
+        let client = client_config(ca, Some((c2, k2)))?; // present our cert when dialing
+        Ok(MemberTls {
+            mode,
+            server,
+            client,
+        })
+    }
+    pub fn mode(&self) -> TlsMode {
+        self.mode
+    }
+    /// Handshake for an inbound (accepted) peer connection — we are the server.
+    pub fn accept(&self) -> io::Result<Handshake> {
+        Handshake::server(self.server.clone())
+    }
+    /// Handshake for an outbound (dialed) peer connection — we are the client.
+    pub fn dial(&self) -> io::Result<Handshake> {
+        Handshake::client(self.client.clone(), MEMBER_SERVER_NAME)
+    }
+}
+
+/// Deep-copy a `PrivateKeyDer` (it isn't `Clone`).
+fn clone_key(key: &PrivateKeyDer<'static>) -> PrivateKeyDer<'static> {
+    PrivateKeyDer::try_from(key.secret_der().to_vec())
+        .expect("re-parse of a valid private key cannot fail")
 }
 
 /// Length (header + payload) of the first complete TLS record in `buf`, or

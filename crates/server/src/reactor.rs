@@ -13,7 +13,7 @@ use io_uring::{opcode, types, IoUring};
 use protocol::fixed::read_u16_le;
 use protocol::fragment::Reassembler;
 use protocol::frame::{message_len, UNFRAGMENTED};
-use security::tls::{ServerHandshake, TlsAcceptor, TlsMode};
+use security::tls::{Handshake, TlsAcceptor, TlsMode};
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -24,7 +24,7 @@ enum ConnTls {
     /// Permissive mode: decide TLS-vs-plaintext from the first received byte.
     Detect,
     /// TLS handshake in progress (userspace rustls).
-    Handshaking(Box<ServerHandshake>),
+    Handshaking(Box<Handshake>),
     /// kTLS installed — the io_uring data path carries plaintext, kernel crypts.
     Ktls,
 }

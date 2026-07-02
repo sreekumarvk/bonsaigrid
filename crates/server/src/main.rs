@@ -87,6 +87,29 @@ fn build_tls_acceptor() -> Option<security::tls::TlsAcceptor> {
     Some(security::tls::TlsAcceptor::new(mode, config))
 }
 
+/// Build the member-mesh mutual-TLS bundle from `BONSAI_TLS_MODE` + PEM paths
+/// (cert, key, and the peer-verifying CA — all required when TLS is on). `None`
+/// when TLS is disabled.
+fn build_member_tls() -> Option<security::tls::MemberTls> {
+    let mode = security::tls::TlsMode::parse(&std::env::var("BONSAI_TLS_MODE").unwrap_or_default());
+    if !mode.tls_enabled() {
+        return None;
+    }
+    let read = |var: &str| -> Vec<u8> {
+        let path = std::env::var(var).unwrap_or_else(|_| panic!("{var} required when TLS enabled"));
+        std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read {var} {path}: {e}"))
+    };
+    let tls = security::tls::MemberTls::new(
+        mode,
+        security::tls::load_certs(&read("BONSAI_TLS_CERT")).expect("invalid BONSAI_TLS_CERT"),
+        security::tls::load_private_key(&read("BONSAI_TLS_KEY")).expect("invalid BONSAI_TLS_KEY"),
+        security::tls::load_ca(&read("BONSAI_TLS_CA")).expect("invalid BONSAI_TLS_CA"),
+    )
+    .expect("build member mTLS");
+    eprintln!("BonsaiGrid TLS: member mesh mTLS mode={mode:?}");
+    Some(tls)
+}
+
 fn cluster_members(n: usize) -> Vec<Member> {
     (0..n)
         .map(|i| Member {
@@ -183,6 +206,7 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
         broker.clone(),
         job_rx,
         ev_tx,
+        build_member_tls(),
     );
     let replicator = Rc::new(if backups > 0 {
         Some(server::member_thread::Replicator::new(job_tx, backups))

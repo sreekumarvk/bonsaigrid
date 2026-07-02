@@ -54,6 +54,66 @@ impl Handler for Backup {
     }
 }
 
+/// One shared self-signed member identity (cert = its own CA), with the
+/// required member-mesh SAN. Used by both members for mutual TLS.
+fn shared_member_tls() -> security::tls::MemberTls {
+    let ck =
+        rcgen::generate_simple_self_signed(vec![security::tls::MEMBER_SERVER_NAME.into()]).unwrap();
+    security::tls::MemberTls::new(
+        security::tls::TlsMode::Required,
+        security::tls::load_certs(ck.cert.pem().as_bytes()).unwrap(),
+        security::tls::load_private_key(ck.key_pair.serialize_pem().as_bytes()).unwrap(),
+        security::tls::load_ca(ck.cert.pem().as_bytes()).unwrap(),
+    )
+    .unwrap()
+}
+
+/// Same BackupPut → Ack exchange, but over the member mesh with mutual TLS: the
+/// io_uring transport drives the handshake, installs kTLS, and routes the
+/// encrypted frames end-to-end.
+#[test]
+fn put_then_ack_over_loopback_mtls() {
+    const TPORTS: [i32; 2] = [17821, 17822];
+    let mtls = shared_member_tls();
+    let got_ack = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let (b_stop, b_tls) = (stop.clone(), mtls.clone());
+    let b = std::thread::spawn(move || {
+        Transport::bind(1, &TPORTS)
+            .unwrap()
+            .with_tls(Some(b_tls))
+            .run(Backup { stop: b_stop })
+            .unwrap();
+    });
+    std::thread::sleep(Duration::from_millis(200));
+
+    let (a_ack, a_stop, a_tls) = (got_ack.clone(), stop.clone(), mtls);
+    let a = std::thread::spawn(move || {
+        Transport::bind(0, &TPORTS)
+            .unwrap()
+            .with_tls(Some(a_tls))
+            .run(Sender {
+                sent: false,
+                got_ack: a_ack,
+                stop: a_stop,
+            })
+            .unwrap();
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && !got_ack.load(SeqCst) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        got_ack.load(SeqCst),
+        "member 0 did not receive the Ack over mutual TLS within 5s"
+    );
+    stop.store(true, SeqCst);
+    a.join().unwrap();
+    b.join().unwrap();
+}
+
 #[test]
 fn put_then_ack_over_loopback() {
     let got_ack = Arc::new(AtomicBool::new(false));

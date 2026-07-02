@@ -364,10 +364,11 @@ pub fn spawn(
     broker: Arc<EventBroker>,
     rx: spsc::Consumer<MemberJob>,
     events: spsc::Producer<ClusterEvent>,
+    member_tls: Option<security::tls::MemberTls>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let transport = match Transport::bind(self_index, &member_ports) {
-            Ok(t) => t,
+            Ok(t) => t.with_tls(member_tls),
             Err(e) => {
                 eprintln!(
                     "member transport bind failed on port {}: {e}",
