@@ -55,11 +55,11 @@ Now that we understand the problem and the solution, what are we actually buildi
 
 ## 4. The "Extreme" Constraints (Things we must take care of)
 
-If we just threw together a standard Rust `HashMap` behind a TCP server, it would work, but it wouldn't be groundbreaking. To make BonsaiGrid exceptionally fast and memory-efficient, we have three strict, non-negotiable architectural "guardrails":
+Putting a standard Rust `HashMap` behind a TCP server is a valid solution that might be sufficient for smaller scale problems. However, the problem we are trying to solve is much larger—requiring massive scale and extreme throughput. To achieve this, we need to extend the solution further using three strict architectural "guardrails":
 
 > [!CAUTION]
 > **Constraint 1: Zero-Allocation in the Hot Path**
-> **The Problem:** In languages like Java (or even standard Rust), when a request comes in, you typically allocate memory dynamically on the "heap" (e.g., calling `malloc`, creating a new `String` or `Vec`). Doing this millions of times a second causes memory fragmentation and triggers Garbage Collection pauses, grinding the system to a halt.
+> **The Problem:** In managed languages like Java, allocating memory dynamically on the "heap" for every request triggers Garbage Collection pauses. Even in languages without garbage collection like standard Rust, constantly calling `malloc` (or creating new `String`s or `Vec`s) millions of times a second introduces significant overhead and allocator contention, which degrades system performance.
 > **The Solution:** We will allocate one massive chunk of memory when the server boots up. After that, we are *forbidden* from allocating new memory. We will recycle memory from this pre-allocated chunk using a **Slab Allocator**.
 
 > [!WARNING]
