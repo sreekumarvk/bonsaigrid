@@ -100,9 +100,9 @@ Each thread spins up its own infinite loop using `io_uring` to constantly check 
 ### Phase 4: Cross-Core and Cross-Machine Routing
 This is the magic of distributed systems. To scale beyond one machine, the entire keyspace is divided into a fixed number of "Partitions" (e.g., 271). Each partition is exclusively owned by a specific machine, and further assigned to exactly one CPU core on that machine.
 
-Let's trace a request from a basic client that connects to a random node:
+Let's trace a request from a basic ("dumb") client routed through a standard network load balancer:
 1. User sends `Put(Key="apple", Value="red")`. 
-2. The network load balancer randomly routes this TCP connection to **Machine A, Core 0**.
+2. A standard network load balancer operates at TCP Layer 4. It only sees raw bytes and doesn't understand the BonsaiGrid binary protocol, so it cannot extract the key `"apple"` to compute its hash. Therefore, it blindly routes the TCP connection to a random node—let's say **Machine A, Core 0**.
 3. Core 0 reads the bytes and sees the key `"apple"`. 
 4. How do we know where `"apple"` lives? We use a deterministic mathematical function (MurmurHash3):
    `Hash("apple") = 847291`
