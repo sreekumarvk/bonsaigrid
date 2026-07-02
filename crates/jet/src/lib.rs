@@ -1,4 +1,5 @@
 pub mod codecs;
+pub mod connectors;
 pub mod dag;
 pub mod executor;
 pub mod join;
