@@ -147,7 +147,7 @@ You know you are done when a Hazelcast client can `Put("a", "b")`, disconnect, r
 
 ---
 
-## 7. What We Ignored (The Hard Parts of Distributed Systems)
+## 7. What We Did Not Explain In This Tutorial (The Hard Parts of Distributed Systems)
 
 To keep this tutorial focused on the core performance mechanics (Thread-Per-Core and Zero-Allocation), we skipped over several massive complexities that BonsaiGrid must handle behind the scenes:
 
