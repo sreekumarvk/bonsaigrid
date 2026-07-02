@@ -149,7 +149,7 @@ You know you are done when a Hazelcast client can `Put("a", "b")`, disconnect, r
 
 ## 7. What We Did Not Explain In This Tutorial (The Hard Parts of Distributed Systems)
 
-To keep this tutorial focused on the core performance mechanics (Thread-Per-Core and Zero-Allocation), we skipped over several massive complexities that BonsaiGrid must handle behind the scenes:
+To keep this tutorial focused on the core performance mechanics (Thread-Per-Core and Zero-Allocation), we skipped over several massive complexities that BonsaiGrid handles behind the scenes:
 
 1. **High Availability & Replication:** What happens if a machine loses power? If it held the only copy of Partition 42, that data is permanently lost. To prevent this, every piece of data is replicated. Each partition has a "Primary" owner and one or more "Backup" owners on different machines. When you write to the Primary, it copies the data to the Backups before returning success.
 2. **Dynamic Membership & Re-partitioning:** What happens when you add a new machine to the cluster to handle more traffic? The system must automatically re-balance the 271 partitions across the new topology. This involves carefully migrating gigabytes of data over the network from the old owners to the new machine, entirely in the background, without pausing incoming user requests.
