@@ -25,3 +25,5 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 protocol = { path = "../protocol" }
 codecs = { path = "../codecs" }
 store = { path = "../store" }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }

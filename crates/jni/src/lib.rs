@@ -113,6 +113,7 @@ pub extern "system" fn Java_com_bonsaigrid_BonsaiGrid_startServer(_env: JNIEnv, 
                 cb.drop_conn(conn_id)
             },
             || {},
+            None, // embedded: TLS not applied on the in-process listener
         );
     });
 }

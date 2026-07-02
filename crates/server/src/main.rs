@@ -65,6 +65,28 @@ fn build_security() -> Arc<security::SecurityContext> {
     }
 }
 
+/// Build the client-protocol TLS acceptor from `BONSAI_TLS_MODE` + PEM paths.
+/// `None` when TLS is disabled. Panics on a misconfigured cert/key (we refuse to
+/// start advertising TLS we can't serve).
+fn build_tls_acceptor() -> Option<security::tls::TlsAcceptor> {
+    let mode = security::tls::TlsMode::parse(&std::env::var("BONSAI_TLS_MODE").unwrap_or_default());
+    if !mode.tls_enabled() {
+        return None;
+    }
+    let read = |var: &str| -> Vec<u8> {
+        let path = std::env::var(var).unwrap_or_else(|_| panic!("{var} required when TLS enabled"));
+        std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read {var} {path}: {e}"))
+    };
+    let config = security::tls::server_config(
+        security::tls::load_certs(&read("BONSAI_TLS_CERT")).expect("invalid BONSAI_TLS_CERT"),
+        security::tls::load_private_key(&read("BONSAI_TLS_KEY")).expect("invalid BONSAI_TLS_KEY"),
+        None, // client-protocol TLS does not require client certs (that is member mTLS)
+    )
+    .expect("build TLS server config");
+    eprintln!("BonsaiGrid TLS: client protocol mode={mode:?}");
+    Some(security::tls::TlsAcceptor::new(mode, config))
+}
+
 fn cluster_members(n: usize) -> Vec<Member> {
     (0..n)
         .map(|i| Member {
@@ -267,6 +289,7 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
             cb.drop_conn(conn_id)
         },
         on_cluster,
+        build_tls_acceptor(),
     )
 }
 
@@ -348,6 +371,7 @@ fn run_single_node() -> std::io::Result<()> {
     );
 
     let mut handles = Vec::new();
+    let tls_acceptor = build_tls_acceptor();
     for i in 0..cores {
         let store = store.clone();
         let cfg = cfg.clone();
@@ -358,6 +382,7 @@ fn run_single_node() -> std::io::Result<()> {
         let txn_service = txn_service.clone();
         let jet_service = jet_service.clone();
         let cluster = cluster.clone();
+        let tls_acceptor = tls_acceptor.clone();
         let main_listener = reuseport_listener(addr)?;
         let tpc_addr: SocketAddr = format!("127.0.0.1:{}", TPC_BASE + i as i32)
             .parse()
@@ -414,6 +439,7 @@ fn run_single_node() -> std::io::Result<()> {
                     cb.drop_conn(conn_id)
                 },
                 || {}, // single node: no membership changes
+                tls_acceptor,
             );
         }));
     }

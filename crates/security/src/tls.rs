@@ -122,6 +122,106 @@ fn to_io<E: std::fmt::Display>(e: E) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, e.to_string())
 }
 
+// ---- server-side handshake driver ------------------------------------------
+
+/// Drives a server TLS handshake over an external byte transport (the io_uring
+/// reactor), then hands off to kTLS. rustls is fed **one complete TLS record at
+/// a time** so the transition to kTLS happens only at a clean record boundary —
+/// no application record is left half-consumed in userspace where the kernel
+/// couldn't see it.
+pub struct ServerHandshake {
+    conn: rustls::ServerConnection,
+    /// Incoming TLS bytes not yet framed into a complete record.
+    buf: Vec<u8>,
+}
+
+impl ServerHandshake {
+    pub fn new(config: Arc<ServerConfig>) -> io::Result<ServerHandshake> {
+        let conn = rustls::ServerConnection::new(config).map_err(to_io)?;
+        Ok(ServerHandshake {
+            conn,
+            buf: Vec::new(),
+        })
+    }
+
+    /// Feed newly-received bytes. Outgoing TLS bytes (handshake/alerts) are
+    /// appended to `send`; any decrypted application plaintext is appended to
+    /// `plain`. Returns `true` once the handshake is complete AND all buffered
+    /// TLS data has been consumed at a record boundary — the safe point to
+    /// install kTLS via [`into_ktls`](Self::into_ktls).
+    pub fn pump(
+        &mut self,
+        incoming: &[u8],
+        send: &mut Vec<u8>,
+        plain: &mut Vec<u8>,
+    ) -> io::Result<bool> {
+        use std::io::Read;
+        self.buf.extend_from_slice(incoming);
+
+        while let Some(rec_len) = complete_record_len(&self.buf) {
+            let mut rec: &[u8] = &self.buf[..rec_len];
+            self.conn.read_tls(&mut rec)?;
+            self.buf.drain(0..rec_len);
+            let state = self.conn.process_new_packets().map_err(to_io)?;
+            let n = state.plaintext_bytes_to_read();
+            if n > 0 {
+                let start = plain.len();
+                plain.resize(start + n, 0);
+                self.conn.reader().read_exact(&mut plain[start..])?;
+            }
+        }
+
+        while self.conn.wants_write() {
+            self.conn.write_tls(send)?;
+        }
+
+        Ok(!self.conn.is_handshaking() && self.buf.is_empty())
+    }
+
+    /// Extract the negotiated session keys and install kTLS on `fd`.
+    pub fn into_ktls(self, fd: RawFd) -> io::Result<()> {
+        let secrets = self.conn.dangerous_extract_secrets().map_err(to_io)?;
+        enable_ktls(fd, secrets)
+    }
+}
+
+/// Reactor-facing bundle: the node's TLS mode plus the server config to run
+/// handshakes with. Cheap to clone (the config is shared).
+#[derive(Clone)]
+pub struct TlsAcceptor {
+    mode: TlsMode,
+    config: Arc<ServerConfig>,
+}
+
+impl TlsAcceptor {
+    pub fn new(mode: TlsMode, config: Arc<ServerConfig>) -> TlsAcceptor {
+        TlsAcceptor { mode, config }
+    }
+    pub fn mode(&self) -> TlsMode {
+        self.mode
+    }
+    /// Start a fresh server-side handshake for a new connection.
+    pub fn handshake(&self) -> io::Result<ServerHandshake> {
+        ServerHandshake::new(self.config.clone())
+    }
+}
+
+/// Length (header + payload) of the first complete TLS record in `buf`, or
+/// `None` if a full record isn't present yet. A TLS record is
+/// `type(1) | version(2) | length(2, big-endian) | payload(length)`.
+fn complete_record_len(buf: &[u8]) -> Option<usize> {
+    if buf.len() < 5 {
+        return None;
+    }
+    let payload = u16::from_be_bytes([buf[3], buf[4]]) as usize;
+    let total = 5 + payload;
+    if buf.len() < total {
+        None
+    } else {
+        Some(total)
+    }
+}
+
 // ---- kTLS setsockopt --------------------------------------------------------
 
 // From <linux/tls.h> / <netinet/tcp.h>.

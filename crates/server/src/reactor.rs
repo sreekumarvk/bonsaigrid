@@ -13,8 +13,21 @@ use io_uring::{opcode, types, IoUring};
 use protocol::fixed::read_u16_le;
 use protocol::fragment::Reassembler;
 use protocol::frame::{message_len, UNFRAGMENTED};
+use security::tls::{ServerHandshake, TlsAcceptor, TlsMode};
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Per-connection transport-security state.
+enum ConnTls {
+    /// Plaintext (TLS disabled, or a permissive connection that spoke plaintext).
+    Plain,
+    /// Permissive mode: decide TLS-vs-plaintext from the first received byte.
+    Detect,
+    /// TLS handshake in progress (userspace rustls).
+    Handshaking(Box<ServerHandshake>),
+    /// kTLS installed — the io_uring data path carries plaintext, kernel crypts.
+    Ktls,
+}
 
 // Globally-unique connection ids, so a shared event broker can address any
 // connection across reactor threads.
@@ -49,10 +62,11 @@ struct Conn {
     close_after_flush: bool,
     open: bool,
     frag: Reassembler,
+    tls: ConnTls,
 }
 
 impl Conn {
-    fn new(fd: RawFd) -> Conn {
+    fn new(fd: RawFd, tls: ConnTls) -> Conn {
         let mut out = Vec::new();
         out.reserve_exact(OUT_CAP);
         let mut sendbuf = Vec::new();
@@ -69,7 +83,23 @@ impl Conn {
             close_after_flush: false,
             open: true,
             frag: Reassembler::new(),
+            tls,
         }
+    }
+}
+
+/// The initial per-connection TLS state implied by the node's acceptor.
+fn initial_tls(acceptor: &Option<TlsAcceptor>) -> ConnTls {
+    match acceptor {
+        None => ConnTls::Plain,
+        Some(a) => match a.mode() {
+            TlsMode::Disabled => ConnTls::Plain,
+            TlsMode::Permissive => ConnTls::Detect,
+            TlsMode::Required => match a.handshake() {
+                Ok(hs) => ConnTls::Handshaking(Box::new(hs)),
+                Err(_) => ConnTls::Plain, // config error; fall back (accept will still work)
+            },
+        },
     }
 }
 
@@ -94,6 +124,7 @@ pub fn run(
     drain_events: impl Fn(u64, &mut Vec<u8>),
     on_close: impl Fn(u64),
     mut on_tick: impl FnMut(),
+    tls: Option<TlsAcceptor>,
 ) -> std::io::Result<()> {
     let fds: Vec<RawFd> = listeners.iter().map(|l| l.as_raw_fd()).collect();
     let mut ring = IoUring::new(4096)?;
@@ -146,11 +177,11 @@ pub fn run(
                     let fd = res as RawFd;
                     let id = match free.pop() {
                         Some(i) => {
-                            conns[i] = Some(Conn::new(fd));
+                            conns[i] = Some(Conn::new(fd, initial_tls(&tls)));
                             i
                         }
                         None => {
-                            conns.push(Some(Conn::new(fd)));
+                            conns.push(Some(Conn::new(fd, initial_tls(&tls))));
                             conns.len() - 1
                         }
                     };
@@ -176,6 +207,7 @@ pub fn run(
                     &mut dispatch,
                     &http,
                     &drain_events,
+                    &tls,
                 );
             }
 
@@ -257,6 +289,7 @@ fn maybe_arm_send(
     pending.push(entry);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn on_recv(
     conns: &mut [Option<Conn>],
     id: usize,
@@ -265,17 +298,25 @@ fn on_recv(
     dispatch: &mut impl FnMut(&[u8], u64, &mut Vec<u8>),
     http: &impl Fn(&str) -> (u16, &'static str, String),
     drain_events: &impl Fn(u64, &mut Vec<u8>),
+    tls: &Option<TlsAcceptor>,
 ) {
     if res <= 0 {
         conns[id].as_mut().unwrap().open = false;
         return;
     }
     let n = res as usize;
-    let c = conns[id].as_mut().unwrap();
-    c.acc.extend_from_slice(&c.rbuf[..n]);
+    // Turn this recv into plaintext in `acc` (driving the TLS handshake when
+    // needed). If we're mid-handshake with nothing to dispatch yet, just wait.
+    if !tls_ingest(conns, id, n, pending, tls) {
+        if conns[id].as_ref().map(|c| c.open).unwrap_or(false) {
+            arm_recv(conns, id, pending);
+        }
+        return;
+    }
 
     // Detect the protocol from the first bytes: "CP2" -> binary client, anything
     // else (an HTTP method) -> REST.
+    let c = conns[id].as_mut().unwrap();
     if c.mode == Mode::Unknown {
         if c.acc.len() < 3 {
             arm_recv(conns, id, pending);
@@ -389,4 +430,99 @@ fn on_send(
     }
     // If more queued (or a partial send), arm the next send.
     maybe_arm_send(conns, id, pending);
+}
+
+/// Turn a recv into plaintext appended to the connection's `acc`, advancing the
+/// TLS handshake when needed. Returns `true` if there is plaintext to try
+/// dispatching, `false` if we're mid-handshake (the caller just waits for more).
+fn tls_ingest(
+    conns: &mut [Option<Conn>],
+    id: usize,
+    n: usize,
+    pending: &mut Vec<io_uring::squeue::Entry>,
+    tls: &Option<TlsAcceptor>,
+) -> bool {
+    let mut start_handshake = false;
+    {
+        let c = conns[id].as_mut().unwrap();
+        match c.tls {
+            // Plaintext (or kTLS: the kernel already decrypted the bytes).
+            ConnTls::Plain | ConnTls::Ktls => {
+                c.acc.extend_from_slice(&c.rbuf[..n]);
+                return true;
+            }
+            // Permissive: a leading 0x16 is a TLS handshake record; else plaintext.
+            ConnTls::Detect => {
+                if n > 0 && c.rbuf[0] == 0x16 {
+                    start_handshake = true;
+                } else {
+                    c.tls = ConnTls::Plain;
+                    c.acc.extend_from_slice(&c.rbuf[..n]);
+                    return true;
+                }
+            }
+            ConnTls::Handshaking(_) => {}
+        }
+    }
+    if start_handshake {
+        match tls.as_ref().and_then(|a| a.handshake().ok()) {
+            Some(hs) => conns[id].as_mut().unwrap().tls = ConnTls::Handshaking(Box::new(hs)),
+            None => {
+                conns[id].as_mut().unwrap().open = false;
+                return false;
+            }
+        }
+    }
+    pump_handshake(conns, id, n, pending)
+}
+
+/// Feed a recv into the in-progress rustls handshake; send its output; install
+/// kTLS at a clean record boundary once the handshake completes. Returns `true`
+/// if application plaintext was produced (proceed to dispatch).
+fn pump_handshake(
+    conns: &mut [Option<Conn>],
+    id: usize,
+    n: usize,
+    pending: &mut Vec<io_uring::squeue::Entry>,
+) -> bool {
+    {
+        let c = conns[id].as_mut().unwrap();
+        // Move the handshake out so we can borrow `rbuf`/`out` freely.
+        let mut hs = match std::mem::replace(&mut c.tls, ConnTls::Plain) {
+            ConnTls::Handshaking(hs) => hs,
+            other => {
+                c.tls = other;
+                return true;
+            }
+        };
+        let (mut send, mut plain) = (Vec::new(), Vec::new());
+        match hs.pump(&c.rbuf[..n], &mut send, &mut plain) {
+            Ok(ready) => {
+                if !send.is_empty() {
+                    c.out.extend_from_slice(&send);
+                }
+                if !plain.is_empty() {
+                    c.acc.extend_from_slice(&plain);
+                }
+                if ready {
+                    match hs.into_ktls(c.fd) {
+                        Ok(()) => c.tls = ConnTls::Ktls,
+                        Err(_) => c.open = false,
+                    }
+                } else {
+                    c.tls = ConnTls::Handshaking(hs);
+                }
+            }
+            Err(_) => c.open = false,
+        }
+    }
+    // Flush any handshake output, then dispatch only if we produced plaintext.
+    if conns[id].as_ref().map(|c| c.open).unwrap_or(false) {
+        maybe_arm_send(conns, id, pending);
+        return conns[id]
+            .as_ref()
+            .map(|c| !c.acc.is_empty())
+            .unwrap_or(false);
+    }
+    false
 }
