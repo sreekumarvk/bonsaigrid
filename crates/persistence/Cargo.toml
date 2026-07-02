@@ -1,0 +1,8 @@
+[package]
+name = "persistence"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+store = { path = "../store" }
+crc32fast = "1"
