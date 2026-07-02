@@ -145,6 +145,7 @@ impl SimCluster {
                 ev_tx,
                 true,
                 peers,
+                i,
             );
             nodes.push(Node {
                 handler,
@@ -370,6 +371,44 @@ mod tests {
     /// INVARIANT 1 — Durability across failover.
     /// Every write acknowledged to the client must survive the loss of its
     /// partition owner: the synchronous backup holds it and is promoted.
+    /// Distributed SQL: a COUNT(*) scattered from one member gathers each
+    /// member's local partial and merges to the cluster-wide total.
+    #[test]
+    fn distributed_sql_count_scatters_gathers_and_merges() {
+        let mut sim = SimCluster::new(3, 1, 2, 0x5017);
+        settle(&mut sim);
+        // Rows placed directly in each member's store (COUNT(*) needs no field
+        // extraction): 20 + 15 + 8 = 43 across the cluster.
+        for (node, n) in [(0usize, 20u32), (1, 15), (2, 8)] {
+            for k in 0..n {
+                sim.nodes[node].store.put_ttl(
+                    "m",
+                    format!("{node}-{k}").into_bytes(),
+                    b"v".to_vec(),
+                    0,
+                );
+            }
+        }
+        let conn = 77;
+        let pushed = sim.nodes[0].job_tx.push(MemberJob::SqlScatter {
+            conn_id: conn,
+            correlation: 5,
+            sql: "SELECT COUNT(*) FROM m".into(),
+        });
+        assert!(pushed.is_ok(), "job queued");
+        sim.run(40);
+        let delivered = sim.nodes[0].broker.drain(conn);
+        assert!(
+            !delivered.is_empty(),
+            "the coordinator delivered a gathered response"
+        );
+        // The merged COUNT(*) row carries the cluster-wide total "43".
+        assert!(
+            delivered[0].windows(2).any(|w| w == b"43"),
+            "COUNT(*) merged across all three members to 43"
+        );
+    }
+
     #[test]
     fn acked_writes_survive_owner_failover() {
         let mut sim = SimCluster::new(3, 1, 2, 0xD00D);

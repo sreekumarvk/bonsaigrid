@@ -87,6 +87,11 @@ pub enum Msg {
     /// a forward-to-leader, or a committed reply). The member transport carries it
     /// verbatim; the CP layer owns its encoding.
     Cp { payload: Vec<u8> },
+    /// Distributed SQL: a coordinator asks a member to run `sql` over its local
+    /// partitions and return a partial aggregate tagged with `req_id`.
+    SqlScatter { req_id: u64, sql: String },
+    /// Distributed SQL: a member's serialized partial aggregate for `req_id`.
+    SqlPartial { req_id: u64, payload: Vec<u8> },
 }
 
 const KIND_HELLO: u8 = 0;
@@ -104,6 +109,8 @@ const KIND_MIG_AUX: u8 = 11;
 const KIND_BACKUP_MM: u8 = 12;
 const KIND_MIG_MM: u8 = 13;
 const KIND_CP: u8 = 14;
+const KIND_SQL_SCATTER: u8 = 15;
+const KIND_SQL_PARTIAL: u8 = 16;
 
 fn put_values(out: &mut Vec<u8>, values: &[Vec<u8>]) {
     put_u32(out, values.len() as u32);
@@ -284,6 +291,16 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             body.push(KIND_CP);
             put_blob(&mut body, payload);
         }
+        Msg::SqlScatter { req_id, sql } => {
+            body.push(KIND_SQL_SCATTER);
+            put_u64(&mut body, *req_id);
+            put_blob(&mut body, sql.as_bytes());
+        }
+        Msg::SqlPartial { req_id, payload } => {
+            body.push(KIND_SQL_PARTIAL);
+            put_u64(&mut body, *req_id);
+            put_blob(&mut body, payload);
+        }
     }
     let mut frame = Vec::with_capacity(4 + body.len());
     put_u32(&mut frame, body.len() as u32);
@@ -453,6 +470,14 @@ pub fn decode(buf: &[u8]) -> Option<(Msg, usize)> {
             }
         }
         KIND_CP => Msg::Cp { payload: r.blob()? },
+        KIND_SQL_SCATTER => Msg::SqlScatter {
+            req_id: r.u64()?,
+            sql: r.string()?,
+        },
+        KIND_SQL_PARTIAL => Msg::SqlPartial {
+            req_id: r.u64()?,
+            payload: r.blob()?,
+        },
         _ => return None,
     };
     Some((msg, total))
@@ -468,6 +493,14 @@ mod tests {
             Msg::Hello { index: 2 },
             Msg::Cp {
                 payload: b"\x00\x01\x02opaque-cp-bytes".to_vec(),
+            },
+            Msg::SqlScatter {
+                req_id: 9,
+                sql: "SELECT COUNT(*) FROM m".into(),
+            },
+            Msg::SqlPartial {
+                req_id: 9,
+                payload: b"partial-bytes".to_vec(),
             },
             Msg::Ack { op_id: 7 },
             Msg::BackupPut {

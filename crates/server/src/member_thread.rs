@@ -161,6 +161,10 @@ const MIG_CHUNK: usize = 256;
 /// force-completed so a dead backup can't wedge the primary.
 const ACK_TIMEOUT_TICKS: u32 = 5000;
 
+/// ~5 s: a distributed-SQL gather whose members never all reply is finalized with
+/// whatever partials arrived (a down member can't wedge the query).
+const SQL_GATHER_TIMEOUT: u32 = 5000;
+
 pub enum MemberJob {
     /// Replicate a write; deliver `response` to `conn_id` once backups ack.
     Replicate {
@@ -180,6 +184,12 @@ pub enum MemberJob {
         resp_type: i32,
         kind: ReplyKind,
         command: Vec<u8>,
+    },
+    /// A distributed SQL query to scatter to all members and gather.
+    SqlScatter {
+        conn_id: u64,
+        correlation: i64,
+        sql: String,
     },
 }
 
@@ -263,6 +273,29 @@ impl Replicator {
             })
             .is_ok()
     }
+
+    /// Scatter a distributed SQL query: the member thread fans it to all members,
+    /// gathers partial aggregates, merges, and delivers the reply to `conn_id`.
+    pub fn scatter_sql(&self, conn_id: u64, correlation: i64, sql: String) -> bool {
+        self.tx
+            .push(MemberJob::SqlScatter {
+                conn_id,
+                correlation,
+                sql,
+            })
+            .is_ok()
+    }
+}
+
+/// A distributed-SQL gather in flight on the coordinator: partials accumulate
+/// until every member has replied (or the gather times out).
+struct Gather {
+    conn_id: u64,
+    correlation: i64,
+    select: query::sql::Select,
+    partials: Vec<query::distributed::Partial>,
+    expected: usize,
+    age: u32,
 }
 
 pub(crate) struct MemberHandler {
@@ -278,6 +311,11 @@ pub(crate) struct MemberHandler {
     peers: Peers,
     /// CP subsystem (default group); `None` unless CP is enabled for this node.
     cp: Option<CpState>,
+    /// This member's index (for distributed-SQL peer routing).
+    self_index: usize,
+    /// In-flight distributed-SQL gathers this member coordinates, by req_id.
+    gathers: HashMap<u64, Gather>,
+    next_req: u64,
 }
 
 impl MemberHandler {
@@ -292,6 +330,7 @@ impl MemberHandler {
         events: spsc::Producer<ClusterEvent>,
         merge_latest: bool,
         peers: Peers,
+        self_index: usize,
     ) -> MemberHandler {
         MemberHandler {
             store,
@@ -303,12 +342,57 @@ impl MemberHandler {
             merge_latest,
             peers,
             cp: None,
+            self_index,
+            gathers: HashMap::new(),
+            next_req: 1,
         }
     }
 
     /// Enable the CP subsystem on this member with `group` as the default group.
     pub(crate) fn set_cp(&mut self, group: CpGroup) {
         self.cp = Some(CpState::new(group));
+    }
+
+    // ---- distributed SQL (scatter/gather) ----
+
+    /// Compute this member's partial aggregate for `sql` over its local partitions.
+    fn sql_local_partial(
+        &self,
+        sql: &str,
+    ) -> Option<(query::sql::Select, query::distributed::Partial)> {
+        let sel = match query::sql::parse(sql)? {
+            query::sql::Statement::Select(s) => s,
+            _ => return None,
+        };
+        let entries = self.store.entries(&sel.map);
+        let p = query::distributed::local_partial(
+            &sel,
+            &entries,
+            self.store.schemas(),
+            &serialization::compact::AutoExtractor,
+            None,
+        );
+        Some((sel, p))
+    }
+
+    /// All member indices except this one.
+    fn sql_peers(&self) -> Vec<usize> {
+        (0..self.coord.cluster.len())
+            .filter(|&i| i != self.self_index)
+            .collect()
+    }
+
+    /// Merge a completed gather and build the SQL response bytes (correlation set).
+    fn sql_response_bytes(
+        select: &query::sql::Select,
+        partials: Vec<query::distributed::Partial>,
+        corr: i64,
+    ) -> Vec<u8> {
+        let merged = query::distributed::merge(partials);
+        let (cols, rows) = query::distributed::finalize(select, &merged);
+        let mut frames = codecs::sql::encode_execute_response(&cols, &rows);
+        protocol::fixed::write_i64_le(&mut frames[0].content, 4, corr);
+        protocol::frame::write_message(&frames)
     }
 
     /// The membership view this member currently believes (test/sim only).
@@ -492,6 +576,34 @@ impl Handler for MemberHandler {
                     self.broker.enqueue(conn, bytes);
                 }
             }
+            Msg::SqlScatter { req_id, sql } => {
+                // Peer role: run the query locally and return our partial.
+                if let Some((_, p)) = self.sql_local_partial(&sql) {
+                    outbox.push((
+                        src,
+                        Msg::SqlPartial {
+                            req_id,
+                            payload: query::distributed::encode_partial(&p),
+                        },
+                    ));
+                }
+            }
+            Msg::SqlPartial { req_id, payload } => {
+                // Coordinator role: accumulate; finalize when every member replied.
+                let done = if let Some(g) = self.gathers.get_mut(&req_id) {
+                    if let Some(p) = query::distributed::decode_partial(&payload) {
+                        g.partials.push(p);
+                    }
+                    g.partials.len() >= g.expected
+                } else {
+                    false
+                };
+                if done {
+                    let g = self.gathers.remove(&req_id).unwrap();
+                    let bytes = Self::sql_response_bytes(&g.select, g.partials, g.correlation);
+                    self.broker.enqueue(g.conn_id, bytes);
+                }
+            }
             Msg::MigrateStart { .. } | Msg::MigrateEnd { .. } => {}
             Msg::Hello { .. } => {}
         }
@@ -534,7 +646,58 @@ impl Handler for MemberHandler {
                         cp.submit(conn_id, correlation, resp_type, kind, command, outbox);
                     }
                 }
+                MemberJob::SqlScatter {
+                    conn_id,
+                    correlation,
+                    sql,
+                } => {
+                    if let Some((sel, local)) = self.sql_local_partial(&sql) {
+                        let peers = self.sql_peers();
+                        if peers.is_empty() {
+                            // Single node: no gather needed.
+                            let bytes = Self::sql_response_bytes(&sel, vec![local], correlation);
+                            self.broker.enqueue(conn_id, bytes);
+                        } else {
+                            let req_id = self.next_req;
+                            self.next_req += 1;
+                            for p in &peers {
+                                outbox.push((
+                                    *p,
+                                    Msg::SqlScatter {
+                                        req_id,
+                                        sql: sql.clone(),
+                                    },
+                                ));
+                            }
+                            self.gathers.insert(
+                                req_id,
+                                Gather {
+                                    conn_id,
+                                    correlation,
+                                    select: sel,
+                                    partials: vec![local],
+                                    expected: peers.len() + 1,
+                                    age: 0,
+                                },
+                            );
+                        }
+                    }
+                }
             }
+        }
+        // Finalize gathers whose members never all replied (a member may be down).
+        let timed_out: Vec<u64> = self
+            .gathers
+            .iter_mut()
+            .filter_map(|(id, g)| {
+                g.age += 1;
+                (g.age >= SQL_GATHER_TIMEOUT).then_some(*id)
+            })
+            .collect();
+        for id in timed_out {
+            let g = self.gathers.remove(&id).unwrap();
+            let bytes = Self::sql_response_bytes(&g.select, g.partials, g.correlation);
+            self.broker.enqueue(g.conn_id, bytes);
         }
         for (conn, resp) in self.pending.sweep_expired(ACK_TIMEOUT_TICKS) {
             self.broker.enqueue(conn, resp);
@@ -591,7 +754,16 @@ pub fn spawn(
         if let Some(info) = join_as {
             coord.set_pending_join(info);
         }
-        let mut handler = MemberHandler::new(store, broker, rx, coord, events, merge_latest, peers);
+        let mut handler = MemberHandler::new(
+            store,
+            broker,
+            rx,
+            coord,
+            events,
+            merge_latest,
+            peers,
+            self_index,
+        );
         if cp_enabled {
             // Default CP group = all bootstrap members (NodeId = member index).
             let node = raft::RaftNode::new(
