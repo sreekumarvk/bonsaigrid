@@ -26,13 +26,41 @@ pub enum WindowKind {
 pub enum Agg {
     Sum,
     Count,
+    Min,
+    Max,
+    /// Integer mean (`sum / count`).
+    Avg,
 }
 
-impl Agg {
-    fn fold(self, acc: i64, value: i64) -> i64 {
-        match self {
-            Agg::Sum => acc + value,
-            Agg::Count => acc + 1,
+/// A per-window accumulator supporting every [`Agg`] with one pass.
+#[derive(Clone, Copy, Default)]
+struct Acc {
+    sum: i64,
+    count: i64,
+    min: i64,
+    max: i64,
+}
+
+impl Acc {
+    fn add(&mut self, value: i64) {
+        if self.count == 0 {
+            self.min = value;
+            self.max = value;
+        } else {
+            self.min = self.min.min(value);
+            self.max = self.max.max(value);
+        }
+        self.sum += value;
+        self.count += 1;
+    }
+    fn get(&self, agg: Agg) -> i64 {
+        match agg {
+            Agg::Sum => self.sum,
+            Agg::Count => self.count,
+            Agg::Min => self.min,
+            Agg::Max => self.max,
+            Agg::Avg if self.count > 0 => self.sum / self.count,
+            Agg::Avg => 0,
         }
     }
 }
@@ -80,7 +108,7 @@ pub fn decode_result(b: &[u8]) -> Option<(i64, i64, i64, Vec<u8>)> {
 struct Session {
     start: i64,
     last: i64,
-    acc: i64,
+    acc: Acc,
 }
 
 /// A stateful windowing processor.
@@ -88,7 +116,7 @@ pub struct WindowProcessor {
     kind: WindowKind,
     agg: Agg,
     /// Tumbling/sliding accumulators keyed by `(window_start, key)`.
-    fixed: BTreeMap<(i64, Vec<u8>), i64>,
+    fixed: BTreeMap<(i64, Vec<u8>), Acc>,
     /// Open session windows per key (kept sorted by start).
     sessions: HashMap<Vec<u8>, Vec<Session>>,
 }
@@ -115,16 +143,20 @@ impl WindowProcessor {
         match self.kind {
             WindowKind::Tumbling { size } => {
                 let start = ts.div_euclid(size) * size;
-                let e = self.fixed.entry((start, key.to_vec())).or_insert(0);
-                *e = self.agg.fold(*e, value);
+                self.fixed
+                    .entry((start, key.to_vec()))
+                    .or_default()
+                    .add(value);
             }
             WindowKind::Sliding { size, slide } => {
                 // Every window start that is a multiple of `slide` and covers ts.
                 let last = ts.div_euclid(slide) * slide;
                 let mut start = last;
                 while start > ts - size {
-                    let e = self.fixed.entry((start, key.to_vec())).or_insert(0);
-                    *e = self.agg.fold(*e, value);
+                    self.fixed
+                        .entry((start, key.to_vec()))
+                        .or_default()
+                        .add(value);
                     start -= slide;
                 }
             }
@@ -137,12 +169,14 @@ impl WindowProcessor {
                 {
                     s.start = s.start.min(ts);
                     s.last = s.last.max(ts);
-                    s.acc = self.agg.fold(s.acc, value);
+                    s.acc.add(value);
                 } else {
+                    let mut acc = Acc::default();
+                    acc.add(value);
                     list.push(Session {
                         start: ts,
                         last: ts,
-                        acc: self.agg.fold(0, value),
+                        acc,
                     });
                 }
             }
@@ -163,11 +197,16 @@ impl WindowProcessor {
                     .collect();
                 for k in ready {
                     let acc = self.fixed.remove(&k).unwrap();
-                    outbox.push_back(Item::Data(encode_result(k.0, k.0 + size, acc, &k.1)));
+                    outbox.push_back(Item::Data(encode_result(
+                        k.0,
+                        k.0 + size,
+                        acc.get(self.agg),
+                        &k.1,
+                    )));
                 }
             }
             WindowKind::Session { gap } => {
-                let mut out: Vec<(i64, Vec<u8>, i64, i64)> = Vec::new();
+                let mut out: Vec<(i64, Vec<u8>, i64, Acc)> = Vec::new();
                 for (key, list) in self.sessions.iter_mut() {
                     list.retain(|s| {
                         if s.last + gap <= w {
@@ -181,7 +220,12 @@ impl WindowProcessor {
                 self.sessions.retain(|_, l| !l.is_empty());
                 out.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
                 for (start, key, last, acc) in out {
-                    outbox.push_back(Item::Data(encode_result(start, last + 1, acc, &key)));
+                    outbox.push_back(Item::Data(encode_result(
+                        start,
+                        last + 1,
+                        acc.get(self.agg),
+                        &key,
+                    )));
                 }
             }
         }
@@ -297,6 +341,23 @@ mod tests {
             ],
         );
         assert_eq!(out, vec![(1, 5, 5, b"k".to_vec())]);
+    }
+
+    #[test]
+    fn min_max_avg_aggregates() {
+        for (agg, expect) in [(Agg::Min, 3), (Agg::Max, 10), (Agg::Avg, 6)] {
+            let mut p = WindowProcessor::new(WindowKind::Tumbling { size: 100 }, agg);
+            let out = drive(
+                &mut p,
+                vec![
+                    Item::Data(encode_event(1, 5, b"k")),
+                    Item::Data(encode_event(2, 10, b"k")),
+                    Item::Data(encode_event(3, 3, b"k")), // {5,10,3}: min 3, max 10, avg 6
+                    Item::Watermark(100),
+                ],
+            );
+            assert_eq!(out, vec![(0, 100, expect, b"k".to_vec())], "agg {agg:?}");
+        }
     }
 
     #[test]
