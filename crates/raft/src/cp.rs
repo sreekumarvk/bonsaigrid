@@ -20,6 +20,9 @@ use std::collections::HashMap;
 /// Correlation id for an in-flight client operation.
 pub type ClientId = u64;
 
+/// Live log entries retained before compaction kicks in.
+const COMPACT_KEEP: usize = 256;
+
 /// A message exchanged between CP group members.
 #[derive(Clone, Debug)]
 pub enum CpMsg {
@@ -141,7 +144,7 @@ impl CpGroup {
     }
 
     /// Advance logical time: drive Raft, flush buffered ops once a leader exists,
-    /// and apply newly-committed commands.
+    /// apply newly-committed commands, and bound the log by compaction.
     pub fn tick(&mut self, out: &mut Vec<(NodeId, CpMsg)>) {
         let mut rout = Vec::new();
         self.raft.tick(&mut rout);
@@ -154,6 +157,9 @@ impl CpGroup {
             }
         }
         self.apply_committed(out);
+        // Applied state lives in `sm`, so committed log entries are redundant once
+        // every member has them — fold them away to bound memory.
+        self.raft.maybe_compact(COMPACT_KEEP);
     }
 
     /// Apply committed commands to the SM; deliver replies for pending ops.

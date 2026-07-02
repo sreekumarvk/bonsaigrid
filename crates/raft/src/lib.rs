@@ -382,12 +382,21 @@ impl RaftNode {
             self.leader = Some(leader);
             self.reset_election_timeout();
             // Log-matching: prev entry must agree.
-            if prev_log_index == 0 || self.log.term_at(prev_log_index) == prev_log_term {
+            // The prev entry matches, or it lies in our compacted prefix (whose
+            // committed contents are permanent and identical everywhere).
+            if prev_log_index == 0
+                || prev_log_index <= self.log.snapshot_index()
+                || self.log.term_at(prev_log_index) == prev_log_term
+            {
                 success = true;
                 // Append/overwrite entries, truncating on the first conflict.
+                // Entries already folded into our snapshot are skipped.
                 let mut idx = prev_log_index;
                 for e in entries {
                     idx = e.index;
+                    if e.index <= self.log.snapshot_index() {
+                        continue;
+                    }
                     match self.log.term_at(e.index) {
                         t if t == e.term && self.log.last_index() >= e.index => {} // already have it
                         _ => {
@@ -464,6 +473,40 @@ impl RaftNode {
             }
         }
         out
+    }
+
+    /// Number of live (uncompacted) log entries.
+    pub fn log_len(&self) -> usize {
+        self.log.len()
+    }
+
+    /// The highest index safe to compact away: applied everywhere it must be. On a
+    /// leader that is the slowest peer's `match_index` (so no follower ever needs a
+    /// compacted entry — this deliberately avoids an InstallSnapshot path); on a
+    /// follower it is `last_applied`. Never past `last_applied` (the state machine
+    /// must already reflect it).
+    fn safe_compact_index(&self) -> u64 {
+        if self.role == Role::Leader {
+            self.peers
+                .iter()
+                .map(|&p| self.match_index[p])
+                .min()
+                .unwrap_or(0)
+                .min(self.last_applied)
+        } else {
+            self.last_applied
+        }
+    }
+
+    /// Compact the log once it exceeds `keep` live entries, folding the safe
+    /// applied prefix into the snapshot. The state machine (held by the caller)
+    /// already reflects those entries, so nothing is lost.
+    pub fn maybe_compact(&mut self, keep: usize) {
+        if self.log.len() <= keep {
+            return;
+        }
+        let up_to = self.safe_compact_index();
+        self.log.compact(up_to);
     }
 }
 

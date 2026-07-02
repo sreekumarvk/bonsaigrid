@@ -85,6 +85,37 @@ fn partitioned_minority_cannot_commit() {
 }
 
 #[test]
+fn log_is_bounded_by_compaction() {
+    // A healthy cluster proposing steadily must keep committing while the live
+    // log stays bounded (the Sim compacts with keep=8 each tick).
+    let mut sim = Sim::new(3);
+    sim.run(60);
+    for i in 0..200 {
+        sim.propose(format!("v{i}").as_bytes());
+        sim.run(3);
+    }
+    sim.run(120);
+    // Every node's live log is bounded well below the 200 committed entries.
+    for i in 0..3 {
+        assert!(
+            sim.nodes[i].log_len() <= 40,
+            "node {i} log not compacted: {} entries",
+            sim.nodes[i].log_len()
+        );
+    }
+    // ...yet a late command still commits everywhere (progress preserved).
+    assert!(sim.propose(b"final"));
+    sim.run(60);
+    for i in 0..3 {
+        let cmds: Vec<Vec<u8>> = sim.applied[i].iter().map(|(_, c)| c.clone()).collect();
+        assert!(
+            cmds.contains(&b"final".to_vec()),
+            "node {i} committed 'final'"
+        );
+    }
+}
+
+#[test]
 fn committed_logs_never_diverge_under_chaos() {
     let mut sim = Sim::new(5);
     sim.run(60);

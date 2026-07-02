@@ -26,13 +26,19 @@ struct Durable {
     seg: std::fs::File, // append handle to entries.log
 }
 
-/// Raft log. `entries[i]` has index `i + 1`.
+/// Raft log with an optional compacted prefix. Live entries cover indices
+/// `snapshot_index + 1 ..= last`; everything at or before `snapshot_index` has
+/// been folded into the state machine and dropped. `entries[j]` has index
+/// `snapshot_index + 1 + j`.
 #[derive(Default)]
 pub struct RaftLog {
     entries: Vec<Entry>,
     term: u64,
     vote: Option<usize>,
     durable: Option<Durable>,
+    /// Last index included in a snapshot (0 = nothing compacted).
+    snapshot_index: u64,
+    snapshot_term: u64,
 }
 
 const LOG_FILE: &str = "entries.log";
@@ -62,50 +68,77 @@ impl RaftLog {
                 dir: dir.to_path_buf(),
                 seg,
             }),
+            snapshot_index: 0,
+            snapshot_term: 0,
         })
     }
 
-    /// Index of the last entry (0 if empty).
+    /// Last index included in a snapshot (0 = nothing compacted).
+    pub fn snapshot_index(&self) -> u64 {
+        self.snapshot_index
+    }
+
+    /// Vec position of `index`, if it is a live (uncompacted) entry.
+    fn pos(&self, index: u64) -> Option<usize> {
+        if index <= self.snapshot_index {
+            return None;
+        }
+        let off = (index - self.snapshot_index - 1) as usize;
+        (off < self.entries.len()).then_some(off)
+    }
+
+    /// Index of the last entry (the snapshot index if the live log is empty).
     pub fn last_index(&self) -> u64 {
-        self.entries.last().map(|e| e.index).unwrap_or(0)
+        self.entries
+            .last()
+            .map(|e| e.index)
+            .unwrap_or(self.snapshot_index)
     }
 
-    /// Term of the last entry (0 if empty).
+    /// Term of the last entry (the snapshot term if the live log is empty).
     pub fn last_term(&self) -> u64 {
-        self.entries.last().map(|e| e.term).unwrap_or(0)
+        self.entries
+            .last()
+            .map(|e| e.term)
+            .unwrap_or(self.snapshot_term)
     }
 
-    /// Term of the entry at `index` (0 if index is 0 or beyond the log).
+    /// Term of the entry at `index`: 0 before the log, the snapshot term at the
+    /// snapshot boundary, the entry's term if live, else 0.
     pub fn term_at(&self, index: u64) -> u64 {
         if index == 0 {
             return 0;
         }
-        self.entries
-            .get((index - 1) as usize)
-            .map(|e| e.term)
-            .unwrap_or(0)
+        if index == self.snapshot_index {
+            return self.snapshot_term;
+        }
+        self.pos(index).map(|p| self.entries[p].term).unwrap_or(0)
     }
 
-    /// The command at `index`, if present.
+    /// The command at `index`, if it is a live entry.
     pub fn command_at(&self, index: u64) -> Option<&[u8]> {
-        if index == 0 {
-            return None;
-        }
-        self.entries
-            .get((index - 1) as usize)
-            .map(|e| e.command.as_slice())
+        self.pos(index).map(|p| self.entries[p].command.as_slice())
     }
 
-    /// All entries with index >= `from`.
+    /// All live entries with index >= `from`.
     pub fn entries_from(&self, from: u64) -> Vec<Entry> {
-        if from == 0 {
-            return self.entries.clone();
+        let start = from.saturating_sub(self.snapshot_index + 1) as usize;
+        self.entries.iter().skip(start).cloned().collect()
+    }
+
+    /// Discard entries at or before `up_to` (folded into the state machine). No-op
+    /// if `up_to` is not past the current snapshot or exceeds the live log. Durable
+    /// logs are left intact (compaction there needs a persisted SM snapshot — a
+    /// follow-up), so this only bounds in-memory logs.
+    pub fn compact(&mut self, up_to: u64) {
+        if self.durable.is_some() || up_to <= self.snapshot_index || up_to > self.last_index() {
+            return;
         }
-        self.entries
-            .iter()
-            .skip((from - 1) as usize)
-            .cloned()
-            .collect()
+        let up_to_term = self.term_at(up_to);
+        let drop = (up_to - self.snapshot_index) as usize;
+        self.entries.drain(0..drop.min(self.entries.len()));
+        self.snapshot_index = up_to;
+        self.snapshot_term = up_to_term;
     }
 
     /// Append an entry (must be the next index).
@@ -126,13 +159,10 @@ impl RaftLog {
         self.entries.push(e);
     }
 
-    /// Drop all entries with index >= `index` (conflict truncation).
+    /// Drop all live entries with index >= `index` (conflict truncation).
     pub fn truncate_from(&mut self, index: u64) {
-        if index == 0 {
-            self.entries.clear();
-        } else {
-            self.entries.truncate((index - 1) as usize);
-        }
+        let keep = index.saturating_sub(self.snapshot_index + 1) as usize;
+        self.entries.truncate(keep);
         if let Some(d) = &mut self.durable {
             // Truncations are rare (conflict only) — rewrite the segment.
             if let Err(err) = rewrite_log(&d.dir, &self.entries) {

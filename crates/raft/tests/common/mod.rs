@@ -67,6 +67,9 @@ impl Sim {
             self.route(i, out);
             let c = self.nodes[i].take_committed();
             self.applied[i].extend(c);
+            // Continuously exercise compaction so every safety test also stresses
+            // the snapshot/log-compaction path with a small retention window.
+            self.nodes[i].maybe_compact(8);
         }
     }
 
