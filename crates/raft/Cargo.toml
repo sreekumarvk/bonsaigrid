@@ -2,3 +2,6 @@
 name = "raft"
 edition.workspace = true
 version.workspace = true
+
+[dependencies]
+crc32fast = "1"
