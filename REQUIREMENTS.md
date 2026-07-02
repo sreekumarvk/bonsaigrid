@@ -1,7 +1,7 @@
 # REQUIREMENTS.md
 
 ## Project Name: BonsaiGrid (v0.1 MVP)
-**Objective:** A distributed, in-memory data grid designed as a highly memory-efficient, bare-metal alternative to JVM-based architectures (e.g., Apache Hazelcast). It prioritizes deterministic memory layout, a thread-per-core runtime, and kernel-bypass asynchronous I/O to eliminate garbage collection overhead and object metadata bloat.
+**Objective:** A distributed, in-memory data grid designed as a highly memory-efficient, bare-metal alternative to JVM-based architectures (e.g., Apache Hazelcast). It prioritizes deterministic memory layout, a thread-per-core runtime, and kernel-bypass asynchronous I/O to provide predictable latencies and optimized memory utilization.
 
 ---
 

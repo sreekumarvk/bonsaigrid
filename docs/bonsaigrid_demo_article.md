@@ -4,7 +4,7 @@
 In this article, we’ll explore **BonsaiGrid** — a revolutionary, blazingly fast, and zero-allocation drop-in replacement for the Hazelcast Server Cluster. Because BonsaiGrid faithfully implements the Hazelcast open wire protocol, you can seamlessly connect to it using standard Hazelcast clients from any language. We'll show you how to easily connect and use a distributed *Map* from Java, Python, C++, and Rust!
 
 ## 2. What Is BonsaiGrid?
-Hazelcast is a popular distributed In-Memory Data Grid platform for Java. While powerful, its server architecture relies on the JVM, which can lead to GC pauses and high memory overhead under load. 
+Hazelcast is a popular and powerful distributed In-Memory Data Grid platform for Java. For highly specialized use cases, BonsaiGrid provides an alternative native architecture optimized for deterministic memory layouts and hardware-level performance. 
 
 **BonsaiGrid** solves this by completely replacing the Hazelcast server backend with a native Rust implementation. It implements the exact same open binary wire protocol as Hazelcast OSS but runs on a high-performance **thread-per-core** architecture powered by `io_uring`. 
 
@@ -150,7 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## 6. Why Choose BonsaiGrid?
 When you write the code above, the underlying data is stored in the BonsaiGrid Rust memory space, entirely off-heap relative to your Java application. This results in:
-*   **Zero Garbage Collection (GC) pauses** on your caching layer.
+*   **Deterministic latency profiles** on your caching layer via native memory management.
 *   **Massive throughput** via `io_uring` and lock-free thread-per-core processing.
 *   **Seamless adoption** because you don't have to rewrite any of your Hazelcast client code.
 
