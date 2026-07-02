@@ -20,12 +20,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use store::Store;
 
-/// The shape of an AtomicLong reply (chosen by the request op).
+/// The shape of a CP reply's client response (chosen by the request op).
 #[derive(Clone, Copy, Debug)]
 pub enum ReplyKind {
     Long,
     Bool,
     Void,
+    /// A nullable `Data` response (AtomicReference get / set-with-return).
+    Data,
 }
 
 /// CP-subsystem state owned by the member thread: the default group's Raft node +
@@ -117,6 +119,13 @@ fn build_response(resp_type: i32, kind: ReplyKind, reply: &CpReply, corr: i64) -
             matches!(reply, CpReply::Bool(true)),
         ),
         ReplyKind::Void => codecs::atomiclong::encode_void_response(resp_type),
+        ReplyKind::Data => {
+            let d = match reply {
+                CpReply::Data(d) => d.clone(),
+                _ => None,
+            };
+            codecs::atomicref::encode_data_response(resp_type, d.as_deref())
+        }
     };
     protocol::fixed::write_i64_le(&mut frames[0].content, 4, corr);
     protocol::frame::write_message(&frames)
@@ -600,6 +609,58 @@ mod tests {
         assert_eq!(read_i32_le(&bytes, 6), ADD_AND_GET_RESP);
         assert_eq!(read_i64_le(&bytes, 10), 99); // correlation
         assert_eq!(read_i64_le(&bytes, 19), 42); // value
+    }
+
+    #[test]
+    fn cp_atomicref_set_then_get_returns_data() {
+        use raft::atomicref::ArOp;
+        let mut cp = single_node_cp();
+        let mut outbox = Vec::new();
+        for _ in 0..40 {
+            cp.tick(&mut outbox);
+        }
+        // Set r = "hi".
+        cp.submit(
+            9,
+            1,
+            codecs::atomicref::SET_RESP,
+            ReplyKind::Data,
+            raft::cp::ar_command("r", &ArOp::Set(Some(b"hi".to_vec()))),
+            &mut outbox,
+        );
+        for _ in 0..30 {
+            cp.tick(&mut outbox);
+            let _ = cp.drain_deliveries();
+        }
+        // Get r -> expect a Data response carrying "hi".
+        cp.submit(
+            9,
+            2,
+            codecs::atomicref::GET_RESP,
+            ReplyKind::Data,
+            raft::cp::ar_command("r", &ArOp::Get),
+            &mut outbox,
+        );
+        let mut got = None;
+        for _ in 0..40 {
+            cp.tick(&mut outbox);
+            for (_, bytes) in cp.drain_deliveries() {
+                if read_i64_le(&bytes, 10) == 2 {
+                    got = Some(bytes);
+                }
+            }
+            if got.is_some() {
+                break;
+            }
+        }
+        let bytes = got.expect("Get reply delivered");
+        // Frame 0: [len:4][flags:2][13-byte content] = 19 bytes; frame 1 data "hi"
+        // begins at 19 + 6-byte prefix = 25.
+        assert_eq!(
+            &bytes[25..27],
+            b"hi",
+            "AtomicReference get returns the value"
+        );
     }
 
     #[test]

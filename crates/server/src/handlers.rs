@@ -649,6 +649,45 @@ fn cp_atomiclong(
     vec![] // deferred: delivered after the op commits
 }
 
+/// Dispatch an AtomicReference CP request (mirrors [`cp_atomiclong`]; replies are
+/// nullable Data or bool).
+fn cp_atomicref(
+    msg_type: i32,
+    req: &[Frame],
+    conn_id: u64,
+    corr: i64,
+    replicator: Option<&Replicator>,
+) -> Vec<Vec<Frame>> {
+    use crate::member_thread::ReplyKind;
+    use codecs::atomicref::ArReq;
+    use raft::atomicref::ArOp;
+
+    let Some(rep) = replicator else {
+        let mut e = error_response(
+            42,
+            "com.hazelcast.cp.exception.CPSubsystemException",
+            "CP subsystem is not enabled on this member",
+        );
+        set_correlation_id(&mut e, corr);
+        return vec![e];
+    };
+    let Some(dec) = codecs::atomicref::decode_request(msg_type, req) else {
+        return vec![];
+    };
+    let resp_type = codecs::atomicref::response_type(msg_type).unwrap_or(msg_type + 1);
+    let (op, kind) = match dec.op {
+        ArReq::Get => (ArOp::Get, ReplyKind::Data),
+        // Set replies with a nullable Data (the old value only if requested).
+        ArReq::Set { new, return_old } if return_old => (ArOp::GetAndSet(new), ReplyKind::Data),
+        ArReq::Set { new, .. } => (ArOp::Set(new), ReplyKind::Data),
+        ArReq::CompareAndSet { old, new } => (ArOp::CompareAndSet(old, new), ReplyKind::Bool),
+        ArReq::Contains { value } => (ArOp::Contains(value), ReplyKind::Bool),
+    };
+    let command = raft::cp::ar_command(&dec.name, &op);
+    rep.submit_cp(conn_id, corr, resp_type, kind, command);
+    vec![]
+}
+
 pub fn dispatch(
     req: Vec<Frame>,
     conn_id: u64,
@@ -1671,6 +1710,7 @@ pub fn dispatch(
         t if codecs::atomiclong::is_atomiclong(t) => {
             cp_atomiclong(t, &req, conn_id, corr, replicator)
         }
+        t if codecs::atomicref::is_atomicref(t) => cp_atomicref(t, &req, conn_id, corr, replicator),
         // Unknown op: ack with an empty response of type+1 so the client does
         // not hang (covers e.g. CreateProxy). The live client reveals any op
         // that needs a richer reply (per plan's empirical-risk note).
