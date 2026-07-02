@@ -88,6 +88,111 @@ pub struct Partial {
     pub groups: HashMap<Vec<Option<String>>, Vec<Acc>>,
 }
 
+// ---- Partial wire serialization (for the scatter/gather transport) ----
+
+fn put_u32(b: &mut Vec<u8>, v: u32) {
+    b.extend_from_slice(&v.to_le_bytes());
+}
+fn put_i64(b: &mut Vec<u8>, v: i64) {
+    b.extend_from_slice(&v.to_le_bytes());
+}
+fn put_str(b: &mut Vec<u8>, s: &Option<String>) {
+    match s {
+        Some(s) => {
+            b.push(1);
+            put_u32(b, s.len() as u32);
+            b.extend_from_slice(s.as_bytes());
+        }
+        None => b.push(0),
+    }
+}
+
+/// Serialize a partial for transport between members.
+pub fn encode_partial(p: &Partial) -> Vec<u8> {
+    let mut b = Vec::new();
+    put_u32(&mut b, p.groups.len() as u32);
+    for (key, accs) in &p.groups {
+        put_u32(&mut b, key.len() as u32);
+        for k in key {
+            put_str(&mut b, k);
+        }
+        put_u32(&mut b, accs.len() as u32);
+        for a in accs {
+            put_i64(&mut b, a.rows);
+            b.extend_from_slice(&a.sum.to_le_bytes());
+            put_i64(&mut b, a.nvals);
+            b.extend_from_slice(&a.min.to_le_bytes());
+            b.extend_from_slice(&a.max.to_le_bytes());
+            b.push(a.seen as u8);
+        }
+    }
+    b
+}
+
+struct Rd<'a> {
+    b: &'a [u8],
+    p: usize,
+}
+impl Rd<'_> {
+    fn u32(&mut self) -> Option<u32> {
+        let v = u32::from_le_bytes(self.b.get(self.p..self.p + 4)?.try_into().ok()?);
+        self.p += 4;
+        Some(v)
+    }
+    fn i64(&mut self) -> Option<i64> {
+        let v = i64::from_le_bytes(self.b.get(self.p..self.p + 8)?.try_into().ok()?);
+        self.p += 8;
+        Some(v)
+    }
+    fn f64(&mut self) -> Option<f64> {
+        let v = f64::from_le_bytes(self.b.get(self.p..self.p + 8)?.try_into().ok()?);
+        self.p += 8;
+        Some(v)
+    }
+    fn u8(&mut self) -> Option<u8> {
+        let v = *self.b.get(self.p)?;
+        self.p += 1;
+        Some(v)
+    }
+    fn opt_str(&mut self) -> Option<Option<String>> {
+        if self.u8()? == 0 {
+            return Some(None);
+        }
+        let n = self.u32()? as usize;
+        let s = self.b.get(self.p..self.p + n)?;
+        self.p += n;
+        Some(Some(String::from_utf8_lossy(s).into_owned()))
+    }
+}
+
+/// Deserialize a partial produced by [`encode_partial`].
+pub fn decode_partial(bytes: &[u8]) -> Option<Partial> {
+    let mut r = Rd { b: bytes, p: 0 };
+    let ng = r.u32()? as usize;
+    let mut groups = HashMap::new();
+    for _ in 0..ng {
+        let kl = r.u32()? as usize;
+        let mut key = Vec::with_capacity(kl);
+        for _ in 0..kl {
+            key.push(r.opt_str()?);
+        }
+        let na = r.u32()? as usize;
+        let mut accs = Vec::with_capacity(na);
+        for _ in 0..na {
+            accs.push(Acc {
+                rows: r.i64()?,
+                sum: r.f64()?,
+                nvals: r.i64()?,
+                min: r.f64()?,
+                max: r.f64()?,
+                seen: r.u8()? != 0,
+            });
+        }
+        groups.insert(key, accs);
+    }
+    Some(Partial { groups })
+}
+
 /// The aggregate columns of a SELECT, in order (used to align `Acc`s).
 fn agg_cols(select: &Select) -> Vec<(AggKind, String)> {
     select
@@ -386,6 +491,19 @@ mod tests {
         all.extend(b);
         let single = finalize(&sel, &local_partial(&sel, &all, &schemas, &Kv, None));
         assert_eq!(dist, single);
+    }
+
+    #[test]
+    fn partial_wire_roundtrip() {
+        let schemas = SchemaService::new();
+        let sel =
+            parse_select("SELECT region, SUM(amount), MIN(amount) FROM s GROUP BY region").unwrap();
+        let m = vec![e("region=us,amount=10"), e("region=eu,amount=5")];
+        let p = local_partial(&sel, &m, &schemas, &Kv, None);
+        let back = decode_partial(&encode_partial(&p)).expect("decodes");
+        assert_eq!(back, p);
+        // A partial sent over the wire merges identically to the in-memory one.
+        assert_eq!(finalize(&sel, &merge(vec![back])), finalize(&sel, &p));
     }
 
     #[test]
