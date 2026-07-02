@@ -193,6 +193,85 @@ pub fn decode_partial(bytes: &[u8]) -> Option<Partial> {
     Some(Partial { groups })
 }
 
+/// True if the query aggregates (so members return partials, not rows).
+pub fn is_aggregate(select: &Select) -> bool {
+    select.window.is_some()
+        || select.group_by.is_some()
+        || select.cols.iter().any(|c| !matches!(c, ColExpr::Col(_)))
+}
+
+/// Serialize a batch of result rows for the row-gather path.
+pub fn encode_rows(rows: &[Vec<Option<String>>]) -> Vec<u8> {
+    let mut b = Vec::new();
+    put_u32(&mut b, rows.len() as u32);
+    for row in rows {
+        put_u32(&mut b, row.len() as u32);
+        for cell in row {
+            put_str(&mut b, cell);
+        }
+    }
+    b
+}
+
+/// Deserialize rows produced by [`encode_rows`].
+pub fn decode_rows(bytes: &[u8]) -> Option<Vec<Vec<Option<String>>>> {
+    let mut r = Rd { b: bytes, p: 0 };
+    let nrows = r.u32()? as usize;
+    let mut rows = Vec::with_capacity(nrows);
+    for _ in 0..nrows {
+        let nc = r.u32()? as usize;
+        let mut row = Vec::with_capacity(nc);
+        for _ in 0..nc {
+            row.push(r.opt_str()?);
+        }
+        rows.push(row);
+    }
+    Some(rows)
+}
+
+/// Column names for a plain (non-aggregate) projected SELECT.
+pub fn plain_columns(select: &Select) -> Vec<String> {
+    select
+        .cols
+        .iter()
+        .map(|c| match c {
+            ColExpr::Col(n) => bare_col(n),
+            _ => String::new(),
+        })
+        .collect()
+}
+
+/// Merge gathered plain rows at the coordinator: concat, then DISTINCT / ORDER BY
+/// / LIMIT (applied once over the whole cluster, not per member).
+pub fn finalize_rows(
+    select: &Select,
+    mut rows: Vec<Vec<Option<String>>>,
+) -> (Vec<String>, Vec<Vec<Option<String>>>) {
+    if select.is_distinct {
+        let mut seen = std::collections::HashSet::new();
+        rows.retain(|r| seen.insert(r.clone()));
+    }
+    if let Some((col, desc)) = &select.order_by {
+        let cols = plain_columns(select);
+        if let Some(idx) = cols.iter().position(|c| c == &bare_col(col)) {
+            rows.sort_by(|a, b| {
+                let ord = num_or_str(&a.get(idx).cloned().flatten())
+                    .partial_cmp(&num_or_str(&b.get(idx).cloned().flatten()))
+                    .unwrap_or(std::cmp::Ordering::Equal);
+                if *desc {
+                    ord.reverse()
+                } else {
+                    ord
+                }
+            });
+        }
+    }
+    if let Some(n) = select.limit {
+        rows.truncate(n);
+    }
+    (plain_columns(select), rows)
+}
+
 /// The aggregate columns of a SELECT, in order (used to align `Acc`s).
 fn agg_cols(select: &Select) -> Vec<(AggKind, String)> {
     select
@@ -528,6 +607,34 @@ mod tests {
                 vec![Some("0".into()), Some("12".into())],
                 vec![Some("10".into()), Some("4".into())],
             ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod row_tests {
+    use super::*;
+    use crate::sql::parse_select;
+
+    #[test]
+    fn rows_wire_roundtrip_and_finalize() {
+        let rows = vec![
+            vec![Some("us".into()), Some("10".into())],
+            vec![Some("eu".into()), None],
+        ];
+        assert_eq!(decode_rows(&encode_rows(&rows)).unwrap(), rows);
+
+        // Concat two members' rows, DISTINCT + ORDER BY + LIMIT at the coordinator.
+        let sel = parse_select("SELECT DISTINCT region FROM m ORDER BY region LIMIT 2").unwrap();
+        let a = vec![vec![Some("us".into())], vec![Some("eu".into())]];
+        let b = vec![vec![Some("us".into())], vec![Some("ap".into())]]; // us duplicate
+        let mut all = a;
+        all.extend(b);
+        let (cols, out) = finalize_rows(&sel, all);
+        assert_eq!(cols, vec!["region"]);
+        assert_eq!(
+            out,
+            vec![vec![Some("ap".into())], vec![Some("eu".into())]] // distinct+sorted, limited to 2
         );
     }
 }

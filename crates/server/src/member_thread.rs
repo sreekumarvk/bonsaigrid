@@ -293,7 +293,7 @@ struct Gather {
     conn_id: u64,
     correlation: i64,
     select: query::sql::Select,
-    partials: Vec<query::distributed::Partial>,
+    payloads: Vec<Vec<u8>>,
     expected: usize,
     age: u32,
 }
@@ -355,24 +355,30 @@ impl MemberHandler {
 
     // ---- distributed SQL (scatter/gather) ----
 
-    /// Compute this member's partial aggregate for `sql` over its local partitions.
-    fn sql_local_partial(
-        &self,
-        sql: &str,
-    ) -> Option<(query::sql::Select, query::distributed::Partial)> {
+    /// Compute this member's serialized local result for `sql` over its
+    /// partitions: a partial aggregate for a GROUP BY/aggregate query, or a batch
+    /// of projected rows otherwise (ORDER BY/LIMIT/DISTINCT deferred to the
+    /// coordinator, which applies them once over the whole cluster).
+    fn sql_local(&self, sql: &str) -> Option<(query::sql::Select, Vec<u8>)> {
         let sel = match query::sql::parse(sql)? {
             query::sql::Statement::Select(s) => s,
             _ => return None,
         };
         let entries = self.store.entries(&sel.map);
-        let p = query::distributed::local_partial(
-            &sel,
-            &entries,
-            self.store.schemas(),
-            &serialization::compact::AutoExtractor,
-            None,
-        );
-        Some((sel, p))
+        let schemas = self.store.schemas();
+        let ex = serialization::compact::AutoExtractor;
+        let payload = if query::distributed::is_aggregate(&sel) {
+            let p = query::distributed::local_partial(&sel, &entries, schemas, &ex, None);
+            query::distributed::encode_partial(&p)
+        } else {
+            let mut local = sel.clone();
+            local.order_by = None;
+            local.limit = None;
+            local.is_distinct = false;
+            let (_, rows) = query::sql::execute_with(&local, &entries, schemas, &ex, &[], None);
+            query::distributed::encode_rows(&rows)
+        };
+        Some((sel, payload))
     }
 
     /// All member indices except this one.
@@ -385,11 +391,24 @@ impl MemberHandler {
     /// Merge a completed gather and build the SQL response bytes (correlation set).
     fn sql_response_bytes(
         select: &query::sql::Select,
-        partials: Vec<query::distributed::Partial>,
+        payloads: Vec<Vec<u8>>,
         corr: i64,
     ) -> Vec<u8> {
-        let merged = query::distributed::merge(partials);
-        let (cols, rows) = query::distributed::finalize(select, &merged);
+        let (cols, rows) = if query::distributed::is_aggregate(select) {
+            let partials: Vec<_> = payloads
+                .iter()
+                .filter_map(|p| query::distributed::decode_partial(p))
+                .collect();
+            query::distributed::finalize(select, &query::distributed::merge(partials))
+        } else {
+            let mut all = Vec::new();
+            for p in &payloads {
+                if let Some(r) = query::distributed::decode_rows(p) {
+                    all.extend(r);
+                }
+            }
+            query::distributed::finalize_rows(select, all)
+        };
         let mut frames = codecs::sql::encode_execute_response(&cols, &rows);
         protocol::fixed::write_i64_le(&mut frames[0].content, 4, corr);
         protocol::frame::write_message(&frames)
@@ -577,30 +596,22 @@ impl Handler for MemberHandler {
                 }
             }
             Msg::SqlScatter { req_id, sql } => {
-                // Peer role: run the query locally and return our partial.
-                if let Some((_, p)) = self.sql_local_partial(&sql) {
-                    outbox.push((
-                        src,
-                        Msg::SqlPartial {
-                            req_id,
-                            payload: query::distributed::encode_partial(&p),
-                        },
-                    ));
+                // Peer role: run the query over our partitions, return our result.
+                if let Some((_, payload)) = self.sql_local(&sql) {
+                    outbox.push((src, Msg::SqlPartial { req_id, payload }));
                 }
             }
             Msg::SqlPartial { req_id, payload } => {
                 // Coordinator role: accumulate; finalize when every member replied.
                 let done = if let Some(g) = self.gathers.get_mut(&req_id) {
-                    if let Some(p) = query::distributed::decode_partial(&payload) {
-                        g.partials.push(p);
-                    }
-                    g.partials.len() >= g.expected
+                    g.payloads.push(payload);
+                    g.payloads.len() >= g.expected
                 } else {
                     false
                 };
                 if done {
                     let g = self.gathers.remove(&req_id).unwrap();
-                    let bytes = Self::sql_response_bytes(&g.select, g.partials, g.correlation);
+                    let bytes = Self::sql_response_bytes(&g.select, g.payloads, g.correlation);
                     self.broker.enqueue(g.conn_id, bytes);
                 }
             }
@@ -651,7 +662,7 @@ impl Handler for MemberHandler {
                     correlation,
                     sql,
                 } => {
-                    if let Some((sel, local)) = self.sql_local_partial(&sql) {
+                    if let Some((sel, local)) = self.sql_local(&sql) {
                         let peers = self.sql_peers();
                         if peers.is_empty() {
                             // Single node: no gather needed.
@@ -675,7 +686,7 @@ impl Handler for MemberHandler {
                                     conn_id,
                                     correlation,
                                     select: sel,
-                                    partials: vec![local],
+                                    payloads: vec![local],
                                     expected: peers.len() + 1,
                                     age: 0,
                                 },
@@ -696,7 +707,7 @@ impl Handler for MemberHandler {
             .collect();
         for id in timed_out {
             let g = self.gathers.remove(&id).unwrap();
-            let bytes = Self::sql_response_bytes(&g.select, g.partials, g.correlation);
+            let bytes = Self::sql_response_bytes(&g.select, g.payloads, g.correlation);
             self.broker.enqueue(g.conn_id, bytes);
         }
         for (conn, resp) in self.pending.sweep_expired(ACK_TIMEOUT_TICKS) {

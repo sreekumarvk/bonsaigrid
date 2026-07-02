@@ -1770,16 +1770,11 @@ pub fn dispatch(
                     vec![codecs::sql::encode_execute_response(&cols, &rows)]
                 }
                 Some(Statement::Select(sel)) => {
-                    // Distributed aggregate query on a multi-node cluster: scatter to
-                    // all members, gather partials, merge (member thread) — deferred.
-                    let distributable = !sel.star
-                        && sel.join.is_none()
-                        && (sel.group_by.is_some()
-                            || sel.window.is_some()
-                            || sel
-                                .cols
-                                .iter()
-                                .any(|c| !matches!(c, query::sql::ColExpr::Col(_))));
+                    // Distributed query on a multi-node cluster: scatter to all
+                    // members and gather (aggregate → partial merge; plain projected
+                    // SELECT → row concat) on the member thread — deferred. `SELECT *`
+                    // and joins stay local (need catalog star-columns / a shuffle).
+                    let distributable = !sel.star && sel.join.is_none();
                     if distributable && cluster.len() > 1 {
                         if let Some(rep) = replicator {
                             rep.scatter_sql(conn_id, corr, sql.clone());
