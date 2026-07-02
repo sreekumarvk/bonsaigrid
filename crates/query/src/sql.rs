@@ -82,12 +82,51 @@ pub struct Join {
     pub right_col: String,
 }
 
+/// A windowing table function in the FROM clause. Simplified form of Hazelcast's
+/// `TABLE(TUMBLE(TABLE m, DESCRIPTOR(ts), INTERVAL ...))`:
+///   `TUMBLE(<map>, <ts_col>, <size>)` / `HOP(<map>, <ts_col>, <size>, <slide>)`.
+/// `window_start` / `window_end` become selectable/group-by columns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowFunc {
+    Tumble { size: i64 },
+    Hop { size: i64, slide: i64 },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowSpec {
+    pub func: WindowFunc,
+    pub ts_col: String,
+}
+
+impl WindowSpec {
+    /// The `(start, end)` windows an event at `ts` belongs to.
+    pub fn windows(&self, ts: i64) -> Vec<(i64, i64)> {
+        match self.func {
+            WindowFunc::Tumble { size } => {
+                let s = ts.div_euclid(size) * size;
+                vec![(s, s + size)]
+            }
+            WindowFunc::Hop { size, slide } => {
+                let mut out = Vec::new();
+                let mut s = ts.div_euclid(slide) * slide;
+                while s > ts - size {
+                    out.push((s, s + size));
+                    s -= slide;
+                }
+                out.reverse();
+                out
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Select {
     pub is_distinct: bool,
     pub cols: Vec<ColExpr>,
     pub star: bool,
     pub map: String,
+    pub window: Option<WindowSpec>,
     pub join: Option<Join>,
     pub filter: Option<Predicate>,
     pub group_by: Option<Vec<String>>,
@@ -173,7 +212,7 @@ fn parse_select_body(t: &mut Tokenizer) -> Option<Select> {
         }
     }
     t.keyword("from")?;
-    let map = t.ident()?;
+    let (map, window) = parse_from_source(t)?;
     let join = if t.keyword("join").is_some() {
         let right = t.ident()?;
         t.keyword("on")?;
@@ -235,12 +274,38 @@ fn parse_select_body(t: &mut Tokenizer) -> Option<Select> {
         cols,
         star,
         map,
+        window,
         join,
         filter,
         group_by,
         order_by,
         limit,
     })
+}
+
+/// Parse the FROM source: either a plain map ident, or a windowing table function
+/// `TUMBLE(map, ts_col, size)` / `HOP(map, ts_col, size, slide)`.
+fn parse_from_source(t: &mut Tokenizer) -> Option<(String, Option<WindowSpec>)> {
+    for (kw, hop) in [("tumble", false), ("hop", true)] {
+        if t.keyword(kw).is_some() {
+            t.symbol("(").then_some(())?;
+            let map = t.ident()?;
+            t.symbol(",").then_some(())?;
+            let ts_col = t.ident()?;
+            t.symbol(",").then_some(())?;
+            let size = t.number()?;
+            let func = if hop {
+                t.symbol(",").then_some(())?;
+                let slide = t.number()?;
+                WindowFunc::Hop { size, slide }
+            } else {
+                WindowFunc::Tumble { size }
+            };
+            t.symbol(")").then_some(())?;
+            return Some((map, Some(WindowSpec { func, ts_col })));
+        }
+    }
+    Some((t.ident()?, None))
 }
 
 /// Given `a` and `b` from `ON a = b`, return (col-on-left, col-on-right) using the
@@ -414,21 +479,45 @@ pub fn execute_with(
     let has_aggregates = !select.star && select.cols.iter().any(|c| !matches!(c, ColExpr::Col(_)));
     let mut rows = Vec::new();
 
-    if has_aggregates || select.group_by.is_some() {
-        let group_cols = select.group_by.clone().unwrap_or_default();
+    if has_aggregates || select.group_by.is_some() || select.window.is_some() {
+        // A windowing table function adds implicit window_start/window_end group
+        // columns (a row can fall in several HOP windows, so entries are expanded).
+        let mut group_cols = select.group_by.clone().unwrap_or_default();
+        if select.window.is_some() {
+            group_cols.retain(|c| c != "window_start" && c != "window_end");
+            group_cols.insert(0, "window_end".to_string());
+            group_cols.insert(0, "window_start".to_string());
+        }
         let mut groups: HashMap<Vec<Option<String>>, Vec<&(Vec<u8>, Vec<u8>)>> = HashMap::new();
 
         for entry in &matched {
-            let mut group_key = Vec::new();
-            for col in &group_cols {
-                let val = if Some(col.as_str()) == key_col {
-                    fmt(crate::json::decode_key_data(&entry.0))
-                } else {
-                    fmt(ex.extract(&entry.1, schemas, col))
-                };
-                group_key.push(val);
+            // The (window_start, window_end) buckets this entry lands in (one
+            // sentinel bucket when there is no window).
+            let buckets: Vec<(Option<String>, Option<String>)> = match &select.window {
+                Some(w) => {
+                    let ts = fv_i64(ex.extract(&entry.1, schemas, &w.ts_col));
+                    w.windows(ts)
+                        .into_iter()
+                        .map(|(s, e)| (Some(s.to_string()), Some(e.to_string())))
+                        .collect()
+                }
+                None => vec![(None, None)],
+            };
+            for (ws, we) in buckets {
+                let mut group_key = Vec::new();
+                for col in &group_cols {
+                    let val = match col.as_str() {
+                        "window_start" if select.window.is_some() => ws.clone(),
+                        "window_end" if select.window.is_some() => we.clone(),
+                        _ if Some(col.as_str()) == key_col => {
+                            fmt(crate::json::decode_key_data(&entry.0))
+                        }
+                        _ => fmt(ex.extract(&entry.1, schemas, col)),
+                    };
+                    group_key.push(val);
+                }
+                groups.entry(group_key).or_default().push(entry);
             }
-            groups.entry(group_key).or_default().push(entry);
         }
 
         for (group_key, group_entries) in groups {
@@ -774,6 +863,17 @@ fn fmt(v: FieldValue) -> Option<String> {
     fmt_value(&v)
 }
 
+/// Coerce a field value to i64 for windowing (non-numeric / null → 0).
+fn fv_i64(v: FieldValue) -> i64 {
+    match v {
+        FieldValue::I32(i) => i as i64,
+        FieldValue::I64(i) => i,
+        FieldValue::F64(f) => f as i64,
+        FieldValue::Str(s) => s.parse().unwrap_or(0),
+        _ => 0,
+    }
+}
+
 /// Render a field value as result text (NULL → None).
 pub fn fmt_value(v: &FieldValue) -> Option<String> {
     match v {
@@ -838,6 +938,18 @@ impl<'a> Tokenizer<'a> {
         } else {
             None
         }
+    }
+    /// A non-negative integer literal.
+    fn number(&mut self) -> Option<i64> {
+        self.skip_ws();
+        let start = self.i;
+        while self.i < self.s.len() && self.s[self.i].is_ascii_digit() {
+            self.i += 1;
+        }
+        std::str::from_utf8(&self.s[start..self.i])
+            .ok()?
+            .parse()
+            .ok()
     }
     /// An identifier possibly qualified with `table.col`.
     fn col_ref(&mut self) -> Option<String> {
@@ -1127,6 +1239,90 @@ mod tests {
         assert_eq!(
             rows[1],
             vec![Some("sales".into()), Some("150".into()), Some("2".into())]
+        );
+    }
+
+    #[test]
+    fn window_spec_assigns_events() {
+        // Tumbling: one window per event.
+        let t = WindowSpec {
+            func: WindowFunc::Tumble { size: 10 },
+            ts_col: "ts".into(),
+        };
+        assert_eq!(t.windows(3), vec![(0, 10)]);
+        assert_eq!(t.windows(11), vec![(10, 20)]);
+        // Hopping: overlapping windows.
+        let h = WindowSpec {
+            func: WindowFunc::Hop { size: 10, slide: 5 },
+            ts_col: "ts".into(),
+        };
+        assert_eq!(h.windows(7), vec![(0, 10), (5, 15)]);
+    }
+
+    #[test]
+    fn parses_tumble_and_hop_from_source() {
+        let s = parse_select(
+            "SELECT window_start, SUM(amount) FROM TUMBLE(sales, ts, 10) GROUP BY window_start",
+        )
+        .unwrap();
+        assert_eq!(s.map, "sales");
+        assert_eq!(
+            s.window,
+            Some(WindowSpec {
+                func: WindowFunc::Tumble { size: 10 },
+                ts_col: "ts".into()
+            })
+        );
+        let h = parse_select("SELECT window_start FROM HOP(m, t, 10, 5)").unwrap();
+        assert_eq!(
+            h.window,
+            Some(WindowSpec {
+                func: WindowFunc::Hop { size: 10, slide: 5 },
+                ts_col: "t".into()
+            })
+        );
+    }
+
+    /// Extracts fields from a `k=v,k=v` value blob (test-only).
+    struct KvExtractor;
+    impl FieldExtractor for KvExtractor {
+        fn extract(&self, value: &[u8], _s: &SchemaService, field: &str) -> FieldValue {
+            let s = std::str::from_utf8(value).unwrap_or("");
+            for pair in s.split(',') {
+                if let Some((k, v)) = pair.split_once('=') {
+                    if k == field {
+                        return v
+                            .parse::<i64>()
+                            .map(FieldValue::I64)
+                            .unwrap_or_else(|_| FieldValue::Str(v.into()));
+                    }
+                }
+            }
+            FieldValue::Null
+        }
+    }
+
+    #[test]
+    fn executes_tumbling_windowed_aggregation() {
+        let schemas = SchemaService::new();
+        let entries = vec![
+            (b"1".to_vec(), b"ts=1,amount=5".to_vec()),
+            (b"2".to_vec(), b"ts=3,amount=7".to_vec()), // window [0,10) -> 12
+            (b"3".to_vec(), b"ts=11,amount=4".to_vec()), // window [10,20) -> 4
+        ];
+        let sel = parse_select(
+            "SELECT window_start, SUM(amount) FROM TUMBLE(sales, ts, 10) \
+             GROUP BY window_start ORDER BY window_start",
+        )
+        .unwrap();
+        let (cols, rows) = execute_with(&sel, &entries, &schemas, &KvExtractor, &[], None);
+        assert_eq!(cols, vec!["window_start", "sum(amount)"]);
+        assert_eq!(
+            rows,
+            vec![
+                vec![Some("0".into()), Some("12".into())],
+                vec![Some("10".into()), Some("4".into())],
+            ]
         );
     }
 }
