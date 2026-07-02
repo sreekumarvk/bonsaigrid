@@ -30,6 +30,8 @@ pub enum ReplyKind {
     Data,
     /// A 4-byte int response (CountDownLatch count, Semaphore permits).
     Int,
+    /// A CP CreateSession response (sessionId + ttl + heartbeat millis).
+    Session,
 }
 
 /// CP-subsystem state owned by the member thread: the default group's Raft node +
@@ -134,6 +136,18 @@ fn build_response(resp_type: i32, kind: ReplyKind, reply: &CpReply, corr: i64) -
                 _ => 0,
             };
             codecs::cpcount::encode_int_response(resp_type, v)
+        }
+        ReplyKind::Session => {
+            let id = match reply {
+                CpReply::Long(v) => *v,
+                _ => 0,
+            };
+            codecs::cpsession::encode_create_response(
+                resp_type,
+                id,
+                raft::session::TTL_MILLIS,
+                raft::session::HEARTBEAT_MILLIS,
+            )
         }
     };
     protocol::fixed::write_i64_le(&mut frames[0].content, 4, corr);

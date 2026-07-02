@@ -14,6 +14,7 @@ pub mod cp;
 pub mod fencedlock;
 pub mod log;
 pub mod semaphore;
+pub mod session;
 
 pub use log::{Entry, RaftLog};
 

@@ -18,6 +18,7 @@ use crate::atomicref::{ArOp, AtomicReferenceSm};
 use crate::countdownlatch::{CdlOp, CountDownLatchSm};
 use crate::fencedlock::{FencedLockSm, FlOp};
 use crate::semaphore::{SemOp, SemaphoreSm};
+use crate::session::{SessOp, SessionSm};
 use crate::{NodeId, RaftMsg, RaftNode};
 use std::collections::HashMap;
 
@@ -27,12 +28,17 @@ pub type ClientId = u64;
 /// Live log entries retained before compaction kicks in.
 const COMPACT_KEEP: usize = 256;
 
+/// Member ticks between leader-proposed session clock advances (~1s at a 1ms
+/// member tick). One session TTL is `session::TTL_MILLIS` worth of these.
+const SESSION_TICK_INTERVAL: u64 = 1000;
+
 /// Object-type tag prefixing every replicated command (selects the state machine).
 pub const OBJ_ATOMIC_LONG: u8 = 0;
 pub const OBJ_ATOMIC_REF: u8 = 1;
 pub const OBJ_COUNTDOWN_LATCH: u8 = 2;
 pub const OBJ_SEMAPHORE: u8 = 3;
 pub const OBJ_FENCED_LOCK: u8 = 4;
+pub const OBJ_SESSION: u8 = 5;
 
 /// A committed reply, shaped by the operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,6 +84,13 @@ pub fn fl_command(name: &str, op: &FlOp) -> Vec<u8> {
     c
 }
 
+/// Build a CP-session command: `[OBJ_SESSION][body]`.
+pub fn sess_command(op: &SessOp) -> Vec<u8> {
+    let mut c = vec![OBJ_SESSION];
+    c.extend_from_slice(&crate::session::encode(op));
+    c
+}
+
 /// The replicated CP state machine: a registry that dispatches an object-tagged
 /// command to the owning per-type machine. New primitives add a tag + a field.
 #[derive(Default)]
@@ -87,6 +100,7 @@ pub struct CpSm {
     countdown_latch: CountDownLatchSm,
     semaphore: SemaphoreSm,
     fenced_lock: FencedLockSm,
+    sessions: SessionSm,
 }
 
 impl CpSm {
@@ -109,6 +123,7 @@ impl CpSm {
             OBJ_COUNTDOWN_LATCH => self.countdown_latch.apply(body),
             OBJ_SEMAPHORE => self.semaphore.apply(body),
             OBJ_FENCED_LOCK => self.fenced_lock.apply(body),
+            OBJ_SESSION => self.apply_session(body),
             _ => CpReply::Nil,
         }
     }
@@ -127,6 +142,36 @@ impl CpSm {
     }
     pub fn fenced_lock(&self) -> &FencedLockSm {
         &self.fenced_lock
+    }
+    pub fn sessions(&self) -> &SessionSm {
+        &self.sessions
+    }
+
+    /// Apply a session op, auto-releasing resources held by closed/expired
+    /// sessions across the resource state machines (v1: FencedLock).
+    fn apply_session(&mut self, body: &[u8]) -> CpReply {
+        let Some(op) = crate::session::decode(body) else {
+            return CpReply::Nil;
+        };
+        match op {
+            SessOp::Create => CpReply::Long(self.sessions.create()),
+            SessOp::Heartbeat(id) => {
+                self.sessions.heartbeat(id);
+                CpReply::Nil
+            }
+            SessOp::Close(id) => {
+                let existed = self.sessions.close(id);
+                self.fenced_lock.release_session(id);
+                CpReply::Bool(existed)
+            }
+            SessOp::Tick => {
+                for id in self.sessions.tick() {
+                    self.fenced_lock.release_session(id);
+                }
+                CpReply::Nil
+            }
+            SessOp::GenerateThreadId => CpReply::Long(self.sessions.generate_thread_id()),
+        }
     }
 }
 
@@ -162,6 +207,8 @@ pub struct CpGroup {
     /// Locally-originated ops buffered until a leader is known.
     waiting: Vec<(ClientId, Vec<u8>)>,
     completions: Vec<Completion>,
+    /// Ticks since the leader last proposed a session clock advance.
+    ticks_since_session: u64,
 }
 
 impl CpGroup {
@@ -174,6 +221,7 @@ impl CpGroup {
             pending: HashMap::new(),
             waiting: Vec::new(),
             completions: Vec::new(),
+            ticks_since_session: 0,
         }
     }
 
@@ -261,6 +309,15 @@ impl CpGroup {
         if self.raft.is_leader() || self.raft.leader().is_some() {
             for (client, command) in std::mem::take(&mut self.waiting) {
                 self.route(client, self.id, command, out);
+            }
+        }
+        // The leader advances the session clock periodically so idle sessions
+        // expire (and their locks auto-release) with no client action required.
+        if self.raft.is_leader() {
+            self.ticks_since_session += 1;
+            if self.ticks_since_session >= SESSION_TICK_INTERVAL {
+                self.ticks_since_session = 0;
+                self.raft.propose(sess_command(&SessOp::Tick));
             }
         }
         self.apply_committed(out);

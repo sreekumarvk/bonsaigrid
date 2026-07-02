@@ -789,6 +789,41 @@ fn cp_fencedlock(
     vec![]
 }
 
+/// Dispatch a CP session lifecycle request (create/close/heartbeat/genThreadId).
+fn cp_session(
+    msg_type: i32,
+    req: &[Frame],
+    conn_id: u64,
+    corr: i64,
+    replicator: Option<&Replicator>,
+) -> Vec<Vec<Frame>> {
+    use crate::member_thread::ReplyKind;
+    use codecs::cpsession::CpSessionReq as R;
+    use raft::session::SessOp;
+
+    let Some(rep) = replicator else {
+        let mut e = error_response(
+            42,
+            "com.hazelcast.cp.exception.CPSubsystemException",
+            "CP subsystem is not enabled on this member",
+        );
+        set_correlation_id(&mut e, corr);
+        return vec![e];
+    };
+    let Some(dec) = codecs::cpsession::decode_request(msg_type, req) else {
+        return vec![];
+    };
+    let resp_type = codecs::cpsession::response_type(msg_type).unwrap_or(msg_type + 1);
+    let (op, kind) = match dec {
+        R::Create => (SessOp::Create, ReplyKind::Session),
+        R::Close(id) => (SessOp::Close(id), ReplyKind::Bool),
+        R::Heartbeat(id) => (SessOp::Heartbeat(id), ReplyKind::Void),
+        R::GenerateThreadId => (SessOp::GenerateThreadId, ReplyKind::Long),
+    };
+    rep.submit_cp(conn_id, corr, resp_type, kind, raft::cp::sess_command(&op));
+    vec![]
+}
+
 pub fn dispatch(
     req: Vec<Frame>,
     conn_id: u64,
@@ -1813,6 +1848,7 @@ pub fn dispatch(
         }
         t if codecs::atomicref::is_atomicref(t) => cp_atomicref(t, &req, conn_id, corr, replicator),
         t if codecs::cpcount::is_cp_count(t) => cp_counter(t, &req, conn_id, corr, replicator),
+        t if codecs::cpsession::is_cp_session(t) => cp_session(t, &req, conn_id, corr, replicator),
         t if codecs::fencedlock::is_fencedlock(t) => {
             cp_fencedlock(t, &req, conn_id, corr, replicator)
         }

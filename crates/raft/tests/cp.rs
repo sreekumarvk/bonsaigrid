@@ -3,7 +3,11 @@
 //! with the correct linearizable reply. Exercises forward-to-leader routing.
 
 use raft::atomiclong::AlOp;
-use raft::cp::{al_command, ClientId, Completion, CpGroup, CpMsg, CpReply};
+use raft::cp::{
+    al_command, fl_command, sess_command, ClientId, Completion, CpGroup, CpMsg, CpReply,
+};
+use raft::fencedlock::FlOp;
+use raft::session::SessOp;
 use raft::{NodeId, RaftLog, RaftNode};
 use std::collections::HashSet;
 
@@ -174,4 +178,81 @@ fn interleaved_ops_from_all_members_are_linearizable() {
             "replica {i} final value"
         );
     }
+}
+
+/// Helper: extract a Long reply for `client`.
+fn long_reply(sim: &CpSim, client: ClientId) -> i64 {
+    match sim.completion(client).map(|c| &c.reply) {
+        Some(CpReply::Long(v)) => *v,
+        other => panic!("client {client} not a Long: {other:?}"),
+    }
+}
+
+#[test]
+fn session_expiry_auto_releases_fenced_lock() {
+    let mut sim = CpSim::new(3);
+    sim.run(80);
+    let leader = sim.leader().expect("a leader");
+
+    // Client A creates a session and locks "lk".
+    sim.submit(leader, 1, sess_command(&SessOp::Create));
+    sim.run(20);
+    let sid_a = long_reply(&sim, 1);
+    assert!(sid_a > 0, "session created");
+
+    sim.submit(
+        leader,
+        2,
+        fl_command(
+            "lk",
+            &FlOp::Lock {
+                session: sid_a,
+                thread: 1,
+            },
+        ),
+    );
+    sim.run(20);
+    let fence_a = long_reply(&sim, 2);
+    assert!(fence_a > 0, "A holds the lock");
+
+    // Another owner cannot take it while A's session is alive.
+    sim.submit(
+        leader,
+        3,
+        fl_command(
+            "lk",
+            &FlOp::Lock {
+                session: 999,
+                thread: 2,
+            },
+        ),
+    );
+    sim.run(20);
+    assert_eq!(long_reply(&sim, 3), 0, "lock is held; B refused");
+
+    // Advance the session clock past the TTL WITHOUT heartbeating A (drive Ticks
+    // directly rather than wait for the leader's ~1s cadence). A expires.
+    for i in 0..40 {
+        sim.submit(leader, 1000 + i, sess_command(&SessOp::Tick));
+        sim.run(4);
+    }
+
+    // B can now acquire "lk" — A's lock was auto-released — with a HIGHER fence.
+    sim.submit(
+        leader,
+        4,
+        fl_command(
+            "lk",
+            &FlOp::Lock {
+                session: 999,
+                thread: 2,
+            },
+        ),
+    );
+    sim.run(30);
+    let fence_b = long_reply(&sim, 4);
+    assert!(
+        fence_b > fence_a,
+        "auto-released; B acquires with a strictly greater fence ({fence_b} > {fence_a})"
+    );
 }

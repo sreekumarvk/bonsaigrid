@@ -13,6 +13,7 @@ pub mod auth;
 pub mod cache;
 pub mod cluster_view;
 pub mod cpcount;
+pub mod cpsession;
 pub mod executor;
 pub mod fencedlock;
 pub mod map;

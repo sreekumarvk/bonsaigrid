@@ -137,6 +137,11 @@ impl FencedLockSm {
         }
     }
 
+    /// Release every lock held by an expired/closed session (auto-release).
+    pub fn release_session(&mut self, session: i64) {
+        self.locks.retain(|_, l| l.session != session);
+    }
+
     /// Current fence of `name` (0 if unlocked).
     pub fn fence(&self, name: &str) -> i64 {
         self.locks.get(name).map(|l| l.fence).unwrap_or(0)
