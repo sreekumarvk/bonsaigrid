@@ -688,6 +688,70 @@ fn cp_atomicref(
     vec![]
 }
 
+/// Dispatch a CP counter request (ICountDownLatch / ISemaphore) to the CP group.
+fn cp_counter(
+    msg_type: i32,
+    req: &[Frame],
+    conn_id: u64,
+    corr: i64,
+    replicator: Option<&Replicator>,
+) -> Vec<Vec<Frame>> {
+    use crate::member_thread::ReplyKind;
+    use codecs::cpcount::CpCountReq as R;
+    use raft::countdownlatch::CdlOp;
+    use raft::semaphore::SemOp;
+
+    let Some(rep) = replicator else {
+        let mut e = error_response(
+            42,
+            "com.hazelcast.cp.exception.CPSubsystemException",
+            "CP subsystem is not enabled on this member",
+        );
+        set_correlation_id(&mut e, corr);
+        return vec![e];
+    };
+    let Some(dec) = codecs::cpcount::decode_request(msg_type, req) else {
+        return vec![];
+    };
+    let resp_type = codecs::cpcount::response_type(msg_type).unwrap_or(msg_type + 1);
+    let (command, kind) = match dec.op {
+        R::CdlGetCount => (
+            raft::cp::cdl_command(&dec.name, &CdlOp::GetCount),
+            ReplyKind::Int,
+        ),
+        R::CdlCountDown => (
+            raft::cp::cdl_command(&dec.name, &CdlOp::CountDown),
+            ReplyKind::Void,
+        ),
+        R::CdlTrySetCount(n) => (
+            raft::cp::cdl_command(&dec.name, &CdlOp::TrySetCount(n)),
+            ReplyKind::Bool,
+        ),
+        R::SemInit(n) => (
+            raft::cp::sem_command(&dec.name, &SemOp::Init(n)),
+            ReplyKind::Bool,
+        ),
+        R::SemAcquire(n) => (
+            raft::cp::sem_command(&dec.name, &SemOp::Acquire(n)),
+            ReplyKind::Bool,
+        ),
+        R::SemRelease(n) => (
+            raft::cp::sem_command(&dec.name, &SemOp::Release(n)),
+            ReplyKind::Bool,
+        ),
+        R::SemDrain => (
+            raft::cp::sem_command(&dec.name, &SemOp::Drain),
+            ReplyKind::Int,
+        ),
+        R::SemAvailablePermits => (
+            raft::cp::sem_command(&dec.name, &SemOp::AvailablePermits),
+            ReplyKind::Int,
+        ),
+    };
+    rep.submit_cp(conn_id, corr, resp_type, kind, command);
+    vec![]
+}
+
 pub fn dispatch(
     req: Vec<Frame>,
     conn_id: u64,
@@ -1711,6 +1775,7 @@ pub fn dispatch(
             cp_atomiclong(t, &req, conn_id, corr, replicator)
         }
         t if codecs::atomicref::is_atomicref(t) => cp_atomicref(t, &req, conn_id, corr, replicator),
+        t if codecs::cpcount::is_cp_count(t) => cp_counter(t, &req, conn_id, corr, replicator),
         // Unknown op: ack with an empty response of type+1 so the client does
         // not hang (covers e.g. CreateProxy). The live client reveals any op
         // that needs a richer reply (per plan's empirical-risk note).

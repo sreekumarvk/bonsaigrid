@@ -9,8 +9,10 @@
 
 pub mod atomiclong;
 pub mod atomicref;
+pub mod countdownlatch;
 pub mod cp;
 pub mod log;
+pub mod semaphore;
 
 pub use log::{Entry, RaftLog};
 

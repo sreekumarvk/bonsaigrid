@@ -15,6 +15,8 @@
 
 use crate::atomiclong::{AlOp, AlReply, AtomicLongSm};
 use crate::atomicref::{ArOp, AtomicReferenceSm};
+use crate::countdownlatch::{CdlOp, CountDownLatchSm};
+use crate::semaphore::{SemOp, SemaphoreSm};
 use crate::{NodeId, RaftMsg, RaftNode};
 use std::collections::HashMap;
 
@@ -27,6 +29,8 @@ const COMPACT_KEEP: usize = 256;
 /// Object-type tag prefixing every replicated command (selects the state machine).
 pub const OBJ_ATOMIC_LONG: u8 = 0;
 pub const OBJ_ATOMIC_REF: u8 = 1;
+pub const OBJ_COUNTDOWN_LATCH: u8 = 2;
+pub const OBJ_SEMAPHORE: u8 = 3;
 
 /// A committed reply, shaped by the operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,12 +55,28 @@ pub fn ar_command(name: &str, op: &ArOp) -> Vec<u8> {
     c
 }
 
+/// Build a CountDownLatch command: `[OBJ_COUNTDOWN_LATCH][body]`.
+pub fn cdl_command(name: &str, op: &CdlOp) -> Vec<u8> {
+    let mut c = vec![OBJ_COUNTDOWN_LATCH];
+    c.extend_from_slice(&crate::countdownlatch::encode(name, op));
+    c
+}
+
+/// Build a Semaphore command: `[OBJ_SEMAPHORE][body]`.
+pub fn sem_command(name: &str, op: &SemOp) -> Vec<u8> {
+    let mut c = vec![OBJ_SEMAPHORE];
+    c.extend_from_slice(&crate::semaphore::encode(name, op));
+    c
+}
+
 /// The replicated CP state machine: a registry that dispatches an object-tagged
 /// command to the owning per-type machine. New primitives add a tag + a field.
 #[derive(Default)]
 pub struct CpSm {
     atomic_long: AtomicLongSm,
     atomic_ref: AtomicReferenceSm,
+    countdown_latch: CountDownLatchSm,
+    semaphore: SemaphoreSm,
 }
 
 impl CpSm {
@@ -76,6 +96,8 @@ impl CpSm {
                 AlReply::None => CpReply::Nil,
             },
             OBJ_ATOMIC_REF => self.atomic_ref.apply(body),
+            OBJ_COUNTDOWN_LATCH => self.countdown_latch.apply(body),
+            OBJ_SEMAPHORE => self.semaphore.apply(body),
             _ => CpReply::Nil,
         }
     }
@@ -85,6 +107,12 @@ impl CpSm {
     }
     pub fn atomic_ref(&self) -> &AtomicReferenceSm {
         &self.atomic_ref
+    }
+    pub fn countdown_latch(&self) -> &CountDownLatchSm {
+        &self.countdown_latch
+    }
+    pub fn semaphore(&self) -> &SemaphoreSm {
+        &self.semaphore
     }
 }
 

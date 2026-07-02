@@ -28,6 +28,8 @@ pub enum ReplyKind {
     Void,
     /// A nullable `Data` response (AtomicReference get / set-with-return).
     Data,
+    /// A 4-byte int response (CountDownLatch count, Semaphore permits).
+    Int,
 }
 
 /// CP-subsystem state owned by the member thread: the default group's Raft node +
@@ -125,6 +127,13 @@ fn build_response(resp_type: i32, kind: ReplyKind, reply: &CpReply, corr: i64) -
                 _ => None,
             };
             codecs::atomicref::encode_data_response(resp_type, d.as_deref())
+        }
+        ReplyKind::Int => {
+            let v = match reply {
+                CpReply::Long(v) => *v as i32,
+                _ => 0,
+            };
+            codecs::cpcount::encode_int_response(resp_type, v)
         }
     };
     protocol::fixed::write_i64_le(&mut frames[0].content, 4, corr);
@@ -661,6 +670,49 @@ mod tests {
             b"hi",
             "AtomicReference get returns the value"
         );
+    }
+
+    #[test]
+    fn cp_semaphore_init_acquire_available_returns_int() {
+        use raft::semaphore::SemOp;
+        let mut cp = single_node_cp();
+        let mut outbox = Vec::new();
+        for _ in 0..40 {
+            cp.tick(&mut outbox);
+        }
+        for (corr, op) in [
+            (1i64, SemOp::Init(3)),
+            (2, SemOp::Acquire(2)),
+            (3, SemOp::AvailablePermits),
+        ] {
+            let kind = if matches!(op, SemOp::AvailablePermits) {
+                ReplyKind::Int
+            } else {
+                ReplyKind::Bool
+            };
+            cp.submit(
+                7,
+                corr,
+                codecs::cpcount::SEM_AVAILABLE_RESP,
+                kind,
+                raft::cp::sem_command("s", &op),
+                &mut outbox,
+            );
+        }
+        let mut avail = None;
+        for _ in 0..60 {
+            cp.tick(&mut outbox);
+            for (_, bytes) in cp.drain_deliveries() {
+                if read_i64_le(&bytes, 10) == 3 {
+                    // int response value at content@13 -> byte 6+13 = 19
+                    avail = Some(read_i32_le(&bytes, 19));
+                }
+            }
+            if avail.is_some() {
+                break;
+            }
+        }
+        assert_eq!(avail, Some(1), "3 permits, acquired 2, 1 available");
     }
 
     #[test]
