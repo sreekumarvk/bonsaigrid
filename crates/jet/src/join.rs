@@ -1,10 +1,10 @@
-//! Stateful stream-stream inner join on a key. Each side's records are buffered
-//! by key; an arriving record emits one joined output per already-seen record on
-//! the opposite side (both arrival orders covered). Input records are tagged with
-//! their side so the join fits the single-inbox [`Processor`] model.
-//!
-//! State is per key and unbounded in v1; a windowed/TTL eviction variant (drop
-//! buffered records once a watermark passes their timestamp) is a follow-up.
+//! Stateful stream-stream inner join on a key, with **watermark-driven state
+//! eviction** so buffered state stays bounded. Each side's records are buffered
+//! by key with an event timestamp; an arriving record emits one joined output per
+//! buffered record on the opposite side (both arrival orders), and a watermark
+//! `w` evicts records whose timestamp is older than `w - retention`. Input
+//! records are tagged with their side so the join fits the single-inbox
+//! [`Processor`] model.
 
 use crate::processor::{Item, Processor};
 use std::collections::{HashMap, VecDeque};
@@ -13,26 +13,28 @@ use std::collections::{HashMap, VecDeque};
 pub const LEFT: u8 = 0;
 pub const RIGHT: u8 = 1;
 
-/// Encode a join input record: `[side:u8][key_len:u32][key][payload]`.
-pub fn encode_input(side: u8, key: &[u8], payload: &[u8]) -> Vec<u8> {
-    let mut b = Vec::with_capacity(5 + key.len() + payload.len());
+/// Encode a join input record: `[side:u8][ts:i64][key_len:u32][key][payload]`.
+pub fn encode_input(side: u8, ts: i64, key: &[u8], payload: &[u8]) -> Vec<u8> {
+    let mut b = Vec::with_capacity(13 + key.len() + payload.len());
     b.push(side);
+    b.extend_from_slice(&ts.to_le_bytes());
     b.extend_from_slice(&(key.len() as u32).to_le_bytes());
     b.extend_from_slice(key);
     b.extend_from_slice(payload);
     b
 }
 
-fn decode_input(b: &[u8]) -> Option<(u8, &[u8], &[u8])> {
-    if b.len() < 5 {
+fn decode_input(b: &[u8]) -> Option<(u8, i64, &[u8], &[u8])> {
+    if b.len() < 13 {
         return None;
     }
     let side = b[0];
-    let kl = u32::from_le_bytes(b[1..5].try_into().ok()?) as usize;
-    if b.len() < 5 + kl {
+    let ts = i64::from_le_bytes(b[1..9].try_into().ok()?);
+    let kl = u32::from_le_bytes(b[9..13].try_into().ok()?) as usize;
+    if b.len() < 13 + kl {
         return None;
     }
-    Some((side, &b[5..5 + kl], &b[5 + kl..]))
+    Some((side, ts, &b[13..13 + kl], &b[13 + kl..]))
 }
 
 /// Encode a joined output: `[key_len:u32][key][left_len:u32][left][right]`.
@@ -57,16 +59,35 @@ pub fn decode_joined(b: &[u8]) -> Option<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     Some((key, left, right))
 }
 
-/// A stateful keyed inner-join processor.
-#[derive(Default)]
+type Buffer = HashMap<Vec<u8>, Vec<(i64, Vec<u8>)>>;
+
+/// A stateful keyed inner-join processor with watermark eviction.
 pub struct JoinProcessor {
-    left: HashMap<Vec<u8>, Vec<Vec<u8>>>,
-    right: HashMap<Vec<u8>, Vec<Vec<u8>>>,
+    left: Buffer,
+    right: Buffer,
+    /// A record is retained until a watermark passes `ts + retention`.
+    retention: i64,
 }
 
 impl JoinProcessor {
-    pub fn new() -> JoinProcessor {
-        JoinProcessor::default()
+    /// A join that never evicts (unbounded state).
+    pub fn unbounded() -> JoinProcessor {
+        JoinProcessor::new(i64::MAX)
+    }
+    /// A join that evicts a record once a watermark passes `ts + retention`.
+    pub fn new(retention: i64) -> JoinProcessor {
+        JoinProcessor {
+            left: HashMap::new(),
+            right: HashMap::new(),
+            retention,
+        }
+    }
+
+    fn evict(buf: &mut Buffer, cutoff: i64) {
+        for recs in buf.values_mut() {
+            recs.retain(|(ts, _)| *ts >= cutoff);
+        }
+        buf.retain(|_, recs| !recs.is_empty());
     }
 }
 
@@ -77,23 +98,30 @@ impl Processor for JoinProcessor {
             processed = true;
             match item {
                 Item::Data(bytes) => {
-                    let Some((side, key, payload)) = decode_input(&bytes) else {
+                    let Some((side, ts, key, payload)) = decode_input(&bytes) else {
                         continue;
                     };
                     let (key, payload) = (key.to_vec(), payload.to_vec());
                     if side == LEFT {
-                        for r in self.right.get(&key).into_iter().flatten() {
+                        for (_, r) in self.right.get(&key).into_iter().flatten() {
                             outbox.push_back(Item::Data(encode_joined(&key, &payload, r)));
                         }
-                        self.left.entry(key).or_default().push(payload);
+                        self.left.entry(key).or_default().push((ts, payload));
                     } else {
-                        for l in self.left.get(&key).into_iter().flatten() {
+                        for (_, l) in self.left.get(&key).into_iter().flatten() {
                             outbox.push_back(Item::Data(encode_joined(&key, l, &payload)));
                         }
-                        self.right.entry(key).or_default().push(payload);
+                        self.right.entry(key).or_default().push((ts, payload));
                     }
                 }
-                Item::Watermark(w) => outbox.push_back(Item::Watermark(w)),
+                Item::Watermark(w) => {
+                    if self.retention != i64::MAX {
+                        let cutoff = w - self.retention;
+                        Self::evict(&mut self.left, cutoff);
+                        Self::evict(&mut self.right, cutoff);
+                    }
+                    outbox.push_back(Item::Watermark(w));
+                }
                 Item::Done => outbox.push_back(Item::Done),
             }
         }
@@ -120,17 +148,14 @@ mod tests {
 
     #[test]
     fn matches_across_arrival_orders() {
-        let mut p = JoinProcessor::new();
+        let mut p = JoinProcessor::unbounded();
         let out = drive(
             &mut p,
             vec![
-                Item::Data(encode_input(LEFT, b"k", b"L1")),
-                // right arrives after left -> emits (L1, R1)
-                Item::Data(encode_input(RIGHT, b"k", b"R1")),
-                // second left after right -> emits (L2, R1)
-                Item::Data(encode_input(LEFT, b"k", b"L2")),
-                // no match for a different key
-                Item::Data(encode_input(RIGHT, b"other", b"X")),
+                Item::Data(encode_input(LEFT, 1, b"k", b"L1")),
+                Item::Data(encode_input(RIGHT, 2, b"k", b"R1")), // -> (L1, R1)
+                Item::Data(encode_input(LEFT, 3, b"k", b"L2")),  // -> (L2, R1)
+                Item::Data(encode_input(RIGHT, 4, b"other", b"X")), // no match
             ],
         );
         assert_eq!(
@@ -144,14 +169,13 @@ mod tests {
 
     #[test]
     fn fans_out_to_all_matches_on_a_key() {
-        let mut p = JoinProcessor::new();
+        let mut p = JoinProcessor::unbounded();
         let out = drive(
             &mut p,
             vec![
-                Item::Data(encode_input(LEFT, b"k", b"L1")),
-                Item::Data(encode_input(LEFT, b"k", b"L2")),
-                // one right joins both buffered lefts
-                Item::Data(encode_input(RIGHT, b"k", b"R1")),
+                Item::Data(encode_input(LEFT, 1, b"k", b"L1")),
+                Item::Data(encode_input(LEFT, 2, b"k", b"L2")),
+                Item::Data(encode_input(RIGHT, 3, b"k", b"R1")),
             ],
         );
         assert_eq!(
@@ -161,5 +185,21 @@ mod tests {
                 (b"k".to_vec(), b"L2".to_vec(), b"R1".to_vec()),
             ]
         );
+    }
+
+    #[test]
+    fn watermark_evicts_stale_state() {
+        let mut p = JoinProcessor::new(5);
+        let out = drive(
+            &mut p,
+            vec![
+                Item::Data(encode_input(LEFT, 1, b"k", b"L1")),
+                Item::Watermark(100), // evicts L1 (1 < 100 - 5)
+                Item::Data(encode_input(RIGHT, 101, b"k", b"R1")), // no L1 to join -> buffered
+                Item::Data(encode_input(LEFT, 102, b"k", b"L2")), // joins the live R1
+            ],
+        );
+        // L1 was evicted, so (L1, R1) never emits; only the fresh L2 joins R1.
+        assert_eq!(out, vec![(b"k".to_vec(), b"L2".to_vec(), b"R1".to_vec())]);
     }
 }
