@@ -147,3 +147,13 @@ For each of queue, list, set, multimap, ringbuffer, pncounter: add its record ty
 ## Execution Note
 
 Phase A core (A1–A4) is self-contained (codecs + recovery, no threads) and fully verifiable; implemented first. A5–A7 add the thread + wiring. Phase B completes all structures (the item's completion gate).
+
+
+## Status (2026-07-01)
+
+- ✅ **A1–A4 shipped** (`108bcef`) — crates/persistence: WAL record codec (CRC torn-tail), WAL segment writer/reader, sectioned snapshot (atomic rename), recover(); 9 unit + crash-recovery acid test.
+- ✅ **A5–A6 shipped** (`8b2e683`) — store `WalSink` seam (emits after apply; lock-free OnceLock; zero-alloc when unset), `Persister` + `spawn_persistence` (group-commit fsync, roll-before-snapshot truncation), main.rs recover+attach+spawn. End-to-end test: 500 writes+removes → thread → snapshot+truncate → recover.
+- ⏳ **A7 pending** — `sync` durability deferred-ack (defer the client reply until the persistence thread signals fsync-done). `async` (default recommended) is fully working.
+- ⏳ **Phase B pending** — remaining data structures (queue/list/set/multimap/ringbuffer/pncounter): WalSink methods + record types + snapshot sections + replay + op wiring. **Item completion gate.**
+
+IMap async persistence works end-to-end on `main`; whole workspace green, zero-alloc hot path intact (sink unset = no cost).
