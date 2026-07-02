@@ -7,6 +7,7 @@
 //!   packed little-endian elements.
 
 pub mod address;
+pub mod atomiclong;
 pub mod auth;
 pub mod cache;
 pub mod cluster_view;
