@@ -243,6 +243,8 @@ Phases 1–3 (RBAC + hardened auth, over plaintext) are self-contained, fully ve
 - ✅ **Phase 2 shipped** (`dd12ba2`) — RBAC enforcement in dispatch; `rbac.rs` + zero-alloc authorize; falsified.
 - ✅ **Phase 3 shipped** (`537acf7`) — auth hardening + per-connection principal binding; `auth.rs`.
 - ✅ **Phase 4 shipped** — part 1 (`d60ae07`): `security/src/tls.rs` (TlsMode, PEM, rustls TLS 1.3 configs, hand-rolled `enable_ktls`), kTLS mechanism verified (`tests/ktls_roundtrip.rs`). Part 2 (`6e8ac39`): reactor ConnTls state machine (Plain/Detect/Handshaking/Ktls), handshake driven over io_uring, kTLS transition at a record boundary, permissive first-byte peek. Verified end-to-end (`server/tests/tls_reactor.rs`: real TLS client → reactor → CP2 request → decrypted response; permissive serves plaintext). Plaintext path unchanged (no regression).
-- ⏳ **Phase 5 pending** — mTLS on the member transport (reuses the same `tls.rs` + `enable_ktls`).
+- ✅ **Phase 5 shipped** (`2402474`) — mutual TLS on the member io_uring mesh: unified `Handshake` (server/client), two-phase kTLS install (`into_pending`/`PendingKtls`) so the dialer's Finished flushes before kTLS, `MemberTls` bundle, transport `MTls` state + `app_out`/`hs_done`. Verified end-to-end (`loopback.rs`: BackupPut→Ack over mutual TLS; rogue-cert rejection).
+
+**All five phases shipped — the Security subsystem is complete: RBAC + hashed auth (P1–3), kTLS on the client reactor (P4), mTLS on the member mesh (P5).**
 
 Everything through Phase 4 part 1 is on `main`, whole workspace green, zero-alloc hot path untouched (no reactor changes yet).
