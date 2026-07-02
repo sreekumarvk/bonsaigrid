@@ -7,6 +7,7 @@
 //! simulation-testable (see `tests/`). Durability of the log + `current_term`/
 //! `voted_for` is layered on top by the caller (see `log` module).
 
+pub mod atomiclong;
 pub mod log;
 
 pub use log::{Entry, RaftLog};
