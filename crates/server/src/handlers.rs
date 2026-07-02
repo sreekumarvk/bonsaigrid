@@ -644,7 +644,7 @@ fn cp_atomiclong(
         Op::GetAndAdd(v) => (AlOp::GetAndAdd(v), ReplyKind::Long),
         Op::CompareAndSet(e, u) => (AlOp::CompareAndSet(e, u), ReplyKind::Bool),
     };
-    let command = raft::atomiclong::encode(&dec.name, &op);
+    let command = raft::cp::al_command(&dec.name, &op);
     rep.submit_cp(conn_id, corr, resp_type, kind, command);
     vec![] // deferred: delivered after the op commits
 }

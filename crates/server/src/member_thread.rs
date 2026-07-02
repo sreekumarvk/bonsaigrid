@@ -14,8 +14,7 @@ use crate::membership::{Cluster, MemberInfo};
 use member::replication::{apply, Pending};
 use member::transport::{Handler, Peers, Transport};
 use member::wire::{MemberRec, Msg};
-use raft::atomiclong::AlReply;
-use raft::cp::{CpGroup, CpMsg};
+use raft::cp::{CpGroup, CpMsg, CpReply};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -104,18 +103,18 @@ impl CpState {
 
 /// Build the AtomicLong response wire bytes for a committed reply, with the
 /// request's correlation id patched into the initial frame.
-fn build_response(resp_type: i32, kind: ReplyKind, reply: &AlReply, corr: i64) -> Vec<u8> {
+fn build_response(resp_type: i32, kind: ReplyKind, reply: &CpReply, corr: i64) -> Vec<u8> {
     let mut frames = match kind {
         ReplyKind::Long => {
             let v = match reply {
-                AlReply::Long(v) => *v,
+                CpReply::Long(v) => *v,
                 _ => 0,
             };
             codecs::atomiclong::encode_long_response(resp_type, v)
         }
         ReplyKind::Bool => codecs::atomiclong::encode_bool_response(
             resp_type,
-            matches!(reply, AlReply::Bool(true)),
+            matches!(reply, CpReply::Bool(true)),
         ),
         ReplyKind::Void => codecs::atomiclong::encode_void_response(resp_type),
     };
@@ -582,7 +581,8 @@ mod tests {
     use codecs::atomiclong::ADD_AND_GET_RESP;
     use member::wire::Msg;
     use protocol::fixed::{read_i32_le, read_i64_le};
-    use raft::atomiclong::{encode, AlOp};
+    use raft::atomiclong::AlOp;
+    use raft::cp::al_command;
     use raft::{RaftLog, RaftNode};
 
     // A single-node default CP group elects itself and commits immediately.
@@ -596,7 +596,7 @@ mod tests {
     fn build_response_patches_type_correlation_value() {
         // Response frame bytes: [len:4][flags:2][content]; content: type@0,
         // corr@4, backupAcks@12, value@13 → byte offsets 6, 10, 19.
-        let bytes = build_response(ADD_AND_GET_RESP, ReplyKind::Long, &AlReply::Long(42), 99);
+        let bytes = build_response(ADD_AND_GET_RESP, ReplyKind::Long, &CpReply::Long(42), 99);
         assert_eq!(read_i32_le(&bytes, 6), ADD_AND_GET_RESP);
         assert_eq!(read_i64_le(&bytes, 10), 99); // correlation
         assert_eq!(read_i64_le(&bytes, 19), 42); // value
@@ -614,7 +614,7 @@ mod tests {
             99,
             ADD_AND_GET_RESP,
             ReplyKind::Long,
-            encode("c", &AlOp::AddAndGet(3)),
+            al_command("c", &AlOp::AddAndGet(3)),
             &mut outbox,
         );
         let mut delivery = None;

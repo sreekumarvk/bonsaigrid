@@ -2,8 +2,8 @@
 //! follower — commits through Raft and completes on the member the client is on,
 //! with the correct linearizable reply. Exercises forward-to-leader routing.
 
-use raft::atomiclong::{encode, AlOp, AlReply};
-use raft::cp::{ClientId, Completion, CpGroup, CpMsg};
+use raft::atomiclong::AlOp;
+use raft::cp::{al_command, ClientId, Completion, CpGroup, CpMsg, CpReply};
 use raft::{NodeId, RaftLog, RaftNode};
 use std::collections::HashSet;
 
@@ -103,10 +103,10 @@ fn op_on_leader_completes_locally() {
     let mut sim = CpSim::new(3);
     sim.run(80);
     let leader = sim.leader().expect("a leader");
-    sim.submit(leader, 1, encode("c", &AlOp::AddAndGet(5)));
+    sim.submit(leader, 1, al_command("c", &AlOp::AddAndGet(5)));
     sim.run(60);
     let done = sim.completion(1).expect("op 1 completed");
-    assert_eq!(done.reply, AlReply::Long(5));
+    assert_eq!(done.reply, CpReply::Long(5));
     // The completion surfaced on the member the client was connected to.
     assert!(sim.done[leader].iter().any(|c| c.client == 1));
 }
@@ -117,12 +117,12 @@ fn op_on_follower_forwards_and_completes() {
     sim.run(80);
     let leader = sim.leader().expect("a leader");
     let follower = (0..3).find(|&i| i != leader).unwrap();
-    sim.submit(follower, 7, encode("c", &AlOp::AddAndGet(3)));
+    sim.submit(follower, 7, al_command("c", &AlOp::AddAndGet(3)));
     sim.run(80);
     let done = sim.completion(7).expect("op 7 completed");
     assert_eq!(
         done.reply,
-        AlReply::Long(3),
+        CpReply::Long(3),
         "reply routed back to the follower"
     );
     assert!(
@@ -131,7 +131,11 @@ fn op_on_follower_forwards_and_completes() {
     );
     // Every replica applied the increment.
     for i in 0..3 {
-        assert_eq!(sim.groups[i].sm().get("c"), 3, "replica {i} applied");
+        assert_eq!(
+            sim.groups[i].sm().atomic_long().get("c"),
+            3,
+            "replica {i} applied"
+        );
     }
 }
 
@@ -142,12 +146,16 @@ fn interleaved_ops_from_all_members_are_linearizable() {
     // Each member's client fires an increment; replies must reflect a consistent
     // total order (values 1..=5 each observed exactly once).
     for member in 0..5 {
-        sim.submit(member, member as ClientId, encode("c", &AlOp::AddAndGet(1)));
+        sim.submit(
+            member,
+            member as ClientId,
+            al_command("c", &AlOp::AddAndGet(1)),
+        );
     }
     sim.run(150);
     let replies: Vec<i64> = (0..5)
         .map(|c| match sim.completion(c as ClientId).map(|x| &x.reply) {
-            Some(AlReply::Long(v)) => *v,
+            Some(CpReply::Long(v)) => *v,
             other => panic!("op {c} not completed: {other:?}"),
         })
         .collect();
@@ -160,6 +168,10 @@ fn interleaved_ops_from_all_members_are_linearizable() {
     );
     // Final replicated value is 5 on every alive replica.
     for i in 0..5 {
-        assert_eq!(sim.groups[i].sm().get("c"), 5, "replica {i} final value");
+        assert_eq!(
+            sim.groups[i].sm().atomic_long().get("c"),
+            5,
+            "replica {i} final value"
+        );
     }
 }

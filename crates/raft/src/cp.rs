@@ -13,7 +13,8 @@
 //! commands (so a client retry after a leader change can double-apply a
 //! non-idempotent op), and read-index optimization (reads go through the log).
 
-use crate::atomiclong::{AlReply, AtomicLongSm};
+use crate::atomiclong::{AlOp, AlReply, AtomicLongSm};
+use crate::atomicref::{ArOp, AtomicReferenceSm};
 use crate::{NodeId, RaftMsg, RaftNode};
 use std::collections::HashMap;
 
@@ -22,6 +23,70 @@ pub type ClientId = u64;
 
 /// Live log entries retained before compaction kicks in.
 const COMPACT_KEEP: usize = 256;
+
+/// Object-type tag prefixing every replicated command (selects the state machine).
+pub const OBJ_ATOMIC_LONG: u8 = 0;
+pub const OBJ_ATOMIC_REF: u8 = 1;
+
+/// A committed reply, shaped by the operation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CpReply {
+    Long(i64),
+    Bool(bool),
+    Data(Option<Vec<u8>>),
+    Nil,
+}
+
+/// Build an AtomicLong command: `[OBJ_ATOMIC_LONG][atomiclong body]`.
+pub fn al_command(name: &str, op: &AlOp) -> Vec<u8> {
+    let mut c = vec![OBJ_ATOMIC_LONG];
+    c.extend_from_slice(&crate::atomiclong::encode(name, op));
+    c
+}
+
+/// Build an AtomicReference command: `[OBJ_ATOMIC_REF][atomicref body]`.
+pub fn ar_command(name: &str, op: &ArOp) -> Vec<u8> {
+    let mut c = vec![OBJ_ATOMIC_REF];
+    c.extend_from_slice(&crate::atomicref::encode(name, op));
+    c
+}
+
+/// The replicated CP state machine: a registry that dispatches an object-tagged
+/// command to the owning per-type machine. New primitives add a tag + a field.
+#[derive(Default)]
+pub struct CpSm {
+    atomic_long: AtomicLongSm,
+    atomic_ref: AtomicReferenceSm,
+}
+
+impl CpSm {
+    pub fn new() -> CpSm {
+        CpSm::default()
+    }
+
+    /// Apply a committed `[obj_type][body]` command; unknown types are a no-op.
+    pub fn apply(&mut self, command: &[u8]) -> CpReply {
+        let Some((&obj, body)) = command.split_first() else {
+            return CpReply::Nil;
+        };
+        match obj {
+            OBJ_ATOMIC_LONG => match self.atomic_long.apply(body) {
+                AlReply::Long(v) => CpReply::Long(v),
+                AlReply::Bool(b) => CpReply::Bool(b),
+                AlReply::None => CpReply::Nil,
+            },
+            OBJ_ATOMIC_REF => self.atomic_ref.apply(body),
+            _ => CpReply::Nil,
+        }
+    }
+
+    pub fn atomic_long(&self) -> &AtomicLongSm {
+        &self.atomic_long
+    }
+    pub fn atomic_ref(&self) -> &AtomicReferenceSm {
+        &self.atomic_ref
+    }
+}
 
 /// A message exchanged between CP group members.
 #[derive(Clone, Debug)]
@@ -35,21 +100,21 @@ pub enum CpMsg {
         command: Vec<u8>,
     },
     /// The proposing member returns a committed reply to the origin member.
-    Reply { client: ClientId, reply: AlReply },
+    Reply { client: ClientId, reply: CpReply },
 }
 
 /// A client op that has committed and is ready to answer the client.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Completion {
     pub client: ClientId,
-    pub reply: AlReply,
+    pub reply: CpReply,
 }
 
-/// One CP group member: a Raft node + the AtomicLong SM + client-op routing.
+/// One CP group member: a Raft node + the CP state machine + client-op routing.
 pub struct CpGroup {
     id: NodeId,
     raft: RaftNode,
-    sm: AtomicLongSm,
+    sm: CpSm,
     /// Log index -> (client, origin member) for ops this node proposed.
     pending: HashMap<u64, (ClientId, NodeId)>,
     /// Locally-originated ops buffered until a leader is known.
@@ -63,7 +128,7 @@ impl CpGroup {
         CpGroup {
             id,
             raft,
-            sm: AtomicLongSm::new(),
+            sm: CpSm::new(),
             pending: HashMap::new(),
             waiting: Vec::new(),
             completions: Vec::new(),
@@ -79,7 +144,7 @@ impl CpGroup {
     pub fn leader(&self) -> Option<NodeId> {
         self.raft.leader()
     }
-    pub fn sm(&self) -> &AtomicLongSm {
+    pub fn sm(&self) -> &CpSm {
         &self.sm
     }
 
@@ -218,34 +283,50 @@ fn get_entry(b: &[u8], p: &mut usize) -> Option<Entry> {
     })
 }
 
-fn put_reply(o: &mut Vec<u8>, r: &AlReply) {
+fn put_reply(o: &mut Vec<u8>, r: &CpReply) {
     match r {
-        AlReply::Long(v) => {
+        CpReply::Long(v) => {
             o.push(0);
             o.extend_from_slice(&v.to_le_bytes());
         }
-        AlReply::Bool(v) => {
+        CpReply::Bool(v) => {
             o.push(1);
             o.push(*v as u8);
         }
-        AlReply::None => o.push(2),
+        CpReply::Data(d) => {
+            o.push(2);
+            match d {
+                Some(b) => put_blob(o, b),
+                None => put_u64(o, u64::MAX), // sentinel for null
+            }
+        }
+        CpReply::Nil => o.push(3),
     }
 }
-fn get_reply(b: &[u8], p: &mut usize) -> Option<AlReply> {
+fn get_reply(b: &[u8], p: &mut usize) -> Option<CpReply> {
     let tag = *b.get(*p)?;
     *p += 1;
     Some(match tag {
         0 => {
             let v = i64::from_le_bytes(b.get(*p..*p + 8)?.try_into().ok()?);
             *p += 8;
-            AlReply::Long(v)
+            CpReply::Long(v)
         }
         1 => {
             let v = *b.get(*p)? != 0;
             *p += 1;
-            AlReply::Bool(v)
+            CpReply::Bool(v)
         }
-        _ => AlReply::None,
+        2 => {
+            let len = u64::from_le_bytes(b.get(*p..*p + 8)?.try_into().ok()?);
+            if len == u64::MAX {
+                *p += 8;
+                CpReply::Data(None)
+            } else {
+                CpReply::Data(Some(get_blob(b, p)?))
+            }
+        }
+        _ => CpReply::Nil,
     })
 }
 
@@ -399,12 +480,12 @@ fn decode_raft(b: &[u8], p: &mut usize) -> Option<RaftMsg> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atomiclong::{encode, AlOp};
+    use crate::atomiclong::AlOp;
 
     fn roundtrip(m: CpMsg) {
         let bytes = encode_msg(&m);
         let back = decode_msg(&bytes).expect("decodes");
-        // Compare via re-encoding (CpMsg has no PartialEq due to AlReply nesting).
+        // Compare via re-encoding (CpMsg holds CpReply, which nests bytes).
         assert_eq!(encode_msg(&back), bytes, "roundtrip stable");
     }
 
@@ -447,15 +528,23 @@ mod tests {
         roundtrip(CpMsg::Forward {
             client: 42,
             origin: 3,
-            command: encode("c", &AlOp::AddAndGet(7)),
+            command: al_command("c", &AlOp::AddAndGet(7)),
         });
         roundtrip(CpMsg::Reply {
             client: 42,
-            reply: AlReply::Long(7),
+            reply: CpReply::Long(7),
         });
         roundtrip(CpMsg::Reply {
             client: 43,
-            reply: AlReply::Bool(false),
+            reply: CpReply::Bool(false),
+        });
+        roundtrip(CpMsg::Reply {
+            client: 44,
+            reply: CpReply::Data(Some(b"hello".to_vec())),
+        });
+        roundtrip(CpMsg::Reply {
+            client: 45,
+            reply: CpReply::Data(None),
         });
     }
 }

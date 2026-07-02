@@ -8,6 +8,7 @@
 //! `voted_for` is layered on top by the caller (see `log` module).
 
 pub mod atomiclong;
+pub mod atomicref;
 pub mod cp;
 pub mod log;
 
