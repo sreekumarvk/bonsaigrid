@@ -83,6 +83,10 @@ pub enum Msg {
         partition: i32,
         entries: Vec<(String, Vec<u8>, Vec<Vec<u8>>)>,
     },
+    /// An opaque CP-subsystem message (a serialized `raft::cp::CpMsg`: a Raft RPC,
+    /// a forward-to-leader, or a committed reply). The member transport carries it
+    /// verbatim; the CP layer owns its encoding.
+    Cp { payload: Vec<u8> },
 }
 
 const KIND_HELLO: u8 = 0;
@@ -99,6 +103,7 @@ const KIND_BACKUP_STATE: u8 = 10;
 const KIND_MIG_AUX: u8 = 11;
 const KIND_BACKUP_MM: u8 = 12;
 const KIND_MIG_MM: u8 = 13;
+const KIND_CP: u8 = 14;
 
 fn put_values(out: &mut Vec<u8>, values: &[Vec<u8>]) {
     put_u32(out, values.len() as u32);
@@ -275,6 +280,10 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
                 put_values(&mut body, values);
             }
         }
+        Msg::Cp { payload } => {
+            body.push(KIND_CP);
+            put_blob(&mut body, payload);
+        }
     }
     let mut frame = Vec::with_capacity(4 + body.len());
     put_u32(&mut frame, body.len() as u32);
@@ -443,6 +452,7 @@ pub fn decode(buf: &[u8]) -> Option<(Msg, usize)> {
                 entries,
             }
         }
+        KIND_CP => Msg::Cp { payload: r.blob()? },
         _ => return None,
     };
     Some((msg, total))
@@ -456,6 +466,9 @@ mod tests {
     fn roundtrip() {
         let msgs = [
             Msg::Hello { index: 2 },
+            Msg::Cp {
+                payload: b"\x00\x01\x02opaque-cp-bytes".to_vec(),
+            },
             Msg::Ack { op_id: 7 },
             Msg::BackupPut {
                 op_id: 9,

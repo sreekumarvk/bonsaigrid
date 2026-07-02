@@ -175,3 +175,281 @@ impl CpGroup {
         std::mem::take(&mut self.completions)
     }
 }
+
+// ---- CpMsg wire codec (carried opaquely by the member transport) ----
+
+use crate::log::Entry;
+
+fn put_u64(o: &mut Vec<u8>, v: u64) {
+    o.extend_from_slice(&v.to_le_bytes());
+}
+fn put_blob(o: &mut Vec<u8>, b: &[u8]) {
+    put_u64(o, b.len() as u64);
+    o.extend_from_slice(b);
+}
+fn get_u64(b: &[u8], p: &mut usize) -> Option<u64> {
+    let v = u64::from_le_bytes(b.get(*p..*p + 8)?.try_into().ok()?);
+    *p += 8;
+    Some(v)
+}
+fn get_blob(b: &[u8], p: &mut usize) -> Option<Vec<u8>> {
+    let n = get_u64(b, p)? as usize;
+    let s = b.get(*p..*p + n)?.to_vec();
+    *p += n;
+    Some(s)
+}
+
+fn put_entry(o: &mut Vec<u8>, e: &Entry) {
+    put_u64(o, e.term);
+    put_u64(o, e.index);
+    put_blob(o, &e.command);
+}
+fn get_entry(b: &[u8], p: &mut usize) -> Option<Entry> {
+    Some(Entry {
+        term: get_u64(b, p)?,
+        index: get_u64(b, p)?,
+        command: get_blob(b, p)?,
+    })
+}
+
+fn put_reply(o: &mut Vec<u8>, r: &AlReply) {
+    match r {
+        AlReply::Long(v) => {
+            o.push(0);
+            o.extend_from_slice(&v.to_le_bytes());
+        }
+        AlReply::Bool(v) => {
+            o.push(1);
+            o.push(*v as u8);
+        }
+        AlReply::None => o.push(2),
+    }
+}
+fn get_reply(b: &[u8], p: &mut usize) -> Option<AlReply> {
+    let tag = *b.get(*p)?;
+    *p += 1;
+    Some(match tag {
+        0 => {
+            let v = i64::from_le_bytes(b.get(*p..*p + 8)?.try_into().ok()?);
+            *p += 8;
+            AlReply::Long(v)
+        }
+        1 => {
+            let v = *b.get(*p)? != 0;
+            *p += 1;
+            AlReply::Bool(v)
+        }
+        _ => AlReply::None,
+    })
+}
+
+/// Serialize a [`CpMsg`] for the member transport (little-endian).
+pub fn encode_msg(msg: &CpMsg) -> Vec<u8> {
+    let mut o = Vec::new();
+    match msg {
+        CpMsg::Raft(rm) => {
+            o.push(0);
+            encode_raft(&mut o, rm);
+        }
+        CpMsg::Forward {
+            client,
+            origin,
+            command,
+        } => {
+            o.push(1);
+            put_u64(&mut o, *client);
+            put_u64(&mut o, *origin as u64);
+            put_blob(&mut o, command);
+        }
+        CpMsg::Reply { client, reply } => {
+            o.push(2);
+            put_u64(&mut o, *client);
+            put_reply(&mut o, reply);
+        }
+    }
+    o
+}
+
+/// Deserialize a [`CpMsg`] produced by [`encode_msg`].
+pub fn decode_msg(b: &[u8]) -> Option<CpMsg> {
+    let mut p = 1;
+    match *b.first()? {
+        0 => Some(CpMsg::Raft(decode_raft(b, &mut p)?)),
+        1 => Some(CpMsg::Forward {
+            client: get_u64(b, &mut p)?,
+            origin: get_u64(b, &mut p)? as NodeId,
+            command: get_blob(b, &mut p)?,
+        }),
+        2 => Some(CpMsg::Reply {
+            client: get_u64(b, &mut p)?,
+            reply: get_reply(b, &mut p)?,
+        }),
+        _ => None,
+    }
+}
+
+fn encode_raft(o: &mut Vec<u8>, m: &RaftMsg) {
+    match m {
+        RaftMsg::RequestVote {
+            term,
+            candidate,
+            last_log_index,
+            last_log_term,
+        } => {
+            o.push(0);
+            put_u64(o, *term);
+            put_u64(o, *candidate as u64);
+            put_u64(o, *last_log_index);
+            put_u64(o, *last_log_term);
+        }
+        RaftMsg::RequestVoteResp { term, granted } => {
+            o.push(1);
+            put_u64(o, *term);
+            o.push(*granted as u8);
+        }
+        RaftMsg::AppendEntries {
+            term,
+            leader,
+            prev_log_index,
+            prev_log_term,
+            entries,
+            leader_commit,
+        } => {
+            o.push(2);
+            put_u64(o, *term);
+            put_u64(o, *leader as u64);
+            put_u64(o, *prev_log_index);
+            put_u64(o, *prev_log_term);
+            put_u64(o, entries.len() as u64);
+            for e in entries {
+                put_entry(o, e);
+            }
+            put_u64(o, *leader_commit);
+        }
+        RaftMsg::AppendEntriesResp {
+            term,
+            success,
+            match_index,
+        } => {
+            o.push(3);
+            put_u64(o, *term);
+            o.push(*success as u8);
+            put_u64(o, *match_index);
+        }
+    }
+}
+
+fn decode_raft(b: &[u8], p: &mut usize) -> Option<RaftMsg> {
+    let tag = *b.get(*p)?;
+    *p += 1;
+    Some(match tag {
+        0 => RaftMsg::RequestVote {
+            term: get_u64(b, p)?,
+            candidate: get_u64(b, p)? as NodeId,
+            last_log_index: get_u64(b, p)?,
+            last_log_term: get_u64(b, p)?,
+        },
+        1 => RaftMsg::RequestVoteResp {
+            term: get_u64(b, p)?,
+            granted: {
+                let g = *b.get(*p)? != 0;
+                *p += 1;
+                g
+            },
+        },
+        2 => {
+            let term = get_u64(b, p)?;
+            let leader = get_u64(b, p)? as NodeId;
+            let prev_log_index = get_u64(b, p)?;
+            let prev_log_term = get_u64(b, p)?;
+            let n = get_u64(b, p)? as usize;
+            let mut entries = Vec::with_capacity(n);
+            for _ in 0..n {
+                entries.push(get_entry(b, p)?);
+            }
+            let leader_commit = get_u64(b, p)?;
+            RaftMsg::AppendEntries {
+                term,
+                leader,
+                prev_log_index,
+                prev_log_term,
+                entries,
+                leader_commit,
+            }
+        }
+        3 => RaftMsg::AppendEntriesResp {
+            term: get_u64(b, p)?,
+            success: {
+                let s = *b.get(*p)? != 0;
+                *p += 1;
+                s
+            },
+            match_index: get_u64(b, p)?,
+        },
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::atomiclong::{encode, AlOp};
+
+    fn roundtrip(m: CpMsg) {
+        let bytes = encode_msg(&m);
+        let back = decode_msg(&bytes).expect("decodes");
+        // Compare via re-encoding (CpMsg has no PartialEq due to AlReply nesting).
+        assert_eq!(encode_msg(&back), bytes, "roundtrip stable");
+    }
+
+    #[test]
+    fn cpmsg_wire_roundtrip() {
+        roundtrip(CpMsg::Raft(RaftMsg::RequestVote {
+            term: 3,
+            candidate: 2,
+            last_log_index: 5,
+            last_log_term: 2,
+        }));
+        roundtrip(CpMsg::Raft(RaftMsg::RequestVoteResp {
+            term: 3,
+            granted: true,
+        }));
+        roundtrip(CpMsg::Raft(RaftMsg::AppendEntries {
+            term: 4,
+            leader: 1,
+            prev_log_index: 2,
+            prev_log_term: 3,
+            entries: vec![
+                Entry {
+                    term: 4,
+                    index: 3,
+                    command: b"cmd1".to_vec(),
+                },
+                Entry {
+                    term: 4,
+                    index: 4,
+                    command: b"cmd2".to_vec(),
+                },
+            ],
+            leader_commit: 2,
+        }));
+        roundtrip(CpMsg::Raft(RaftMsg::AppendEntriesResp {
+            term: 4,
+            success: true,
+            match_index: 4,
+        }));
+        roundtrip(CpMsg::Forward {
+            client: 42,
+            origin: 3,
+            command: encode("c", &AlOp::AddAndGet(7)),
+        });
+        roundtrip(CpMsg::Reply {
+            client: 42,
+            reply: AlReply::Long(7),
+        });
+        roundtrip(CpMsg::Reply {
+            client: 43,
+            reply: AlReply::Bool(false),
+        });
+    }
+}
