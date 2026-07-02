@@ -752,6 +752,43 @@ fn cp_counter(
     vec![]
 }
 
+/// Dispatch a FencedLock request to the CP group. Lock/tryLock reply with a long
+/// fence; unlock replies with a bool.
+fn cp_fencedlock(
+    msg_type: i32,
+    req: &[Frame],
+    conn_id: u64,
+    corr: i64,
+    replicator: Option<&Replicator>,
+) -> Vec<Vec<Frame>> {
+    use crate::member_thread::ReplyKind;
+    use codecs::fencedlock::FlReq;
+    use raft::fencedlock::FlOp;
+
+    let Some(rep) = replicator else {
+        let mut e = error_response(
+            42,
+            "com.hazelcast.cp.exception.CPSubsystemException",
+            "CP subsystem is not enabled on this member",
+        );
+        set_correlation_id(&mut e, corr);
+        return vec![e];
+    };
+    let Some(dec) = codecs::fencedlock::decode_request(msg_type, req) else {
+        return vec![];
+    };
+    let resp_type = codecs::fencedlock::response_type(msg_type).unwrap_or(msg_type + 1);
+    let (session, thread) = (dec.session, dec.thread);
+    let (op, kind) = match dec.op {
+        FlReq::Lock => (FlOp::Lock { session, thread }, ReplyKind::Long),
+        FlReq::TryLock => (FlOp::TryLock { session, thread }, ReplyKind::Long),
+        FlReq::Unlock => (FlOp::Unlock { session, thread }, ReplyKind::Bool),
+    };
+    let command = raft::cp::fl_command(&dec.name, &op);
+    rep.submit_cp(conn_id, corr, resp_type, kind, command);
+    vec![]
+}
+
 pub fn dispatch(
     req: Vec<Frame>,
     conn_id: u64,
@@ -1776,6 +1813,9 @@ pub fn dispatch(
         }
         t if codecs::atomicref::is_atomicref(t) => cp_atomicref(t, &req, conn_id, corr, replicator),
         t if codecs::cpcount::is_cp_count(t) => cp_counter(t, &req, conn_id, corr, replicator),
+        t if codecs::fencedlock::is_fencedlock(t) => {
+            cp_fencedlock(t, &req, conn_id, corr, replicator)
+        }
         // Unknown op: ack with an empty response of type+1 so the client does
         // not hang (covers e.g. CreateProxy). The live client reveals any op
         // that needs a richer reply (per plan's empirical-risk note).

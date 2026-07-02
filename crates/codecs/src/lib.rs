@@ -14,6 +14,7 @@ pub mod cache;
 pub mod cluster_view;
 pub mod cpcount;
 pub mod executor;
+pub mod fencedlock;
 pub mod map;
 pub mod mc;
 pub mod member_info;
