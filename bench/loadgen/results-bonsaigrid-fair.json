@@ -1,0 +1,13 @@
+{
+  "target": "bonsaigrid",
+  "stages": [
+    { "level": 1, "set": { "op": "set", "count": 73552, "rps": 18388.00, "p50_us": 27, "p90_us": 28, "p99_us": 31 }, "get": { "op": "get", "count": 73552, "rps": 18388.00, "p50_us": 25, "p90_us": 26, "p99_us": 29 }, "errors": 0 },
+    { "level": 2, "set": { "op": "set", "count": 264301, "rps": 66075.25, "p50_us": 12, "p90_us": 21, "p99_us": 27 }, "get": { "op": "get", "count": 264301, "rps": 66075.25, "p50_us": 11, "p90_us": 19, "p99_us": 25 }, "errors": 0 },
+    { "level": 4, "set": { "op": "set", "count": 490240, "rps": 122560.00, "p50_us": 12, "p90_us": 31, "p99_us": 34 }, "get": { "op": "get", "count": 490240, "rps": 122560.00, "p50_us": 11, "p90_us": 28, "p99_us": 32 }, "errors": 0 },
+    { "level": 8, "set": { "op": "set", "count": 764331, "rps": 191082.75, "p50_us": 21, "p90_us": 29, "p99_us": 36 }, "get": { "op": "get", "count": 764331, "rps": 191082.75, "p50_us": 19, "p90_us": 25, "p99_us": 33 }, "errors": 0 },
+    { "level": 16, "set": { "op": "set", "count": 1137479, "rps": 284369.75, "p50_us": 26, "p90_us": 38, "p99_us": 89 }, "get": { "op": "get", "count": 1137479, "rps": 284369.75, "p50_us": 23, "p90_us": 35, "p99_us": 82 }, "errors": 0 },
+    { "level": 32, "set": { "op": "set", "count": 1524474, "rps": 381118.50, "p50_us": 39, "p90_us": 56, "p99_us": 93 }, "get": { "op": "get", "count": 1524474, "rps": 381118.50, "p50_us": 37, "p90_us": 53, "p99_us": 87 }, "errors": 0 },
+    { "level": 64, "set": { "op": "set", "count": 1678030, "rps": 419507.50, "p50_us": 59, "p90_us": 120, "p99_us": 222 }, "get": { "op": "get", "count": 1678030, "rps": 419507.50, "p50_us": 57, "p90_us": 118, "p99_us": 216 }, "errors": 0 },
+    { "level": 128, "set": { "op": "set", "count": 1699729, "rps": 424932.25, "p50_us": 110, "p90_us": 217, "p99_us": 1282 }, "get": { "op": "get", "count": 1699729, "rps": 424932.25, "p50_us": 109, "p90_us": 215, "p99_us": 1262 }, "errors": 0 }
+  ]
+}

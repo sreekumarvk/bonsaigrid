@@ -1,0 +1,456 @@
+<title>Cache Benchmark — BonsaiGrid vs Hazelcast vs Redis vs Memcached</title>
+<style>
+  :root {
+    --surface-1:#fcfcfb; --plane:#f9f9f7;
+    --ink:#0b0b0b; --ink-2:#52514e; --muted:#898781;
+    --grid:#e1e0d9; --axis:#c3c2b7; --border:rgba(11,11,11,.10);
+    --bonsai:#2a78d6; --hazel:#008300; --redis:#e87ba4; --memc:#eb6834;
+    --good:#006300;
+    --shadow:0 1px 2px rgba(11,11,11,.04),0 6px 20px rgba(11,11,11,.05);
+    --font:system-ui,-apple-system,"Segoe UI",sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --surface-1:#1a1a19; --plane:#0d0d0d;
+      --ink:#fff; --ink-2:#c3c2b7; --muted:#898781;
+      --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,.10);
+      --bonsai:#3987e5; --hazel:#008300; --redis:#d55181; --memc:#d95926;
+      --good:#0ca30c;
+      --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 28px rgba(0,0,0,.45);
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--plane);color:var(--ink);font-family:var(--font);
+    line-height:1.5;-webkit-font-smoothing:antialiased;padding:32px 20px 64px}
+  .wrap{max-width:1120px;margin:0 auto}
+  header.page{margin-bottom:8px}
+  .eyebrow{font-size:12px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);
+    font-weight:600;margin:0 0 6px}
+  h1{font-size:clamp(23px,3.2vw,33px);line-height:1.12;margin:0 0 10px;text-wrap:balance;
+    font-weight:700;letter-spacing:-.01em}
+  .lede{font-size:15px;color:var(--ink-2);max-width:74ch;margin:0 0 18px}
+  .lede b{color:var(--ink);font-weight:600}
+  .lede .bg{color:var(--bonsai);font-weight:700}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 26px}
+  .chip{font-size:12px;color:var(--ink-2);background:var(--surface-1);border:1px solid var(--border);
+    border-radius:999px;padding:4px 11px;white-space:nowrap}
+  .chip b{color:var(--ink);font-weight:600}
+
+  .headline{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:0 0 26px}
+  @media (max-width:640px){.headline{grid-template-columns:1fr}}
+  .stat{background:var(--surface-1);border:1px solid var(--border);border-radius:13px;
+    padding:16px 17px;box-shadow:var(--shadow)}
+  .stat .k{font-size:12px;color:var(--muted);font-weight:600;margin:0 0 6px}
+  .stat .v{font-size:27px;font-weight:750;letter-spacing:-.02em;line-height:1}
+  .stat .v small{font-size:14px;font-weight:600;color:var(--ink-2);letter-spacing:0}
+  .stat .d{font-size:12px;color:var(--ink-2);margin:7px 0 0}
+  .stat.hero .v{color:var(--bonsai)}
+
+  .toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:14px;margin:0 0 22px}
+  .seg{display:inline-flex;background:var(--surface-1);border:1px solid var(--border);
+    border-radius:9px;padding:3px;box-shadow:var(--shadow)}
+  .seg button{font-family:var(--font);font-size:13px;font-weight:600;color:var(--ink-2);
+    background:none;border:0;padding:6px 14px;border-radius:6px;cursor:pointer;letter-spacing:.01em}
+  .seg button[aria-pressed=true]{background:var(--ink);color:var(--surface-1)}
+  .seg-label{font-size:12px;color:var(--muted);font-weight:600;margin-right:-6px}
+  .tbtn{margin-left:auto;font-family:var(--font);font-size:13px;font-weight:600;color:var(--ink-2);
+    background:var(--surface-1);border:1px solid var(--border);border-radius:8px;padding:7px 14px;
+    cursor:pointer;box-shadow:var(--shadow)}
+  .tbtn[aria-pressed=true]{background:var(--ink);color:var(--surface-1);border-color:transparent}
+
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  @media (max-width:760px){.grid2{grid-template-columns:1fr}}
+
+  .card{background:var(--surface-1);border:1px solid var(--border);border-radius:14px;
+    padding:18px 18px 12px;box-shadow:var(--shadow);position:relative}
+  .card.full{margin-bottom:18px}
+  .card h2{font-size:15px;margin:0 0 2px;font-weight:650;letter-spacing:-.005em}
+  .card .sub{font-size:12.5px;color:var(--muted);margin:0 0 6px}
+  .legend{display:flex;gap:14px;align-items:center;margin:2px 0 4px;flex-wrap:wrap}
+  .lg{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--ink-2);font-weight:600}
+  .lg .sw{width:13px;height:11px;border-radius:3px;flex:none}
+  .lg.dash .sw{border-radius:0;background:none !important;border-top:3px dashed var(--bonsai);height:0;width:15px}
+
+  .chart{position:relative}
+  .chart svg{width:100%;height:auto;display:block;overflow:visible}
+  .tip{position:absolute;pointer-events:none;opacity:0;transition:opacity .09s;
+    background:var(--surface-1);border:1px solid var(--border);border-radius:9px;
+    box-shadow:var(--shadow);padding:8px 10px;font-size:12px;min-width:170px;z-index:5;
+    transform:translate(-50%,-115%)}
+  .tip .tx{font-weight:700;color:var(--ink);margin-bottom:5px;font-size:11.5px;
+    letter-spacing:.02em;text-transform:uppercase}
+  .tip .row{display:flex;align-items:center;gap:7px;justify-content:space-between;margin:3px 0}
+  .tip .row .name{display:flex;align-items:center;gap:6px;color:var(--ink-2)}
+  .tip .row .name .sw{width:9px;height:9px;border-radius:2px}
+  .tip .row .val{font-weight:700;color:var(--ink);font-variant-numeric:tabular-nums}
+
+  .axtitle{fill:var(--muted);font-size:11px;font-weight:600}
+  .tick{fill:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+  .endlab{fill:var(--ink);font-size:11px;font-weight:650}
+
+  table.dv{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px;
+    font-variant-numeric:tabular-nums}
+  table.dv th,table.dv td{padding:5px 7px;text-align:right;border-bottom:1px solid var(--grid);white-space:nowrap}
+  table.dv th:first-child,table.dv td:first-child{text-align:left}
+  table.dv thead th{color:var(--muted);font-weight:600;border-bottom:1px solid var(--axis)}
+  table.dv .sw{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:baseline}
+  .hidden{display:none}
+
+  .callout{background:var(--surface-1);border:1px solid var(--border);border-left:3px solid var(--bonsai);
+    border-radius:12px;padding:16px 19px;margin:20px 0 26px;box-shadow:var(--shadow)}
+  .callout h3{margin:0 0 7px;font-size:14.5px;font-weight:700}
+  .callout p{margin:0;font-size:13.5px;color:var(--ink-2)}
+  .callout p+p{margin-top:8px}
+  .callout b{color:var(--ink);font-weight:600}
+  .callout code{background:var(--plane);border:1px solid var(--border);border-radius:4px;padding:1px 5px;font-size:12px}
+
+  .sat-title{font-size:13px;font-weight:650;letter-spacing:.04em;text-transform:uppercase;
+    color:var(--muted);margin:30px 0 12px}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+  @media (max-width:760px){.grid3{grid-template-columns:1fr}}
+  .empty{background:var(--surface-1);border:1px dashed var(--axis);border-radius:14px;
+    padding:20px 18px;min-height:140px;display:flex;flex-direction:column;gap:8px}
+  .empty h4{margin:0;font-size:14px;font-weight:650;display:flex;align-items:center;gap:8px}
+  .empty h4 .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);flex:none}
+  .empty p{margin:0;font-size:12.5px;color:var(--ink-2)}
+  .empty .tag{margin-top:auto;font-size:11px;font-weight:600;color:var(--muted);
+    text-transform:uppercase;letter-spacing:.05em}
+
+  footer{margin-top:40px;padding-top:18px;border-top:1px solid var(--grid);
+    font-size:12px;color:var(--muted)}
+  footer code{background:var(--surface-1);border:1px solid var(--border);border-radius:5px;
+    padding:1px 6px;font-size:11.5px}
+  footer p{margin:0 0 7px;max-width:90ch}
+</style>
+
+<div class="wrap">
+  <header class="page">
+    <p class="eyebrow">Isolated run · bench/run-all-isolated.sh · cgroup + cpuset</p>
+    <h1>Cache Benchmark — BonsaiGrid vs Hazelcast vs Redis vs Memcached</h1>
+    <p class="lede">A <b>fair</b> run: every server and the load client live in their own cgroup on
+      <b>disjoint CPUs</b> (servers on cpuset 0-7, client on 8-19), each server capped at
+      <b>8 cpus / 4 GB</b>, so the client can't steal cores from the server under test. On throughput
+      <b>Memcached leads</b> (348k, thin client + multithreaded), and
+      <span class="bg">BonsaiGrid</span> is <b>second at 160k — now ahead of Hazelcast</b> (137k),
+      the reversal of the co-located run. Same official Hazelcast client drives both, so BonsaiGrid's
+      faster server shows through once CPUs aren't contended. Its native raw-protocol driver reaches
+      <b>~425k</b> (dashed) — the client tax is the rest.</p>
+    <div class="chips">
+      <span class="chip">harness: <b>bench/run-all-isolated.sh</b></span>
+      <span class="chip">servers: <b>cpuset 0-7, 4 GB</b> each</span>
+      <span class="chip">client: <b>cpuset 8-19</b> (isolated)</span>
+      <span class="chip">clients: <b>official/native</b>, pooled</span>
+    </div>
+  </header>
+
+  <div class="headline">
+    <div class="stat">
+      <p class="k">Memcached — peak</p>
+      <p class="v">348k <small>ops/s</small></p>
+      <p class="d">Throughput leader @128. Multithreaded server, thin protocol.</p>
+    </div>
+    <div class="stat hero">
+      <p class="k">BonsaiGrid — peak</p>
+      <p class="v">160k <small>ops/s</small></p>
+      <p class="d">2nd, ahead of Hazelcast (137k). Was 74k co-located — isolation removed the contention.</p>
+    </div>
+    <div class="stat">
+      <p class="k">BonsaiGrid — server ceiling</p>
+      <p class="v">425k <small>· native driver</small></p>
+      <p class="d">Dashed line. Raw-protocol driver, client tax removed. The store has headroom.</p>
+    </div>
+  </div>
+
+  <div class="toolbar">
+    <span class="seg-label">Latency percentile</span>
+    <div class="seg" id="pct" role="group" aria-label="Latency percentile">
+      <button data-p="p50">P50</button>
+      <button data-p="p90">P90</button>
+      <button data-p="p99" aria-pressed="true">P99</button>
+    </div>
+    <button class="tbtn" id="tableToggle" aria-pressed="false">Show data table</button>
+  </div>
+
+  <!-- Throughput -->
+  <div class="card full">
+    <h2>Operations per second</h2>
+    <p class="sub">Achieved op-rate (set = get, one of each per loop). Higher is better.
+      Dashed = BonsaiGrid's server via its native raw-protocol driver (client-isolated reference).</p>
+    <div class="legend" id="lg-tp"></div>
+    <div class="chart" id="c-tp"></div>
+    <div class="tblwrap hidden" id="t-tp"></div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <h2>SET latency <span id="lab-set" style="color:var(--muted);font-weight:500">· P99</span></h2>
+      <p class="sub">Lower is better. Microseconds. BonsaiGrid via the official Hazelcast client.</p>
+      <div class="legend" id="lg-set"></div>
+      <div class="chart" id="c-set"></div>
+      <div class="tblwrap hidden" id="t-set"></div>
+    </div>
+    <div class="card">
+      <h2>GET latency <span id="lab-get" style="color:var(--muted);font-weight:500">· P99</span></h2>
+      <p class="sub">Lower is better. Microseconds. BonsaiGrid via the official Hazelcast client.</p>
+      <div class="legend" id="lg-get"></div>
+      <div class="chart" id="c-get"></div>
+      <div class="tblwrap hidden" id="t-get"></div>
+    </div>
+  </div>
+
+  <div class="callout">
+    <h3>Why this run is fair — and what changed</h3>
+    <p><b>The isolation.</b> Each server and the load client run in a separate cgroup v2 with a
+      <b>disjoint cpuset</b> — servers on cpus 0-7, the client on 8-19 — plus an equal 8-cpu / 4 GB
+      cap per server. In the earlier co-located run the CPU-heavy Hazelcast Go client and the server
+      shared cores, so throughput measured the Linux scheduler, not the server.</p>
+    <p><b>The reversal.</b> Co-located, BonsaiGrid read <b>74k</b> and lost to Hazelcast's 150k.
+      Isolated, it reads <b>160k and beats Hazelcast</b> (137k). Both are driven by the <b>same</b>
+      official Hazelcast client, so this is the faster server showing through once it isn't starved.
+      Memcached (348k) still leads on raw throughput — a thin binary protocol and a multithreaded
+      server — which the heavyweight Hazelcast client can't match on the BonsaiGrid/Hazelcast side.</p>
+    <p><b>Server ceiling.</b> BonsaiGrid's <b>native raw-protocol driver</b> (<code>bench ladder</code>,
+      dashed) drives the same 8-core server to <b>~425k ops/s</b> — so the remaining gap to Memcached
+      is the official-client tax, not the store. A thin uniform client per protocol (RESP / memcached
+      text / raw Hazelcast frames) would close it.</p>
+  </div>
+
+  <div class="sat-title">Saturation — not captured in this run</div>
+  <div class="grid3">
+    <div class="empty">
+      <h4><span class="dot"></span>CPU usage</h4>
+      <p>The reference video tracks CPU to full saturation. This loadgen records latency and
+        throughput only — no per-process CPU sampling.</p>
+      <p class="tag">needs instrumented run</p>
+    </div>
+    <div class="empty">
+      <h4><span class="dot"></span>Memory usage</h4>
+      <p>Per-server RSS over time (and the TTL reclamation pattern) requires sampling each process.
+        Not collected here.</p>
+      <p class="tag">needs instrumented run</p>
+    </div>
+    <div class="empty">
+      <h4><span class="dot"></span>Network throughput</h4>
+      <p>Tx/Rx bytes per second per backend — requires reading each process's network counters
+        during the run. Not collected.</p>
+      <p class="tag">needs instrumented run</p>
+    </div>
+  </div>
+
+  <footer>
+    <p><b>Data source:</b> <span id="src">embedded snapshot</span>. This page fetches
+      <code>bench/loadgen/combined.json</code> at load time and re-renders from it; when fetch is
+      blocked (opened as a <code>file://</code>, or the read-only hosted artifact) it falls back to the
+      embedded snapshot. To auto-load your latest run, serve the repo over http — e.g.
+      <code>python3 -m http.server</code> from the repo root, then open
+      <code>/bench/deploy/redis-vs-memcached.html</code>.</p>
+    <p><b>Methodology.</b> Four backends via <code>bench/run-all-isolated.sh</code>: every server and
+      the client in its own Docker container (cgroup v2), servers on cpuset 0-7 (8 cpus, 4 GB) and the
+      client on 8-19, official/native clients (pooled, HZ_CONNS=128), 4 s/stage. BonsaiGrid runs
+      containerized too (glibc-matched image, seccomp=unconfined for io_uring). The dashed BonsaiGrid
+      line is the native raw-protocol driver (<code>bench ladder</code>, from
+      <code>results-bonsaigrid-fair.json</code>) — a client-isolated view of the same server.
+      CPU/memory/network panels are intentionally empty — not sampled, not fabricated.</p>
+  </footer>
+</div>
+
+<script>
+let LEVELS = [1,2,4,8,16,32,64,128];
+// which backends to draw (all present in the embedded fallback; narrowed to
+// whatever combined.json actually contains once it loads)
+const HAVE = {bonsaigrid:true, hazelcast:true, redis:true, memcached:true};
+let NATIVE = true; // show the native-driver reference line
+
+// Isolated run (bench/run-all-isolated.sh): each server + the client in its own
+// cgroup, servers on cpuset 0-7 (8 cpus, 4g), client on 8-19. Official/native
+// clients. Fallback snapshot; the page reloads combined.json live when served.
+const BG = {
+  rps:[2866,7406,21939,58240,99724,131022,140514,160281],
+  set:{p50:[191,96,61,56,64,96,129,227], p90:[317,255,204,99,128,233,589,988], p99:[582,431,343,292,511,643,1198,1753]},
+  get:{p50:[170,81,53,47,51,73,104,200], p90:[269,245,192,87,110,211,572,972], p99:[487,441,338,285,487,607,1154,1733]},
+};
+// BonsaiGrid — server-isolated reference: native raw-protocol driver (bench ladder)
+let BG_NATIVE_RPS = [18388,66075,122560,191083,284370,381119,419508,424932];
+const HZ = {
+  rps:[1795,3935,11159,45922,109405,122415,122128,136970],
+  set:{p50:[288,260,181,64,60,98,198,324], p90:[435,395,321,181,109,248,529,997], p99:[618,574,445,328,257,588,1010,1667]},
+  get:{p50:[263,241,174,61,58,93,190,309], p90:[426,390,320,177,101,214,498,985], p99:[602,557,441,327,227,531,966,1651]},
+};
+const RD = {
+  rps:[16776,42002,45798,56252,64810,68385,82218,82905],
+  set:{p50:[26,19,33,55,100,219,375,749], p90:[33,31,64,110,224,368,526,916], p99:[192,83,195,336,425,566,777,1543]},
+  get:{p50:[24,19,32,54,98,215,375,750], p90:[31,30,62,103,219,363,521,908], p99:[166,69,185,337,427,558,779,1538]},
+};
+const MC = {
+  rps:[18365,34663,52651,116018,218379,342347,349898,347774],
+  set:{p50:[25,23,30,30,31,33,60,113], p90:[29,28,51,44,52,64,147,361], p99:[148,173,166,121,108,372,672,1153]},
+  get:{p50:[24,23,30,30,30,33,59,112], p90:[29,28,50,43,52,63,145,359], p99:[106,163,162,78,92,300,760,1393]},
+};
+
+const C={bonsai:"var(--bonsai)",hazel:"var(--hazel)",redis:"var(--redis)",memc:"var(--memc)"};
+
+const fmtInt = n => n>=1000 ? (n/1000).toFixed(n>=10000?0:1).replace(/\.0$/,"")+"k" : String(Math.round(n));
+const fmtUs  = n => n>=1000 ? (n/1000).toFixed(1)+" ms" : Math.round(n)+" µs";
+function niceMax(v){ if(v<=0)return 1; const p=Math.pow(10,Math.floor(Math.log10(v))),n=v/p;
+  const step=n<=1?1:n<=2?2:n<=2.5?2.5:n<=5?5:10; return step*p; }
+
+// series descriptors ---------------------------------------------------------
+function tpSeries(){
+  const s=[];
+  if(HAVE.bonsaigrid) s.push({name:"BonsaiGrid (official client)", short:"BonsaiGrid", color:C.bonsai, vals:BG.rps});
+  if(HAVE.memcached)  s.push({name:"Memcached", short:"Memcached", color:C.memc, vals:MC.rps});
+  if(HAVE.hazelcast)  s.push({name:"Hazelcast", short:"Hazelcast", color:C.hazel, vals:HZ.rps});
+  if(HAVE.redis)      s.push({name:"Redis", short:"Redis", color:C.redis, vals:RD.rps});
+  if(NATIVE && BG_NATIVE_RPS.length===LEVELS.length)
+    s.push({name:"BonsaiGrid (native driver, server-isolated)", short:"BG · native", color:C.bonsai, vals:BG_NATIVE_RPS, dash:"6 4", faint:1});
+  return s;
+}
+function latSeries(op,pct){
+  const s=[];
+  if(HAVE.bonsaigrid) s.push({name:"BonsaiGrid", short:"BonsaiGrid", color:C.bonsai, vals:BG[op][pct]});
+  if(HAVE.hazelcast)  s.push({name:"Hazelcast", short:"Hazelcast", color:C.hazel, vals:HZ[op][pct]});
+  if(HAVE.redis)      s.push({name:"Redis", short:"Redis", color:C.redis, vals:RD[op][pct]});
+  if(HAVE.memcached)  s.push({name:"Memcached", short:"Memcached", color:C.memc, vals:MC[op][pct]});
+  return s;
+}
+
+// reusable line chart --------------------------------------------------------
+function lineChart(elId, tipId, series, opts){
+  const W=720, H=opts.h||360, m={t:14,r:118,b:42,l:66};
+  const iw=W-m.l-m.r, ih=H-m.t-m.b, n=LEVELS.length;
+  const xAt=i=>m.l+(n===1?0:(i/(n-1))*iw);
+  let ymax=0; series.forEach(s=>s.vals.forEach(v=>{if(v>ymax)ymax=v;})); ymax=niceMax(ymax);
+  const yAt=v=>m.t+ih-(v/ymax)*ih;
+  const NS="http://www.w3.org/2000/svg";
+  const mk=(t,a)=>{const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);return e;};
+  const svg=mk("svg",{viewBox:`0 0 ${W} ${H}`,role:"img","aria-label":opts.aria||""});
+
+  const ticks=5;
+  for(let g=0;g<=ticks;g++){ const val=ymax*g/ticks, y=yAt(val);
+    svg.appendChild(mk("line",{x1:m.l,x2:m.l+iw,y1:y,y2:y,stroke:"var(--grid)","stroke-width":1}));
+    const tl=mk("text",{x:m.l-10,y:y+3.5,"text-anchor":"end",class:"tick"}); tl.textContent=opts.yfmt(val); svg.appendChild(tl); }
+  svg.appendChild(mk("line",{x1:m.l,x2:m.l+iw,y1:m.t+ih,y2:m.t+ih,stroke:"var(--axis)","stroke-width":1}));
+  LEVELS.forEach((lv,i)=>{const tl=mk("text",{x:xAt(i),y:m.t+ih+18,"text-anchor":"middle",class:"tick"});tl.textContent=lv;svg.appendChild(tl);});
+  const xt=mk("text",{x:m.l+iw/2,y:H-2,"text-anchor":"middle",class:"axtitle"}); xt.textContent="concurrent workers / connections"; svg.appendChild(xt);
+
+  series.forEach(s=>{
+    const pts=s.vals.map((v,i)=>`${xAt(i)},${yAt(v)}`).join(" ");
+    const a={points:pts,fill:"none",stroke:s.color,"stroke-width":2,"stroke-linejoin":"round","stroke-linecap":"round"};
+    if(s.dash){a["stroke-dasharray"]=s.dash;} if(s.faint){a.opacity=.55;}
+    svg.appendChild(mk("polyline",a));
+    if(!s.faint) s.vals.forEach((v,i)=>svg.appendChild(mk("circle",{cx:xAt(i),cy:yAt(v),r:3.5,fill:s.color,stroke:"var(--surface-1)","stroke-width":2})));
+  });
+
+  // end labels (swatch + ink text) with vertical de-collision
+  const li=LEVELS.length-1;
+  const ends=series.map(s=>({txt:s.short||s.name,color:s.color,dash:s.dash,y:yAt(s.vals[li])}));
+  ends.sort((a,b)=>a.y-b.y);
+  const gap=13; for(let i=1;i<ends.length;i++) if(ends[i].y-ends[i-1].y<gap) ends[i].y=ends[i-1].y+gap;
+  const bottom=m.t+ih, over=ends[ends.length-1].y-bottom; if(over>0) ends.forEach(e=>e.y-=over);
+  const top=ends[0].y-m.t; if(top<0) ends.forEach(e=>e.y-=top);
+  ends.forEach(e=>{ const lx=m.l+iw+9;
+    if(e.dash){ svg.appendChild(mk("line",{x1:lx,x2:lx+9,y1:e.y-3,y2:e.y-3,stroke:e.color,"stroke-width":3,"stroke-dasharray":"3 2",opacity:.7})); }
+    else { svg.appendChild(mk("rect",{x:lx,y:e.y-8,width:9,height:9,rx:2,fill:e.color})); }
+    const t=mk("text",{x:lx+13,y:e.y,class:"endlab"}); if(e.dash) t.setAttribute("opacity",.8); t.textContent=e.txt; svg.appendChild(t); });
+
+  const cross=mk("line",{x1:0,x2:0,y1:m.t,y2:m.t+ih,stroke:"var(--axis)","stroke-width":1,"stroke-dasharray":"3 3",opacity:0}); svg.appendChild(cross);
+  const hi=series.map(s=>{const c=mk("circle",{r:6,fill:s.color,stroke:"var(--surface-1)","stroke-width":2,opacity:0});svg.appendChild(c);return c;});
+  const hit=mk("rect",{x:m.l,y:m.t,width:iw,height:ih,fill:"transparent"}); svg.appendChild(hit);
+
+  const el=document.getElementById(elId);
+  const tip=typeof tipId==="string"?el.querySelector("#"+tipId):tipId;
+  el.innerHTML=""; el.appendChild(svg); if(tip) el.appendChild(tip);
+
+  function idx(e){const r=svg.getBoundingClientRect(),vx=(e.clientX-r.left)/r.width*W;let b=0,bd=1e9;for(let i=0;i<n;i++){const d=Math.abs(xAt(i)-vx);if(d<bd){bd=d;b=i;}}return b;}
+  function show(i){ const vx=xAt(i);
+    cross.setAttribute("x1",vx);cross.setAttribute("x2",vx);cross.setAttribute("opacity",1);
+    series.forEach((s,k)=>{hi[k].setAttribute("cx",vx);hi[k].setAttribute("cy",yAt(s.vals[i]));hi[k].setAttribute("opacity",1);});
+    const r=svg.getBoundingClientRect(),scale=r.width/W;
+    tip.style.left=(vx*scale)+"px"; tip.style.top=(m.t*scale+8)+"px";
+    tip.innerHTML=`<div class="tx">${LEVELS[i]} conns</div>`+series.map(s=>
+      `<div class="row"><span class="name"><span class="sw" style="background:${s.color}"></span>${s.short||s.name}</span>`+
+      `<span class="val">${opts.tipfmt(s.vals[i])}</span></div>`).join("");
+    tip.style.opacity=1;
+  }
+  function hide(){cross.setAttribute("opacity",0);hi.forEach(c=>c.setAttribute("opacity",0));tip.style.opacity=0;}
+  hit.addEventListener("mousemove",e=>show(idx(e)));
+  hit.addEventListener("mouseleave",hide);
+  svg.addEventListener("touchstart",e=>show(idx(e.touches[0])),{passive:true});
+  svg.addEventListener("touchmove",e=>show(idx(e.touches[0])),{passive:true});
+}
+
+function legend(elId, series){
+  document.getElementById(elId).innerHTML=series.map(s=>
+    s.dash ? `<span class="lg dash"><span class="sw"></span>${s.name}</span>`
+           : `<span class="lg"><span class="sw" style="background:${s.color}"></span>${s.name}</span>`).join("");
+}
+function table(elId, series, fmt){
+  let h=`<div style="overflow-x:auto"><table class="dv"><thead><tr><th>conns</th>`+
+    series.map(s=>`<th><span class="sw" style="background:${s.color}"></span>${s.short||s.name}</th>`).join("")+`</tr></thead><tbody>`;
+  LEVELS.forEach((lv,i)=>{h+=`<tr><td>${lv}</td>`+series.map(s=>`<td>${fmt(s.vals[i])}</td>`).join("")+`</tr>`;});
+  document.getElementById(elId).innerHTML=h+`</tbody></table></div>`;
+}
+
+let PCT="p99";
+function render(){
+  const tp=tpSeries();
+  lineChart("c-tp","tip-tp",tp,{yfmt:fmtInt,tipfmt:v=>fmtInt(v)+" ops/s",aria:"Operations per second by connection count"});
+  legend("lg-tp",tp); table("t-tp",tp,fmtInt);
+  ["set","get"].forEach(op=>{
+    const s=latSeries(op,PCT);
+    lineChart("c-"+op,"tip-"+op,s,{yfmt:fmtUs,tipfmt:fmtUs,h:320,aria:op.toUpperCase()+" "+PCT+" latency"});
+    legend("lg-"+op,s); table("t-"+op,s,fmtUs);
+    document.getElementById("lab-"+op).textContent="· "+PCT.toUpperCase();
+  });
+}
+
+["tp","set","get"].forEach(id=>{const t=document.createElement("div");t.className="tip";t.id="tip-"+id;document.getElementById("c-"+id).appendChild(t);});
+
+// ---- live data: fetch combined.json, fall back to the embedded snapshot -----
+const DATASET={bonsaigrid:BG, hazelcast:HZ, redis:RD, memcached:MC};
+function fromStages(stages){
+  const col=(op,p)=>stages.map(s=>s[op][p]);
+  return {rps:stages.map(s=>s.set.rps),
+    set:{p50:col("set","p50_us"),p90:col("set","p90_us"),p99:col("set","p99_us")},
+    get:{p50:col("get","p50_us"),p90:col("get","p90_us"),p99:col("get","p99_us")}};
+}
+async function boot(){
+  const src=document.getElementById("src");
+  try{
+    const base=new URL("../loadgen/", location.href);
+    const cj=await (await fetch(new URL("combined.json", base), {cache:"no-store"})).json();
+    const present=Object.keys(HAVE).filter(k=>Array.isArray(cj[k]) && cj[k].length);
+    if(!present.length) throw new Error("no backends in combined.json");
+    // levels come from the data (handles custom LEVELS= ramps)
+    LEVELS=cj[present[0]].map(s=>s.level);
+    for(const k of Object.keys(HAVE)){
+      if(cj[k] && cj[k].length){ Object.assign(DATASET[k], fromStages(cj[k])); HAVE[k]=true; }
+      else HAVE[k]=false; // absent from this run → don't plot a stale embedded line
+    }
+    // optional native-driver reference
+    try{ const fj=await (await fetch(new URL("results-bonsaigrid-fair.json", base), {cache:"no-store"})).json();
+         if(fj.stages && fj.stages.length===LEVELS.length){ BG_NATIVE_RPS=fj.stages.map(s=>s.set.rps); NATIVE=true; }
+         else NATIVE=(BG_NATIVE_RPS.length===LEVELS.length);
+    }catch(_){ NATIVE=(BG_NATIVE_RPS.length===LEVELS.length); }
+    if(src) src.textContent="live · bench/loadgen/combined.json ("+present.join(", ")+")";
+  }catch(e){
+    if(src) src.textContent="embedded snapshot (fetch blocked — serve over http:// to auto-load)";
+  }
+  render();
+}
+boot();
+
+document.getElementById("pct").addEventListener("click",e=>{
+  const b=e.target.closest("button"); if(!b)return;
+  [...e.currentTarget.querySelectorAll("button")].forEach(x=>x.setAttribute("aria-pressed",x===b));
+  PCT=b.dataset.p; render();
+});
+document.getElementById("tableToggle").addEventListener("click",e=>{
+  const on=e.currentTarget.getAttribute("aria-pressed")!=="true";
+  e.currentTarget.setAttribute("aria-pressed",on);
+  e.currentTarget.textContent=on?"Hide data table":"Show data table";
+  document.querySelectorAll(".tblwrap").forEach(t=>t.classList.toggle("hidden",!on));
+  document.querySelectorAll(".chart").forEach(c=>c.classList.toggle("hidden",on));
+});
+let rt; addEventListener("resize",()=>{clearTimeout(rt);rt=setTimeout(render,150);});
+</script>
