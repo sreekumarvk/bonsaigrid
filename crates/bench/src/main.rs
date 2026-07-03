@@ -41,21 +41,46 @@ impl Client {
         self.corr
     }
 
-    /// Send one request message, read exactly one response message, discard it.
-    fn call(&mut self, mut req: Vec<Frame>) {
+    /// Send one request, read exactly one response message, return its frames.
+    fn call_resp(&mut self, mut req: Vec<Frame>) -> Vec<Frame> {
         let corr = self.next_corr();
         set_correlation_id(&mut req, corr);
         self.stream.write_all(&write_message(&req)).expect("write");
         loop {
-            if let Some((_frames, used)) = read_message(&self.buf) {
+            if let Some((frames, used)) = read_message(&self.buf) {
                 self.buf.drain(0..used);
-                return;
+                return frames;
             }
             let mut chunk = [0u8; 16384];
             let n = self.stream.read(&mut chunk).expect("read");
             assert!(n > 0, "server closed");
             self.buf.extend_from_slice(&chunk[..n]);
         }
+    }
+
+    /// Send one request message, read exactly one response message, discard it.
+    fn call(&mut self, req: Vec<Frame>) {
+        let _ = self.call_resp(req);
+    }
+
+    /// GET returning the stored value bytes (None on a miss). Response layout:
+    /// frame[0] is the fixed response header, frame[1] is the nullable value.
+    fn get_value(&mut self, name: &str, key: &[u8]) -> Option<Vec<u8>> {
+        let mut initial = vec![0u8; 24];
+        write_i32_le(&mut initial, 0, 66048);
+        write_i32_le(&mut initial, 12, -1);
+        write_i64_le(&mut initial, 16, 1);
+        let frames = self.call_resp(vec![
+            Frame {
+                flags: UNFRAGMENTED,
+                content: initial,
+            },
+            string_frame(name),
+            data_frame(key),
+        ]);
+        frames
+            .get(1)
+            .and_then(|f| if f.is_null() { None } else { Some(f.content.clone()) })
     }
 
     fn authenticate(&mut self) {
@@ -76,11 +101,24 @@ impl Client {
     }
 
     fn put(&mut self, name: &str, key: &[u8], value: &[u8]) {
+        self.put_ttl(name, key, value, 0);
+    }
+
+    fn put_ttl(&mut self, name: &str, key: &[u8], value: &[u8], ttl_ms: i64) {
+        self.store(65792, name, key, value, ttl_ms); // MapPut
+    }
+
+    // MapSet (69376) — the op the Hazelcast client's IMap.Set / SetWithTTL sends.
+    fn set(&mut self, name: &str, key: &[u8], value: &[u8], ttl_ms: i64) {
+        self.store(69376, name, key, value, ttl_ms);
+    }
+
+    fn store(&mut self, msg_type: i32, name: &str, key: &[u8], value: &[u8], ttl_ms: i64) {
         let mut initial = vec![0u8; 32];
-        write_i32_le(&mut initial, 0, 65792);
+        write_i32_le(&mut initial, 0, msg_type);
         write_i32_le(&mut initial, 12, -1);
         write_i64_le(&mut initial, 16, 1); // threadId
-        write_i64_le(&mut initial, 24, 0); // ttl
+        write_i64_le(&mut initial, 24, ttl_ms); // ttl (ms; 0 == infinite)
         self.call(vec![
             Frame {
                 flags: UNFRAGMENTED,
@@ -262,6 +300,57 @@ fn ladder_bench(addr: &str, levels: &[usize], stage: Duration, valsz: usize) {
     );
 }
 
+/// Correctness check the benchmark loadgen does NOT do: write `count` unique keys
+/// each with a distinct value, read them all back, and compare the bytes. Uses no
+/// TTL so this also proves retention (catches silent drops/overwrites under
+/// volume, which throughput+latency numbers can't see because a miss is cheap).
+fn verify_bench(addr: &str, count: usize, valsz: usize, ttl_ms: i64, op: &str) {
+    let mut cli = Client::connect(addr);
+    let name = "verify";
+    let use_set = op == "set";
+    let expected = |i: usize| -> Vec<u8> {
+        let mut v = vec![0u8; valsz];
+        for (j, b) in v.iter_mut().enumerate() {
+            *b = (i.wrapping_mul(131).wrapping_add(j) & 0xff) as u8;
+        }
+        // stamp the index in the clear so a wrong-entry match is still caught
+        let idx = (i as u64).to_le_bytes();
+        let n = valsz.min(idx.len());
+        v[..n].copy_from_slice(&idx[..n]);
+        v
+    };
+    for i in 0..count {
+        let k = format!("vkey-{:09}", i);
+        if use_set {
+            cli.set(name, k.as_bytes(), &expected(i), ttl_ms);
+        } else {
+            cli.put_ttl(name, k.as_bytes(), &expected(i), ttl_ms);
+        }
+    }
+    let (mut hit, mut miss, mut mismatch) = (0usize, 0usize, 0usize);
+    for i in 0..count {
+        let k = format!("vkey-{:09}", i);
+        match cli.get_value(name, k.as_bytes()) {
+            None => miss += 1,
+            Some(v) if v == expected(i) => hit += 1,
+            Some(_) => mismatch += 1,
+        }
+    }
+    println!("verify: wrote+read {} unique keys via {}, {}-byte values, ttl_ms={}",
+             count, if use_set { "MapSet(69376)" } else { "MapPut(65792)" }, valsz, ttl_ms);
+    println!("  hit       {}", hit);
+    println!("  miss      {}", miss);
+    println!("  mismatch  {}", mismatch);
+    println!(
+        "  result    {}",
+        if hit == count {
+            "PASS — every value returned correctly"
+        } else {
+            "FAIL — server did not faithfully return stored data"
+        }
+    );
+}
+
 fn load_bench(addr: &str, count: usize, valsz: usize) {
     let mut cli = Client::connect(addr);
     let val = vec![0xCDu8; valsz];
@@ -289,6 +378,13 @@ fn main() {
             let conns = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(64);
             let ops = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(20_000);
             concurrent_bench(&addr, conns, ops);
+        }
+        Some("verify") => {
+            let count = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(100_000);
+            let valsz = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(64);
+            let ttl_ms = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0i64);
+            let op = args.get(5).map(String::as_str).unwrap_or("put");
+            verify_bench(&addr, count, valsz, ttl_ms, op);
         }
         Some("ladder") => {
             // bench ladder [stage_secs] [valsz]   (LEVELS env overrides the ramp)

@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -31,6 +32,7 @@ type Stage struct {
 	Set      OpStat `json:"set"`
 	Get      OpStat `json:"get"`
 	Errs     int64  `json:"errors"`
+	Mismatch int64  `json:"mismatch"`   // GET returned wrong value or a miss (correctness)
 	TStartMs int64  `json:"t_start_ms"` // wall-clock stage window, for aligning
 	TEndMs   int64  `json:"t_end_ms"`   // externally-sampled server CPU/mem
 }
@@ -63,13 +65,18 @@ func levels() []int {
 }
 
 // runStage runs `level` closed-loop workers for `dur`, returning merged latency
-// samples (microseconds) for set and get plus an error count.
-func runStage(ctx context.Context, s Store, level int, dur time.Duration) ([]int64, []int64, int64) {
+// samples (microseconds) for set and get, a transport-error count, and a
+// mismatch count. Every GET is verified against the value just SET: a miss or a
+// wrong value is a mismatch. This makes the benchmark self-validating — a server
+// that acks writes without storing them (or returns garbage) can no longer post
+// fast "throughput" numbers unnoticed.
+func runStage(ctx context.Context, s Store, level int, dur time.Duration) ([]int64, []int64, int64, int64) {
 	deadline := time.Now().Add(dur)
 	var wg sync.WaitGroup
 	sets := make([][]int64, level)
 	gets := make([][]int64, level)
 	errs := make([]int64, level)
+	mism := make([]int64, level)
 	ttl := 60 * time.Second
 	for w := 0; w < level; w++ {
 		wg.Add(1)
@@ -85,23 +92,29 @@ func runStage(ctx context.Context, s Store, level int, dur time.Duration) ([]int
 				}
 				sets[w] = append(sets[w], time.Since(t0).Microseconds())
 				t1 := time.Now()
-				if _, err := s.Get(ctx, u.Uuid); err != nil {
+				got, err := s.Get(ctx, u.Uuid)
+				lat := time.Since(t1)
+				if err != nil {
 					errs[w]++
 					continue
 				}
-				gets[w] = append(gets[w], time.Since(t1).Microseconds())
+				gets[w] = append(gets[w], lat.Microseconds())
+				if !bytes.Equal(got, val) {
+					mism[w]++ // miss or wrong value: the round-trip is not correct
+				}
 			}
 		}(w)
 	}
 	wg.Wait()
 	var setAll, getAll []int64
-	var errTot int64
+	var errTot, mismTot int64
 	for w := 0; w < level; w++ {
 		setAll = append(setAll, sets[w]...)
 		getAll = append(getAll, gets[w]...)
 		errTot += errs[w]
+		mismTot += mism[w]
 	}
-	return setAll, getAll, errTot
+	return setAll, getAll, errTot, mismTot
 }
 
 func stat(op string, lat []int64, dur time.Duration) OpStat {
@@ -139,19 +152,24 @@ func main() {
 	for _, level := range levels() {
 		log.Printf("[%s] level=%d for %s ...", target, level, stageDur)
 		t0 := time.Now()
-		setL, getL, errs := runStage(ctx, s, level, stageDur)
+		setL, getL, errs, mism := runStage(ctx, s, level, stageDur)
 		t1 := time.Now()
 		res.Stages = append(res.Stages, Stage{
 			Level:    level,
 			Set:      stat("set", setL, stageDur),
 			Get:      stat("get", getL, stageDur),
 			Errs:     errs,
+			Mismatch: mism,
 			TStartMs: t0.UnixMilli(),
 			TEndMs:   t1.UnixMilli(),
 		})
 		st := res.Stages[len(res.Stages)-1]
-		log.Printf("[%s] level=%d set: %.0f rps p99=%.0fus | get: %.0f rps p99=%.0fus | errs=%d",
-			target, level, st.Set.RPS, st.Set.P99us, st.Get.RPS, st.Get.P99us, errs)
+		verdict := ""
+		if mism > 0 {
+			verdict = fmt.Sprintf("  *** %d MISMATCHES (get != set) ***", mism)
+		}
+		log.Printf("[%s] level=%d set: %.0f rps p99=%.0fus | get: %.0f rps p99=%.0fus | errs=%d mism=%d%s",
+			target, level, st.Set.RPS, st.Set.P99us, st.Get.RPS, st.Get.P99us, errs, mism, verdict)
 	}
 
 	b, _ := json.MarshalIndent(res, "", "  ")

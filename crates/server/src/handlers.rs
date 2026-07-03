@@ -464,7 +464,7 @@ fn error_response(error_code: i32, class_name: &str, message: &str) -> Vec<Frame
 fn is_quorum_gated_write(msg_type: i32) -> bool {
     matches!(
         msg_type,
-        65792 | 66304 | 67840 | 76800 | 77312 // IMap: put, remove, delete, putAll, executeOnKey
+        65792 | 69376 | 66304 | 67840 | 76800 | 77312 // IMap: put, set, remove, delete, putAll, executeOnKey
             | 328704 | 328960 | 329984       // list: add, remove, clear
             | 394240 | 394496 | 395520       // set: add, remove, clear
             | 196864 | 197888 | 197632 | 200448 // queue: offer, poll, remove, clear
@@ -988,8 +988,9 @@ pub fn dispatch(
                 }
             }
         }
-        // MapPut (with TTL ms; <=0 means no expiry)
-        65792 => {
+        // MapPut (65792) returns the previous value; MapSet (69376) is the same
+        // store op with a void response — both carry TTL ms (<=0 means no expiry).
+        t @ (65792 | 69376) => {
             let r = map::decode_put(&req);
             // Verify server-side partition computation matches the client's
             // routing: a member only receives keys whose partition it owns, so
@@ -1030,7 +1031,11 @@ pub fn dispatch(
             if nc {
                 broker.invalidate(&r.name, &r.key);
             }
-            let mut resp = map::encode_put_response(old.as_deref());
+            let mut resp = if t == 69376 {
+                empty_response(69377) // MapSet: void response
+            } else {
+                map::encode_put_response(old.as_deref())
+            };
             set_correlation_id(&mut resp, corr);
             if replicate_write(replicator, cluster, conn_id, &resp, &r.key, |op| {
                 Msg::BackupPut {
@@ -2110,6 +2115,49 @@ mod tests {
         assert_eq!(store.get("m", &[1]), None);
     }
 
+    #[test]
+    fn map_set_below_quorum_is_rejected() {
+        use crate::membership::MemberInfo;
+        let mut cluster = Cluster::new(
+            (0..3)
+                .map(|i| {
+                    MemberInfo::new(
+                        (1, i + 1),
+                        "127.0.0.1".into(),
+                        5701 + i as i32,
+                        7701 + i as i32,
+                        i as u64,
+                    )
+                })
+                .collect(),
+            1,
+            2,
+        );
+        cluster.remove_member_by_uuid((1, 2));
+        cluster.remove_member_by_uuid((1, 3));
+        assert!(!cluster.has_quorum());
+        let store = Store::new();
+        let out = dispatch(
+            set_request("m", &[1], &[9], 7),
+            0,
+            &store,
+            &Cfg::single(),
+            &EventBroker::new((1, 1)),
+            &SchemaService::new(),
+            &cluster,
+            None,
+            &crate::executor::ExecutorService::new(),
+            &crate::txn::TransactionService::new(),
+            &jet::executor::JetService::new(),
+        );
+        assert_eq!(msg_type(&out[0]), 0, "MapSet below quorum -> exception (type 0)");
+        assert_eq!(
+            store.get("m", &[1]),
+            None,
+            "MapSet write must not apply below quorum"
+        );
+    }
+
     fn put_request(name: &str, key: &[u8], value: &[u8], corr: i64) -> Vec<Frame> {
         let mut c = vec![0u8; 32]; // threadId@16, ttl@24
         write_i32_le(&mut c, 0, 65792);
@@ -2139,6 +2187,95 @@ mod tests {
         ];
         set_correlation_id(&mut f, corr);
         f
+    }
+
+    // MapSet (69376): same request layout as MapPut, the op IMap.set/SetWithTTL sends.
+    fn set_request(name: &str, key: &[u8], value: &[u8], corr: i64) -> Vec<Frame> {
+        let mut c = vec![0u8; 32]; // threadId@16, ttl@24
+        write_i32_le(&mut c, 0, 69376);
+        let mut f = vec![
+            Frame {
+                flags: UNFRAGMENTED,
+                content: c,
+            },
+            protocol::primitives::string_frame(name),
+            protocol::primitives::data_frame(key),
+            protocol::primitives::data_frame(value),
+        ];
+        set_correlation_id(&mut f, corr);
+        f
+    }
+
+    // Dispatch a request against a single-node cluster with default services.
+    fn disp(req: Vec<Frame>, store: &Store) -> Vec<Vec<Frame>> {
+        dispatch(
+            req,
+            0,
+            store,
+            &Cfg::single(),
+            &EventBroker::new((1, 1)),
+            &SchemaService::new(),
+            &single_cluster(),
+            None,
+            &crate::executor::ExecutorService::new(),
+            &crate::txn::TransactionService::new(),
+            &jet::executor::JetService::new(),
+        )
+    }
+
+    fn remove_request(name: &str, key: &[u8], corr: i64) -> Vec<Frame> {
+        let mut c = vec![0u8; 24]; // threadId@16
+        write_i32_le(&mut c, 0, 66304); // MapRemove
+        let mut f = vec![
+            Frame {
+                flags: UNFRAGMENTED,
+                content: c,
+            },
+            protocol::primitives::string_frame(name),
+            protocol::primitives::data_frame(key),
+        ];
+        set_correlation_id(&mut f, corr);
+        f
+    }
+
+    #[test]
+    fn map_lifecycle_put_set_get_remove_roundtrip() {
+        let store = Store::new();
+        // put v1 (no prior value)
+        let out = disp(put_request("m", &[1], b"v1", 1), &store);
+        assert_eq!(msg_type(&out[0]), 65793);
+        assert!(out[0][1].is_null());
+        assert_eq!(store.get("m", &[1]).as_deref(), Some(&b"v1"[..]));
+        // set overwrites with v2 (void response, type 69377)
+        let out = disp(set_request("m", &[1], b"v2", 2), &store);
+        assert_eq!(msg_type(&out[0]), 69377);
+        assert_eq!(store.get("m", &[1]).as_deref(), Some(&b"v2"[..]));
+        // get returns v2
+        let out = disp(get_request("m", &[1], 3), &store);
+        assert_eq!(msg_type(&out[0]), 66049);
+        assert_eq!(out[0][1].content, b"v2");
+        // remove deletes it; a subsequent get misses
+        disp(remove_request("m", &[1], 4), &store);
+        assert_eq!(store.get("m", &[1]), None);
+        let out = disp(get_request("m", &[1], 5), &store);
+        assert!(out[0][1].is_null(), "value gone after remove");
+    }
+
+    #[test]
+    fn map_set_stores_value_and_is_retrievable() {
+        let store = Store::new();
+        let out = disp(set_request("m", &[7, 7], &[42], 5), &store);
+        assert_eq!(msg_type(&out[0]), 69377, "MapSet response type is 69377");
+        assert_eq!(correlation_id(&out[0]), 5);
+        assert_eq!(
+            store.get("m", &[7, 7]),
+            Some(vec![42]),
+            "MapSet must persist the value (regression: op 69376 was a silent no-op)"
+        );
+        let out = disp(get_request("m", &[7, 7], 6), &store);
+        assert_eq!(msg_type(&out[0]), 66049);
+        assert!(!out[0][1].is_null(), "value must come back on GET after MapSet");
+        assert_eq!(out[0][1].content, vec![42]);
     }
 
     #[test]
