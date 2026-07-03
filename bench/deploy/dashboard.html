@@ -223,7 +223,7 @@
       blocked (opened as a <code>file://</code>, or the read-only hosted artifact) it falls back to the
       embedded snapshot. To auto-load your latest run, serve the repo over http — e.g.
       <code>python3 -m http.server</code> from the repo root, then open
-      <code>/bench/deploy/redis-vs-memcached.html</code>.</p>
+      <code>/bench/deploy/dashboard.html</code>.</p>
     <p><b>Methodology.</b> Four backends via <code>bench/run-all-isolated.sh</code>: every server and
       the client in its own Docker container (cgroup v2), servers on cpuset 0-7 (8 cpus, 4 GB) and the
       client on 8-19, official/native clients (pooled, HZ_CONNS=128), 4 s/stage. BonsaiGrid runs

@@ -287,8 +287,8 @@ PY
 
 # Regenerate the self-contained dashboard from this run (data → HTML, no hand-editing).
 python3 bench/gen_dashboard.py "$LOADDIR/combined.json" "$LOADDIR/results-bonsaigrid-fair.json" 2>/dev/null \
-  && info "dashboard baked: bench/deploy/redis-vs-memcached.html" || true
+  && info "dashboard baked: bench/deploy/dashboard.html" || true
 
 log "Done"
 info "Each server ran on cpuset $SERVER_CPUS (${SERVER_NCPU} cpus, $SERVER_MEM); client on $CLIENT_CPUS."
-info "Results: $LOADDIR/combined.json · dashboard: bench/deploy/redis-vs-memcached.html · track: bench/track.sh"
+info "Results: $LOADDIR/combined.json · dashboard: bench/deploy/dashboard.html · track: bench/track.sh"

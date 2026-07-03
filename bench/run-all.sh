@@ -236,5 +236,5 @@ PY
 
 log "Done"
 info "Results: $LOADDIR/results-*.json  ->  $LOADDIR/combined.json"
-info "The dashboard (bench/deploy/redis-vs-memcached.html) embeds its data inline;"
+info "The dashboard (bench/deploy/dashboard.html) embeds its data inline;"
 info "update those arrays from combined.json to refresh it."

@@ -191,7 +191,7 @@ runs `bencher run --dry-run` to validate — safe with no server at all.
 
 ## The self-contained dashboard
 
-`bench/deploy/redis-vs-memcached.html` is a shareable one-page view of the latest
+`bench/deploy/dashboard.html` is a shareable one-page view of the latest
 run (throughput / SET+GET latency / CPU / memory, plus the native-driver reference
 line). **Nothing in it is hand-written** — the charts, headline tiles, and summary
 are all computed from the data:
@@ -201,7 +201,7 @@ are all computed from the data:
   Regenerate manually with `bench/gen_dashboard.py bench/loadgen/combined.json`.
 - **Served over http it also reloads `combined.json` live:**
   ```bash
-  python3 -m http.server        # then open /bench/deploy/redis-vs-memcached.html
+  python3 -m http.server        # then open /bench/deploy/dashboard.html
   ```
   Opened as a `file://` it uses the baked snapshot (which already matches the run
   that generated it).
@@ -224,7 +224,7 @@ this is the per-run comparison view.
 | `gen_dashboard.py` | bake `combined.json` into the self-contained dashboard (auto-run each run) |
 | `loadgen/` | the Go load generator (`main.go`, per-backend `store_*.go`) |
 | `loadgen/combined.json` | merged results (checked in) |
-| `deploy/redis-vs-memcached.html` | secondary self-contained dashboard |
+| `deploy/dashboard.html` | secondary self-contained dashboard |
 | `crates/store/benches/hotpath.rs` | Criterion micro-benchmarks |
 | `crates/bench/` | raw-protocol driver: `ladder` (server-isolated) + `verify` |
 

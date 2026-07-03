@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bake a benchmark run into the self-contained dashboard.
 
-The dashboard (bench/deploy/redis-vs-memcached.html) computes its charts, headline
+The dashboard (bench/deploy/dashboard.html) computes its charts, headline
 tiles and summary entirely from data — nothing is hand-written. This regenerates
 the embedded snapshot between the __BENCH_DATA_START__ / __BENCH_DATA_END__ markers
 from combined.json, so the standalone file always matches the latest run. (When
@@ -17,7 +17,7 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-HTML = os.path.join(HERE, "deploy", "redis-vs-memcached.html")
+HTML = os.path.join(HERE, "deploy", "dashboard.html")
 START = "// __BENCH_DATA_START__"
 END = "// __BENCH_DATA_END__"
 ORDER = [("bonsaigrid", "BG"), ("hazelcast", "HZ"), ("redis", "RD"), ("memcached", "MC")]
