@@ -5,31 +5,31 @@
       "level": 1,
       "set": {
         "op": "set",
-        "count": 67056,
-        "rps": 16764,
-        "p50_us": 26,
+        "count": 70930,
+        "rps": 17732.5,
+        "p50_us": 25,
         "p90_us": 30,
-        "p99_us": 160
+        "p99_us": 161
       },
       "get": {
         "op": "get",
-        "count": 67056,
-        "rps": 16764,
-        "p50_us": 25,
+        "count": 70930,
+        "rps": 17732.5,
+        "p50_us": 24,
         "p90_us": 29,
-        "p99_us": 145
+        "p99_us": 136
       },
       "errors": 0,
       "mismatch": 0,
-      "t_start_ms": 1783098457748,
-      "t_end_ms": 1783098461749,
+      "t_start_ms": 1783105405470,
+      "t_end_ms": 1783105409470,
       "cpu": {
-        "avg_pct": 6.0,
-        "max_pct": 15.0
+        "avg_pct": 6.1,
+        "max_pct": 11.7
       },
       "mem": {
-        "avg_mb": 148.5,
-        "max_mb": 157.2
+        "avg_mb": 145.7,
+        "max_mb": 155.7
       },
       "res_samples": 15
     },
@@ -37,31 +37,31 @@
       "level": 2,
       "set": {
         "op": "set",
-        "count": 144543,
-        "rps": 36135.75,
+        "count": 138734,
+        "rps": 34683.5,
         "p50_us": 23,
-        "p90_us": 28,
-        "p99_us": 161
+        "p90_us": 29,
+        "p99_us": 174
       },
       "get": {
         "op": "get",
-        "count": 144543,
-        "rps": 36135.75,
-        "p50_us": 23,
-        "p90_us": 28,
-        "p99_us": 148
+        "count": 138734,
+        "rps": 34683.5,
+        "p50_us": 24,
+        "p90_us": 29,
+        "p99_us": 162
       },
       "errors": 0,
       "mismatch": 0,
-      "t_start_ms": 1783098461752,
-      "t_end_ms": 1783098465753,
+      "t_start_ms": 1783105409473,
+      "t_end_ms": 1783105413474,
       "cpu": {
-        "avg_pct": 10.5,
-        "max_pct": 11.8
+        "avg_pct": 10.0,
+        "max_pct": 11.7
       },
       "mem": {
-        "avg_mb": 178.8,
-        "max_mb": 198.4
+        "avg_mb": 177.1,
+        "max_mb": 195.1
       },
       "res_samples": 15
     },
@@ -69,31 +69,31 @@
       "level": 4,
       "set": {
         "op": "set",
-        "count": 216731,
-        "rps": 54182.75,
+        "count": 216407,
+        "rps": 54101.75,
         "p50_us": 30,
-        "p90_us": 46,
-        "p99_us": 181
+        "p90_us": 48,
+        "p99_us": 178
       },
       "get": {
         "op": "get",
-        "count": 216731,
-        "rps": 54182.75,
+        "count": 216407,
+        "rps": 54101.75,
         "p50_us": 29,
-        "p90_us": 45,
-        "p99_us": 172
+        "p90_us": 47,
+        "p99_us": 171
       },
       "errors": 0,
       "mismatch": 0,
-      "t_start_ms": 1783098465759,
-      "t_end_ms": 1783098469761,
+      "t_start_ms": 1783105413480,
+      "t_end_ms": 1783105417482,
       "cpu": {
-        "avg_pct": 16.4,
-        "max_pct": 22.0
+        "avg_pct": 15.0,
+        "max_pct": 20.9
       },
       "mem": {
-        "avg_mb": 231.4,
-        "max_mb": 264.9
+        "avg_mb": 228.9,
+        "max_mb": 261.4
       },
       "res_samples": 15
     },
@@ -101,63 +101,63 @@
       "level": 8,
       "set": {
         "op": "set",
-        "count": 471940,
-        "rps": 117985,
-        "p50_us": 30,
-        "p90_us": 43,
-        "p99_us": 102
+        "count": 476451,
+        "rps": 119112.75,
+        "p50_us": 29,
+        "p90_us": 42,
+        "p99_us": 88
       },
       "get": {
         "op": "get",
-        "count": 471940,
-        "rps": 117985,
+        "count": 476451,
+        "rps": 119112.75,
         "p50_us": 29,
         "p90_us": 42,
-        "p99_us": 75
+        "p99_us": 71
       },
       "errors": 0,
       "mismatch": 0,
-      "t_start_ms": 1783098469772,
-      "t_end_ms": 1783098473778,
+      "t_start_ms": 1783105417494,
+      "t_end_ms": 1783105421500,
       "cpu": {
         "avg_pct": 29.9,
         "max_pct": 31.4
       },
       "mem": {
-        "avg_mb": 337.6,
-        "max_mb": 405.1
+        "avg_mb": 330.6,
+        "max_mb": 394.2
       },
-      "res_samples": 16
+      "res_samples": 15
     },
     {
       "level": 16,
       "set": {
         "op": "set",
-        "count": 857892,
-        "rps": 214473,
+        "count": 874228,
+        "rps": 218557,
         "p50_us": 31,
-        "p90_us": 54,
-        "p99_us": 113
+        "p90_us": 53,
+        "p99_us": 106
       },
       "get": {
         "op": "get",
-        "count": 857892,
-        "rps": 214473,
+        "count": 874228,
+        "rps": 218557,
         "p50_us": 30,
-        "p90_us": 53,
-        "p99_us": 96
+        "p90_us": 52,
+        "p99_us": 91
       },
       "errors": 0,
       "mismatch": 0,
-      "t_start_ms": 1783098473814,
-      "t_end_ms": 1783098477827,
+      "t_start_ms": 1783105421533,
+      "t_end_ms": 1783105425544,
       "cpu": {
-        "avg_pct": 53.1,
-        "max_pct": 59.6
+        "avg_pct": 53.2,
+        "max_pct": 58.7
       },
       "mem": {
-        "avg_mb": 538.4,
-        "max_mb": 657.7
+        "avg_mb": 540.6,
+        "max_mb": 661.9
       },
       "res_samples": 15
     },
@@ -165,31 +165,31 @@
       "level": 32,
       "set": {
         "op": "set",
-        "count": 1405352,
-        "rps": 351338,
-        "p50_us": 33,
+        "count": 1402277,
+        "rps": 350569.25,
+        "p50_us": 32,
         "p90_us": 63,
-        "p99_us": 362
+        "p99_us": 371
       },
       "get": {
         "op": "get",
-        "count": 1405352,
-        "rps": 351338,
+        "count": 1402277,
+        "rps": 350569.25,
         "p50_us": 32,
         "p90_us": 61,
-        "p99_us": 282
+        "p99_us": 284
       },
       "errors": 0,
       "mismatch": 0,
-      "t_start_ms": 1783098477885,
-      "t_end_ms": 1783098481906,
+      "t_start_ms": 1783105425603,
+      "t_end_ms": 1783105429623,
       "cpu": {
-        "avg_pct": 70.4,
-        "max_pct": 77.9
+        "avg_pct": 71.0,
+        "max_pct": 79.5
       },
       "mem": {
-        "avg_mb": 862.8,
-        "max_mb": 1059.7
+        "avg_mb": 871.1,
+        "max_mb": 1081.5
       },
       "res_samples": 15
     },
@@ -197,31 +197,31 @@
       "level": 64,
       "set": {
         "op": "set",
-        "count": 1457006,
-        "rps": 364251.5,
-        "p50_us": 58,
-        "p90_us": 139,
-        "p99_us": 651
+        "count": 1512857,
+        "rps": 378214.25,
+        "p50_us": 57,
+        "p90_us": 132,
+        "p99_us": 630
       },
       "get": {
         "op": "get",
-        "count": 1457006,
-        "rps": 364251.5,
-        "p50_us": 58,
-        "p90_us": 137,
-        "p99_us": 720
+        "count": 1512857,
+        "rps": 378214.25,
+        "p50_us": 57,
+        "p90_us": 130,
+        "p99_us": 690
       },
       "errors": 0,
       "mismatch": 0,
-      "t_start_ms": 1783098481987,
-      "t_end_ms": 1783098486007,
+      "t_start_ms": 1783105429704,
+      "t_end_ms": 1783105433724,
       "cpu": {
-        "avg_pct": 71.7,
-        "max_pct": 76.1
+        "avg_pct": 73.0,
+        "max_pct": 75.5
       },
       "mem": {
-        "avg_mb": 1308.6,
-        "max_mb": 1505.3
+        "avg_mb": 1322.2,
+        "max_mb": 1526.6
       },
       "res_samples": 15
     },
@@ -229,33 +229,33 @@
       "level": 128,
       "set": {
         "op": "set",
-        "count": 1441779,
-        "rps": 360444.75,
-        "p50_us": 110,
-        "p90_us": 338,
-        "p99_us": 1127
+        "count": 1513439,
+        "rps": 378359.75,
+        "p50_us": 108,
+        "p90_us": 314,
+        "p99_us": 1051
       },
       "get": {
         "op": "get",
-        "count": 1441779,
-        "rps": 360444.75,
-        "p50_us": 109,
-        "p90_us": 337,
-        "p99_us": 1423
+        "count": 1513439,
+        "rps": 378359.75,
+        "p50_us": 108,
+        "p90_us": 312,
+        "p99_us": 1332
       },
       "errors": 0,
       "mismatch": 0,
-      "t_start_ms": 1783098486106,
-      "t_end_ms": 1783098490126,
+      "t_start_ms": 1783105433827,
+      "t_end_ms": 1783105437844,
       "cpu": {
-        "avg_pct": 69.6,
-        "max_pct": 73.3
+        "avg_pct": 71.6,
+        "max_pct": 78.6
       },
       "mem": {
-        "avg_mb": 1728.8,
-        "max_mb": 1936.6
+        "avg_mb": 1746.1,
+        "max_mb": 1955.3
       },
-      "res_samples": 16
+      "res_samples": 15
     }
   ]
 }

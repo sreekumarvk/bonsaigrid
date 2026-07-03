@@ -130,8 +130,8 @@
     <p class="lede">A <b>fair, verified</b> comparison: every server and the load client run in their own
       cgroup on <b>disjoint CPUs</b> with equal CPU/memory budgets, so the client can't starve the
       server under test. The loadgen <b>checks every GET against the value it wrote</b> — a nonzero
-      mismatch means the run is invalid. The dashed line is BonsaiGrid's server via its native
-      raw-protocol driver (official-client tax removed). <span id="headline-summary"></span></p>
+      mismatch means the run is invalid. The dashed line is BonsaiGrid's server driven by a thin
+      raw-protocol client (official Hazelcast-client tax removed). <span id="headline-summary"></span></p>
     <div class="chips">
       <span class="chip">harness: <b>bench/run-all-isolated.sh</b></span>
       <span class="chip">servers + client on <b>disjoint cpusets</b></span>
@@ -160,7 +160,7 @@
   <div class="card full">
     <h2>Operations per second</h2>
     <p class="sub">Achieved op-rate (set = get, one of each per loop). Higher is better.
-      Dashed = BonsaiGrid's server via its native raw-protocol driver (client-isolated reference).</p>
+      Dashed = BonsaiGrid's server driven by a thin raw-protocol client (server-ceiling reference).</p>
     <div class="legend" id="lg-tp"></div>
     <div class="chart" id="c-tp"></div>
     <div class="tblwrap hidden" id="t-tp"></div>
@@ -228,7 +228,7 @@
       the client in its own Docker container (cgroup v2), servers on cpuset 0-7 (8 cpus, 4 GB) and the
       client on 8-19, official/native clients (pooled, HZ_CONNS=128), 4 s/stage. BonsaiGrid runs
       containerized too (glibc-matched image, seccomp=unconfined for io_uring). The dashed BonsaiGrid
-      line is the native raw-protocol driver (<code>bench ladder</code>, from
+      line is a thin raw-protocol client (<code>bench ladder</code>, run on the client cpuset, from
       <code>results-bonsaigrid-fair.json</code>) — a client-isolated view of the same server.
       CPU and memory are sampled from each server's cgroup v2 (<code>cpu.stat</code> /
       <code>memory.current</code>) every 250 ms and averaged per stage; network throughput is not
@@ -248,29 +248,29 @@ let HAVE_RES = true;  // CPU/mem sampled (present in the embedded snapshot + iso
 // Embedded snapshot of the latest run. When served over http the page also reloads
 // combined.json live. Regenerate: bench/gen_dashboard.py bench/loadgen/combined.json
 const BG = { // BG
-  rps:[3058,7966,21015,61971,148553,244753,284078,285271],
-  set:{p50:[172,79,59,48,43,52,84,125], p90:[285,244,208,96,72,91,184,473], p99:[508,404,339,259,188,202,486,1127]},
-  get:{p50:[176,75,57,46,42,52,83,124], p90:[268,240,205,92,71,90,183,474], p99:[527,395,336,256,186,201,481,1123]},
-  cpu:[6.1,7.4,12.6,22.3,40.1,57.9,64.6,64.4], mem:[142.7,146.8,178.4,256.4,422.1,735.6,1119.9,1631.2],
+  rps:[2856,7348,21842,64684,160463,254511,276799,276871],
+  set:{p50:[189,97,57,46,40,49,79,118], p90:[303,260,207,86,65,84,189,506], p99:[483,412,326,255,163,200,624,1258]},
+  get:{p50:[181,88,55,44,39,48,78,118], p90:[283,259,204,82,64,83,189,507], p99:[483,404,324,254,162,200,622,1265]},
+  cpu:[6.1,7.2,12.7,22.7,42.3,59.4,63.6,62.2], mem:[147.9,183.4,188.5,269.7,453.4,763.5,1161.4,1675.1],
 };
-let BG_NATIVE_RPS = [18388,66075,122560,191083,284370,381118,419508,424932];
+let BG_NATIVE_RPS = [21159,48133,89672,162312,265763,403259,457741,472835];
 const HZ = { // HZ
-  rps:[1893,4365,11507,46624,108711,118245,125474,138750],
-  set:{p50:[260,220,177,64,61,106,199,323], p90:[426,368,314,177,111,243,499,973], p99:[686,537,434,326,256,564,920,1672]},
-  get:{p50:[236,214,167,61,59,102,192,310], p90:[418,366,313,174,104,221,475,957], p99:[680,539,437,328,231,510,894,1646]},
-  cpu:[8.9,8.9,16.8,33.1,59.5,68.0,72.6,78.4], mem:[709.6,708.1,755.4,901.8,1240.3,1602.6,1949.8,2130.9],
+  rps:[2047,4714,11225,45266,111576,126478,128587,144591],
+  set:{p50:[229,207,178,64,60,99,190,307], p90:[407,353,323,187,107,233,496,929], p99:[616,502,453,334,237,532,918,1585]},
+  get:{p50:[219,196,171,61,58,94,183,294], p90:[404,347,322,185,101,207,473,917], p99:[594,486,448,334,223,462,886,1564]},
+  cpu:[8.9,8.9,16.2,31.6,59.5,66.6,73.5,78.0], mem:[665.9,664.0,700.3,832.4,1173.5,1567.3,1888.4,2231.5],
 };
 const RD = { // RD
-  rps:[18022,44519,46776,57658,64914,69816,84703,83440],
-  set:{p50:[26,19,33,53,100,213,364,744], p90:[33,31,62,109,222,357,512,920], p99:[143,57,178,326,425,564,755,1535]},
-  get:{p50:[24,18,32,53,98,209,365,745], p90:[30,30,60,103,218,352,509,911], p99:[67,52,173,326,428,560,757,1529]},
-  cpu:[5.7,8.7,8.8,10.0,10.6,11.7,12.2,12.3], mem:[61.4,95.1,146.4,204.4,268.1,363.4,430.0,513.9],
+  rps:[17345,44742,43272,58475,66113,69776,84637,84140],
+  set:{p50:[23,18,34,53,98,213,365,739], p90:[34,31,69,102,219,359,511,908], p99:[174,63,208,328,414,557,754,1532]},
+  get:{p50:[21,18,34,53,97,209,366,740], p90:[32,30,66,97,215,354,507,900], p99:[157,55,201,322,416,562,749,1523]},
+  cpu:[5.5,8.6,8.7,10.1,10.6,11.7,12.2,12.3], mem:[52.0,84.2,134.3,191.7,256.2,353.1,419.7,504.1],
 };
 const MC = { // MC
-  rps:[16764,36136,54183,117985,214473,351338,364252,360445],
-  set:{p50:[26,23,30,30,31,33,58,110], p90:[30,28,46,43,54,63,139,338], p99:[160,161,181,102,113,362,651,1127]},
-  get:{p50:[25,23,29,29,30,32,58,109], p90:[29,28,45,42,53,61,137,337], p99:[145,148,172,75,96,282,720,1423]},
-  cpu:[6.0,10.5,16.4,29.9,53.1,70.4,71.7,69.6], mem:[148.5,178.8,231.4,337.6,538.4,862.8,1308.6,1728.8],
+  rps:[17732,34684,54102,119113,218557,350569,378214,378360],
+  set:{p50:[25,23,30,29,31,32,57,108], p90:[30,29,48,42,53,63,132,314], p99:[161,174,178,88,106,371,630,1051]},
+  get:{p50:[24,24,29,29,30,32,57,108], p90:[29,29,47,42,52,61,130,312], p99:[136,162,171,71,91,284,690,1332]},
+  cpu:[6.1,10.0,15.0,29.9,53.2,71.0,73.0,71.6], mem:[145.7,177.1,228.9,330.6,540.6,871.1,1322.2,1746.1],
 };
 let TOTAL_MISMATCH = 0;
 const BAKED_PRESENT = ["bonsaigrid", "hazelcast", "redis", "memcached"];
@@ -291,7 +291,7 @@ function tpSeries(){
   if(HAVE.hazelcast)  s.push({name:"Hazelcast", short:"Hazelcast", color:C.hazel, vals:HZ.rps});
   if(HAVE.redis)      s.push({name:"Redis", short:"Redis", color:C.redis, vals:RD.rps});
   if(NATIVE && BG_NATIVE_RPS.length===LEVELS.length)
-    s.push({name:"BonsaiGrid (native driver, server-isolated)", short:"BG · native", color:C.bonsai, vals:BG_NATIVE_RPS, dash:"6 4", faint:1});
+    s.push({name:"BonsaiGrid (thin raw-protocol client, server ceiling)", short:"BG · thin client", color:C.bonsai, vals:BG_NATIVE_RPS, dash:"6 4", faint:1});
   return s;
 }
 function latSeries(op,pct){
@@ -403,7 +403,7 @@ function renderSummary(){
   if(bi>=0){
     setText("t-bonsai",fmtInt(ranked[bi].rps)+" ops/s");
     const ord=["","1st","2nd","3rd","4th","5th"][bi+1]||((bi+1)+"th");
-    const nat=(NATIVE&&BG_NATIVE_RPS.length===LEVELS.length)?" · native driver "+fmtInt(BG_NATIVE_RPS[BG_NATIVE_RPS.length-1])+" (dashed)":"";
+    const nat=(NATIVE&&BG_NATIVE_RPS.length===LEVELS.length)?" · thin-client ceiling "+fmtInt(BG_NATIVE_RPS[BG_NATIVE_RPS.length-1])+" (dashed)":"";
     setText("t-bonsai-d",ord+" of "+ranked.length+" @"+conns+" connections"+nat);
   } else { setText("t-bonsai","—"); setText("t-bonsai-d","not in this run"); }
   const ok=TOTAL_MISMATCH===0, ce=document.getElementById("t-correct");
