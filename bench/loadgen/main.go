@@ -27,10 +27,12 @@ type OpStat struct {
 }
 
 type Stage struct {
-	Level int      `json:"level"`
-	Set   OpStat   `json:"set"`
-	Get   OpStat   `json:"get"`
-	Errs  int64    `json:"errors"`
+	Level    int    `json:"level"`
+	Set      OpStat `json:"set"`
+	Get      OpStat `json:"get"`
+	Errs     int64  `json:"errors"`
+	TStartMs int64  `json:"t_start_ms"` // wall-clock stage window, for aligning
+	TEndMs   int64  `json:"t_end_ms"`   // externally-sampled server CPU/mem
 }
 
 type Result struct {
@@ -136,12 +138,16 @@ func main() {
 	res := Result{Target: target}
 	for _, level := range levels() {
 		log.Printf("[%s] level=%d for %s ...", target, level, stageDur)
+		t0 := time.Now()
 		setL, getL, errs := runStage(ctx, s, level, stageDur)
+		t1 := time.Now()
 		res.Stages = append(res.Stages, Stage{
-			Level: level,
-			Set:   stat("set", setL, stageDur),
-			Get:   stat("get", getL, stageDur),
-			Errs:  errs,
+			Level:    level,
+			Set:      stat("set", setL, stageDur),
+			Get:      stat("get", getL, stageDur),
+			Errs:     errs,
+			TStartMs: t0.UnixMilli(),
+			TEndMs:   t1.UnixMilli(),
 		})
 		st := res.Stages[len(res.Stages)-1]
 		log.Printf("[%s] level=%d set: %.0f rps p99=%.0fus | get: %.0f rps p99=%.0fus | errs=%d",

@@ -130,11 +130,12 @@
     <p class="lede">A <b>fair</b> run: every server and the load client live in their own cgroup on
       <b>disjoint CPUs</b> (servers on cpuset 0-7, client on 8-19), each server capped at
       <b>8 cpus / 4 GB</b>, so the client can't steal cores from the server under test. On throughput
-      <b>Memcached leads</b> (348k, thin client + multithreaded), and
-      <span class="bg">BonsaiGrid</span> is <b>second at 160k — now ahead of Hazelcast</b> (137k),
-      the reversal of the co-located run. Same official Hazelcast client drives both, so BonsaiGrid's
-      faster server shows through once CPUs aren't contended. Its native raw-protocol driver reaches
-      <b>~425k</b> (dashed) — the client tax is the rest.</p>
+      <b>Memcached leads</b> (347k, thin client + multithreaded), and
+      <span class="bg">BonsaiGrid</span> is <b>second at 163k — ahead of Hazelcast</b> (134k),
+      the reversal of the co-located run. It does it at <b>~52% CPU and a flat ~15 MB</b> — the
+      preallocated slab — while Hazelcast grows to 2.2 GB and Memcached to 1.6 GB for the same data
+      (see the saturation panels). Its native raw-protocol driver reaches <b>~425k</b> (dashed) — the
+      official-client tax is the rest.</p>
     <div class="chips">
       <span class="chip">harness: <b>bench/run-all-isolated.sh</b></span>
       <span class="chip">servers: <b>cpuset 0-7, 4 GB</b> each</span>
@@ -144,20 +145,20 @@
   </header>
 
   <div class="headline">
-    <div class="stat">
-      <p class="k">Memcached — peak</p>
-      <p class="v">348k <small>ops/s</small></p>
-      <p class="d">Throughput leader @128. Multithreaded server, thin protocol.</p>
-    </div>
     <div class="stat hero">
       <p class="k">BonsaiGrid — peak</p>
-      <p class="v">160k <small>ops/s</small></p>
-      <p class="d">2nd, ahead of Hazelcast (137k). Was 74k co-located — isolation removed the contention.</p>
+      <p class="v">163k <small>ops/s</small></p>
+      <p class="d">2nd, ahead of Hazelcast (134k). Was 74k co-located — isolation removed the contention.</p>
     </div>
     <div class="stat">
-      <p class="k">BonsaiGrid — server ceiling</p>
-      <p class="v">425k <small>· native driver</small></p>
-      <p class="d">Dashed line. Raw-protocol driver, client tax removed. The store has headroom.</p>
+      <p class="k">BonsaiGrid — memory</p>
+      <p class="v">15 MB <small>· flat</small></p>
+      <p class="d">Preallocated slab: constant footprint vs Hazelcast 2.2 GB / Memcached 1.6 GB.</p>
+    </div>
+    <div class="stat">
+      <p class="k">BonsaiGrid — CPU headroom</p>
+      <p class="v">52% <small>· of 8 cpus</small></p>
+      <p class="d">Not CPU-bound at peak. Native driver removes the client tax → 425k (dashed).</p>
     </div>
   </div>
 
@@ -209,33 +210,33 @@
       official Hazelcast client, so this is the faster server showing through once it isn't starved.
       Memcached (348k) still leads on raw throughput — a thin binary protocol and a multithreaded
       server — which the heavyweight Hazelcast client can't match on the BonsaiGrid/Hazelcast side.</p>
-    <p><b>Server ceiling.</b> BonsaiGrid's <b>native raw-protocol driver</b> (<code>bench ladder</code>,
-      dashed) drives the same 8-core server to <b>~425k ops/s</b> — so the remaining gap to Memcached
-      is the official-client tax, not the store. A thin uniform client per protocol (RESP / memcached
-      text / raw Hazelcast frames) would close it.</p>
+    <p><b>Server ceiling &amp; cost.</b> The saturation panels confirm the store isn't the limit:
+      BonsaiGrid peaks at <b>~52% of its 8-cpu budget</b> (not CPU-bound) and holds a <b>flat ~15 MB</b>
+      working set — the zero-alloc preallocated slab — while the JVM and memcached grow into the GBs
+      for the same data. Its <b>native raw-protocol driver</b> (<code>bench ladder</code>, dashed)
+      drives the same server to <b>~425k ops/s</b>, so the gap to Memcached is the official-client tax,
+      not the server. A thin uniform client per protocol would close it.</p>
   </div>
 
-  <div class="sat-title">Saturation — not captured in this run</div>
-  <div class="grid3">
-    <div class="empty">
-      <h4><span class="dot"></span>CPU usage</h4>
-      <p>The reference video tracks CPU to full saturation. This loadgen records latency and
-        throughput only — no per-process CPU sampling.</p>
-      <p class="tag">needs instrumented run</p>
+  <div class="sat-title">Server saturation — sampled live from each server's cgroup</div>
+  <div class="grid2" id="sat-charts">
+    <div class="card">
+      <h2>CPU utilization</h2>
+      <p class="sub">% of the server's cpu budget (its cpuset), averaged over each stage.
+        100% = fully using its allotted cores; a single-threaded server tops out at 1/N.</p>
+      <div class="legend" id="lg-cpu"></div>
+      <div class="chart" id="c-cpu"></div>
     </div>
-    <div class="empty">
-      <h4><span class="dot"></span>Memory usage</h4>
-      <p>Per-server RSS over time (and the TTL reclamation pattern) requires sampling each process.
-        Not collected here.</p>
-      <p class="tag">needs instrumented run</p>
-    </div>
-    <div class="empty">
-      <h4><span class="dot"></span>Network throughput</h4>
-      <p>Tx/Rx bytes per second per backend — requires reading each process's network counters
-        during the run. Not collected.</p>
-      <p class="tag">needs instrumented run</p>
+    <div class="card">
+      <h2>Memory — working set</h2>
+      <p class="sub"><code>memory.current</code> minus reclaimable file cache, averaged over each
+        stage. This is what docker/k8s report as memory usage.</p>
+      <div class="legend" id="lg-mem"></div>
+      <div class="chart" id="c-mem"></div>
     </div>
   </div>
+  <p id="sat-note" style="font-size:12px;color:var(--muted);margin:12px 2px 0">Network throughput
+    is the one saturation signal still not sampled.</p>
 
   <footer>
     <p><b>Data source:</b> <span id="src">embedded snapshot</span>. This page fetches
@@ -250,7 +251,9 @@
       containerized too (glibc-matched image, seccomp=unconfined for io_uring). The dashed BonsaiGrid
       line is the native raw-protocol driver (<code>bench ladder</code>, from
       <code>results-bonsaigrid-fair.json</code>) — a client-isolated view of the same server.
-      CPU/memory/network panels are intentionally empty — not sampled, not fabricated.</p>
+      CPU and memory are sampled from each server's cgroup v2 (<code>cpu.stat</code> /
+      <code>memory.current</code>) every 250 ms and averaged per stage; network throughput is not
+      sampled.</p>
   </footer>
 </div>
 
@@ -259,32 +262,37 @@ let LEVELS = [1,2,4,8,16,32,64,128];
 // which backends to draw (all present in the embedded fallback; narrowed to
 // whatever combined.json actually contains once it loads)
 const HAVE = {bonsaigrid:true, hazelcast:true, redis:true, memcached:true};
-let NATIVE = true; // show the native-driver reference line
+let NATIVE = true;    // show the native-driver reference line
+let HAVE_RES = true;  // CPU/mem sampled (present in the embedded snapshot + isolated runs)
 
 // Isolated run (bench/run-all-isolated.sh): each server + the client in its own
 // cgroup, servers on cpuset 0-7 (8 cpus, 4g), client on 8-19. Official/native
 // clients. Fallback snapshot; the page reloads combined.json live when served.
-const BG = {
-  rps:[2866,7406,21939,58240,99724,131022,140514,160281],
-  set:{p50:[191,96,61,56,64,96,129,227], p90:[317,255,204,99,128,233,589,988], p99:[582,431,343,292,511,643,1198,1753]},
-  get:{p50:[170,81,53,47,51,73,104,200], p90:[269,245,192,87,110,211,572,972], p99:[487,441,338,285,487,607,1154,1733]},
+const BG = { // BonsaiGrid (isolated)
+  rps:[3043,7958,22960,58923,102059,133503,146372,162910],
+  set:{p50:[173,88,60,56,65,95,131,229], p90:[290,242,195,100,130,236,568,983], p99:[400,403,327,272,367,574,1085,1722]},
+  get:{p50:[156,76,52,48,52,72,105,200], p90:[256,230,184,87,111,212,552,961], p99:[397,397,322,259,334,556,1061,1708]},
+  cpu:[6.5,8.1,14.5,26.3,40.4,49.5,51.2,51.8], mem:[15.2,15.2,15.2,15.2,15.4,15.9,16.4,16.4],
 };
 // BonsaiGrid — server-isolated reference: native raw-protocol driver (bench ladder)
 let BG_NATIVE_RPS = [18388,66075,122560,191083,284370,381119,419508,424932];
-const HZ = {
-  rps:[1795,3935,11159,45922,109405,122415,122128,136970],
-  set:{p50:[288,260,181,64,60,98,198,324], p90:[435,395,321,181,109,248,529,997], p99:[618,574,445,328,257,588,1010,1667]},
-  get:{p50:[263,241,174,61,58,93,190,309], p90:[426,390,320,177,101,214,498,985], p99:[602,557,441,327,227,531,966,1651]},
+const HZ = { // Hazelcast
+  rps:[2006,4902,13023,47836,113708,121652,121516,134354],
+  set:{p50:[240,203,137,63,59,103,199,324], p90:[393,353,297,169,102,242,540,1023], p99:[541,492,417,313,228,559,1011,1672]},
+  get:{p50:[229,194,109,60,57,98,192,311], p90:[384,349,296,163,96,214,511,1009], p99:[524,490,418,315,208,504,968,1651]},
+  cpu:[8.6,9.2,17.3,33.7,58.3,65.9,71.9,74.5], mem:[692.0,688.7,731.4,1038.5,1188.7,1581.0,1870.2,2240.8],
 };
-const RD = {
-  rps:[16776,42002,45798,56252,64810,68385,82218,82905],
-  set:{p50:[26,19,33,55,100,219,375,749], p90:[33,31,64,110,224,368,526,916], p99:[192,83,195,336,425,566,777,1543]},
-  get:{p50:[24,19,32,54,98,215,375,750], p90:[31,30,62,103,219,363,521,908], p99:[166,69,185,337,427,558,779,1538]},
+const RD = { // Redis
+  rps:[14902,41631,45300,52877,63616,66246,79201,76582],
+  set:{p50:[28,20,33,59,105,225,387,810], p90:[36,31,64,129,219,371,535,952], p99:[209,71,204,333,405,570,808,1669]},
+  get:{p50:[26,19,33,58,103,223,388,812], p90:[33,30,62,116,215,366,531,943], p99:[189,65,193,337,406,564,802,1657]},
+  cpu:[5.6,8.7,8.9,10.2,10.8,11.9,12.3,12.3], mem:[49.4,80.6,126.1,185.4,242.0,335.9,400.8,477.6],
 };
-const MC = {
-  rps:[18365,34663,52651,116018,218379,342347,349898,347774],
-  set:{p50:[25,23,30,30,31,33,60,113], p90:[29,28,51,44,52,64,147,361], p99:[148,173,166,121,108,372,672,1153]},
-  get:{p50:[24,23,30,30,30,33,59,112], p90:[29,28,50,43,52,63,145,359], p99:[106,163,162,78,92,300,760,1393]},
+const MC = { // Memcached
+  rps:[17617,32546,50587,112520,207332,332221,347408,347165],
+  set:{p50:[25,24,30,30,32,34,60,115], p90:[30,33,52,45,56,69,148,362], p99:[169,193,193,148,127,378,667,1119]},
+  get:{p50:[25,24,30,30,31,34,60,114], p90:[30,32,50,45,55,66,145,360], p99:[162,187,187,95,102,310,739,1389]},
+  cpu:[5.5,9.6,15.6,30.5,53.0,69.3,72.4,69.7], mem:[138.8,169.7,216.8,317.9,511.8,820.3,1245.2,1648.0],
 };
 
 const C={bonsai:"var(--bonsai)",hazel:"var(--hazel)",redis:"var(--redis)",memc:"var(--memc)"};
@@ -313,6 +321,15 @@ function latSeries(op,pct){
   if(HAVE.memcached)  s.push({name:"Memcached", short:"Memcached", color:C.memc, vals:MC[op][pct]});
   return s;
 }
+function resSeries(metric){ // 'cpu' | 'mem'
+  const s=[];
+  if(HAVE.bonsaigrid) s.push({name:"BonsaiGrid", short:"BonsaiGrid", color:C.bonsai, vals:BG[metric]});
+  if(HAVE.memcached)  s.push({name:"Memcached", short:"Memcached", color:C.memc, vals:MC[metric]});
+  if(HAVE.hazelcast)  s.push({name:"Hazelcast", short:"Hazelcast", color:C.hazel, vals:HZ[metric]});
+  if(HAVE.redis)      s.push({name:"Redis", short:"Redis", color:C.redis, vals:RD[metric]});
+  return s.filter(x=>Array.isArray(x.vals) && x.vals.length===LEVELS.length && x.vals.every(v=>v!=null));
+}
+const fmtMB = v => v>=1024 ? (v/1024).toFixed(1)+" GB" : Math.round(v)+" MB";
 
 // reusable line chart --------------------------------------------------------
 function lineChart(elId, tipId, series, opts){
@@ -402,9 +419,20 @@ function render(){
     legend("lg-"+op,s); table("t-"+op,s,fmtUs);
     document.getElementById("lab-"+op).textContent="· "+PCT.toUpperCase();
   });
+  // server saturation (only when CPU/mem were sampled)
+  const cpu=resSeries("cpu"), mem=resSeries("mem");
+  const show=HAVE_RES && cpu.length>0;
+  document.getElementById("sat-charts").style.display = show ? "" : "none";
+  document.getElementById("sat-note").style.display = show ? "" : "none";
+  if(show){
+    lineChart("c-cpu","tip-cpu",cpu,{yfmt:v=>Math.round(v)+"%",tipfmt:v=>v.toFixed(0)+"%",h:300,aria:"server CPU utilization"});
+    legend("lg-cpu",cpu);
+    lineChart("c-mem","tip-mem",mem,{yfmt:fmtMB,tipfmt:fmtMB,h:300,aria:"server memory working set"});
+    legend("lg-mem",mem);
+  }
 }
 
-["tp","set","get"].forEach(id=>{const t=document.createElement("div");t.className="tip";t.id="tip-"+id;document.getElementById("c-"+id).appendChild(t);});
+["tp","set","get","cpu","mem"].forEach(id=>{const t=document.createElement("div");t.className="tip";t.id="tip-"+id;document.getElementById("c-"+id).appendChild(t);});
 
 // ---- live data: fetch combined.json, fall back to the embedded snapshot -----
 const DATASET={bonsaigrid:BG, hazelcast:HZ, redis:RD, memcached:MC};
@@ -412,7 +440,9 @@ function fromStages(stages){
   const col=(op,p)=>stages.map(s=>s[op][p]);
   return {rps:stages.map(s=>s.set.rps),
     set:{p50:col("set","p50_us"),p90:col("set","p90_us"),p99:col("set","p99_us")},
-    get:{p50:col("get","p50_us"),p90:col("get","p90_us"),p99:col("get","p99_us")}};
+    get:{p50:col("get","p50_us"),p90:col("get","p90_us"),p99:col("get","p99_us")},
+    cpu:stages.map(s=>s.cpu?s.cpu.avg_pct:null),
+    mem:stages.map(s=>s.mem?s.mem.avg_mb:null)};
 }
 async function boot(){
   const src=document.getElementById("src");
@@ -427,6 +457,8 @@ async function boot(){
       if(cj[k] && cj[k].length){ Object.assign(DATASET[k], fromStages(cj[k])); HAVE[k]=true; }
       else HAVE[k]=false; // absent from this run → don't plot a stale embedded line
     }
+    HAVE_RES = present.some(k => (cj[k]||[]).some(s => s.cpu)); // CPU/mem sampled?
+
     // optional native-driver reference
     try{ const fj=await (await fetch(new URL("results-bonsaigrid-fair.json", base), {cache:"no-store"})).json();
          if(fj.stages && fj.stages.length===LEVELS.length){ BG_NATIVE_RPS=fj.stages.map(s=>s.set.rps); NATIVE=true; }
