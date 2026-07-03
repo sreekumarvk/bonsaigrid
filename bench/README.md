@@ -28,6 +28,10 @@ cargo bench -p store ─► target/criterion/ ───────────�
 Fixed loopback ports: BonsaiGrid `5701`, Hazelcast `5702`, Redis `6379`,
 Memcached `11211`; Bencher API `6610`, console `3000`.
 
+`bench/preflight.sh` checks this environment (docker/cargo/python3), clears stale
+`bench_` containers, and warns on bound ports. It runs automatically at the start of
+`run-all-isolated.sh`; run it standalone to check before a fresh run.
+
 ---
 
 ## Quick start
@@ -218,6 +222,7 @@ this is the per-run comparison view.
 |------|------|
 | `run-all-isolated.sh` | fair four-backend run (cgroup + cpuset isolation, CPU/mem sampling) |
 | `run-all.sh` | quick co-located run (not fair) |
+| `preflight.sh` | env checks + stale-container cleanup (auto-run by `run-all-isolated.sh`) |
 | `verify-correctness.sh` | end-to-end write/read-back correctness check over the wire |
 | `to_bmf.py` | `combined.json` → Bencher Metric Format |
 | `track.sh` | convert + upload to Bencher (local SQLite or cloud) with a regression gate |

@@ -158,18 +158,14 @@ info "backends      : $BACKENDS"
 info "workload      : levels=$LEVELS stage=${STAGE_SECS}s warmup=${WARMUP_SECS}s hz_conns=$HZ_CONNS"
 info "bonsai image  : $IMG_BONSAI_BASE (io_uring via seccomp=unconfined)"
 
-command -v "$DOCKER" >/dev/null 2>&1 || die "docker not found"
-$DOCKER info >/dev/null 2>&1 || die "cannot reach docker daemon (sudo? docker group?)"
-command -v cargo >/dev/null 2>&1 || die "cargo not found (needed to build BonsaiGrid)"
+# Environment checks + stale-container cleanup (also runnable standalone).
+DOCKER="$DOCKER" bash "$ROOT/bench/preflight.sh" || die "preflight failed"
 [ "$SERVER_NCPU" -ge 1 ] || die "SERVER_CPUS parsed to 0 cpus"
-
-# reset any leftovers from a previous run
-for c in $ALL_NAMES; do $DOCKER rm -f "$c" >/dev/null 2>&1 || true; done
 
 # ---- build BonsaiGrid + loadgen --------------------------------------------
 if [[ " $BACKENDS " == *" bonsaigrid "* ]]; then
-  log "Building BonsaiGrid server (release)"
-  cargo build --release -q -p server || die "cargo build -p server failed"
+  log "Building BonsaiGrid server + bench tool (release)"
+  cargo build --release -q -p server -p bench || die "cargo build -p server -p bench failed"
 fi
 log "Building Go load generator via $IMG_GO (static binary)"
 GOCACHE_DIR="${GOCACHE_DIR:-$HOME/.cache/bonsai-bench/gocache}"
@@ -240,6 +236,23 @@ run_loadgen() {
     "$IMG_LOADGEN" ./loadgen
 }
 
+# Thin-client server-ceiling reference: drive the SAME isolated BonsaiGrid with the
+# native raw-protocol bench client (no official Hazelcast-client tax), client pinned
+# to the CLIENT cpuset. Regenerates results-bonsaigrid-fair.json every run (the
+# dashboard's dashed reference line) so it is never stale.
+run_ladder() {
+  local out="$LOADDIR/results-bonsaigrid-fair.json"
+  command -v taskset >/dev/null 2>&1 || { warn "taskset not found; skipping thin-client reference"; return; }
+  [ -x "$ROOT/target/release/bench" ] || { warn "bench binary missing; skipping thin-client reference"; return; }
+  log "Thin-client reference: bench ladder (client on cpuset $CLIENT_CPUS)"
+  if LEVELS="$LEVELS" BENCH_ADDR="127.0.0.1:$P_BONSAI" \
+       taskset -c "$CLIENT_CPUS" "$ROOT/target/release/bench" ladder "$STAGE_SECS" 128 > "$out" 2>/dev/null; then
+    info "wrote $(basename "$out")"
+  else
+    warn "bench ladder failed; keeping the previous thin-client reference"
+  fi
+}
+
 bench_one() {
   local t="$1"
   start_backend "$t"
@@ -257,6 +270,7 @@ bench_one() {
     [ -f "$LOADDIR/results-$t.json" ] && inject_resources "$LOADDIR/results-$t.json" "$samp"
     rm -f "$samp"
   fi
+  [ "$t" = "bonsaigrid" ] && run_ladder   # refresh the thin-client reference while the server is up
   stop_backend "$t"
 }
 
