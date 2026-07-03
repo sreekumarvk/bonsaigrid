@@ -21,3 +21,6 @@ __pycache__/
 
 # Go loadgen build artifact (bench/run-all.sh builds it in a container)
 bench/loadgen/loadgen
+
+# Generated Bencher Metric Format (bench/track.sh regenerates from combined.json)
+bench/loadgen/bmf.json

@@ -6,3 +6,10 @@ version.workspace = true
 [dependencies]
 serialization = { path = "../serialization" }
 query = { path = "../query" }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "hotpath"
+harness = false

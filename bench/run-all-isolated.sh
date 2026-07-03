@@ -285,6 +285,10 @@ if rows:
         print(f"    {b:<12}{lvl:>7}{int(rps):>12,}{us:>11}")
 PY
 
+# Regenerate the self-contained dashboard from this run (data → HTML, no hand-editing).
+python3 bench/gen_dashboard.py "$LOADDIR/combined.json" "$LOADDIR/results-bonsaigrid-fair.json" 2>/dev/null \
+  && info "dashboard baked: bench/deploy/redis-vs-memcached.html" || true
+
 log "Done"
 info "Each server ran on cpuset $SERVER_CPUS (${SERVER_NCPU} cpus, $SERVER_MEM); client on $CLIENT_CPUS."
-info "Results in $LOADDIR/combined.json — view with the dashboard (served over http)."
+info "Results: $LOADDIR/combined.json · dashboard: bench/deploy/redis-vs-memcached.html · track: bench/track.sh"
