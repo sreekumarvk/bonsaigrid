@@ -14,7 +14,7 @@ use protocol::message::set_correlation_id;
 use protocol::primitives::{data_frame, null_frame, string_frame};
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 struct Client {
     stream: TcpStream,
@@ -175,6 +175,93 @@ fn concurrent_bench(addr: &str, conns: usize, ops_per_conn: usize) {
     println!("throughput    {:.0} ops/sec", ops / elapsed.as_secs_f64());
 }
 
+/// One closed-loop stage: `level` worker threads, **each with its own TCP
+/// connection**, loop put+get until the deadline, capturing per-op latencies
+/// (microseconds). Mirrors the Go loadgen's closed-loop stage — but with a real
+/// connection per worker (the official Hazelcast Go client multiplexes all
+/// workers over a single connection, which caps throughput at one reactor core).
+fn run_stage(addr: &str, level: usize, dur: Duration, valsz: usize) -> (Vec<u64>, Vec<u64>) {
+    let deadline = Instant::now() + dur;
+    let mut handles = Vec::new();
+    for c in 0..level {
+        let addr = addr.to_string();
+        handles.push(std::thread::spawn(move || {
+            let mut cli = Client::connect(&addr);
+            let val = vec![0xABu8; valsz];
+            let mut sets: Vec<u64> = Vec::new();
+            let mut gets: Vec<u64> = Vec::new();
+            let mut i: usize = 0;
+            while Instant::now() < deadline {
+                // Bounded per-thread keyspace so the working set stays resident
+                // (throughput/latency measurement, not a slab-exhaustion test).
+                let k = format!("t{}k{}", c, i % 4096);
+                let t0 = Instant::now();
+                cli.put("bench", k.as_bytes(), &val);
+                sets.push(t0.elapsed().as_micros() as u64);
+                let t1 = Instant::now();
+                cli.get("bench", k.as_bytes());
+                gets.push(t1.elapsed().as_micros() as u64);
+                i += 1;
+            }
+            (sets, gets)
+        }));
+    }
+    let mut all_sets = Vec::new();
+    let mut all_gets = Vec::new();
+    for h in handles {
+        let (s, g) = h.join().unwrap();
+        all_sets.extend_from_slice(&s);
+        all_gets.extend_from_slice(&g);
+    }
+    (all_sets, all_gets)
+}
+
+/// Staged throughput+latency ladder, emitting the same JSON shape as the Go
+/// loadgen so the results drop straight into the dashboard.
+fn ladder_bench(addr: &str, levels: &[usize], stage: Duration, valsz: usize) {
+    // Warmup (discarded).
+    let _ = run_stage(addr, 16, Duration::from_secs(2), valsz);
+
+    let mut stages_json: Vec<String> = Vec::new();
+    for &level in levels {
+        let (mut sets, mut gets) = run_stage(addr, level, stage, valsz);
+        let secs = stage.as_secs_f64();
+        sets.sort_unstable();
+        gets.sort_unstable();
+        // Both ops run once per loop iteration, so set/get counts are equal and
+        // rps here is the achieved op-rate for that op (put OR get).
+        let s_rps = sets.len() as f64 / secs;
+        let g_rps = gets.len() as f64 / secs;
+        eprintln!(
+            "level={} set: {:.0} rps p99={}us | get: {:.0} rps p99={}us | n={}",
+            level,
+            s_rps,
+            percentile(&sets, 0.99),
+            g_rps,
+            percentile(&gets, 0.99),
+            sets.len()
+        );
+        let set_json = format!(
+            "{{ \"op\": \"set\", \"count\": {}, \"rps\": {:.2}, \"p50_us\": {}, \"p90_us\": {}, \"p99_us\": {} }}",
+            sets.len(), s_rps,
+            percentile(&sets, 0.50), percentile(&sets, 0.90), percentile(&sets, 0.99),
+        );
+        let get_json = format!(
+            "{{ \"op\": \"get\", \"count\": {}, \"rps\": {:.2}, \"p50_us\": {}, \"p90_us\": {}, \"p99_us\": {} }}",
+            gets.len(), g_rps,
+            percentile(&gets, 0.50), percentile(&gets, 0.90), percentile(&gets, 0.99),
+        );
+        stages_json.push(format!(
+            "    {{ \"level\": {}, \"set\": {}, \"get\": {}, \"errors\": 0 }}",
+            level, set_json, get_json,
+        ));
+    }
+    println!(
+        "{{\n  \"target\": \"bonsaigrid\",\n  \"stages\": [\n{}\n  ]\n}}",
+        stages_json.join(",\n")
+    );
+}
+
 fn load_bench(addr: &str, count: usize, valsz: usize) {
     let mut cli = Client::connect(addr);
     let val = vec![0xCDu8; valsz];
@@ -203,8 +290,19 @@ fn main() {
             let ops = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(20_000);
             concurrent_bench(&addr, conns, ops);
         }
+        Some("ladder") => {
+            // bench ladder [stage_secs] [valsz]   (LEVELS env overrides the ramp)
+            let stage_secs = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(4u64);
+            let valsz = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(128usize);
+            let levels: Vec<usize> = std::env::var("LEVELS")
+                .unwrap_or_else(|_| "1,2,4,8,16,32,64,128".to_string())
+                .split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .collect();
+            ladder_bench(&addr, &levels, Duration::from_secs(stage_secs), valsz);
+        }
         _ => {
-            eprintln!("usage: bench latency [n] | bench load <count> <valsz>");
+            eprintln!("usage: bench latency [n] | bench load <count> <valsz> | bench concurrent <conns> <ops> | bench ladder [stage_secs] [valsz]");
             std::process::exit(2);
         }
     }

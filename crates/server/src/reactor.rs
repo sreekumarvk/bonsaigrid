@@ -14,7 +14,7 @@ use protocol::fixed::read_u16_le;
 use protocol::fragment::Reassembler;
 use protocol::frame::{message_len, UNFRAGMENTED};
 use security::tls::{Handshake, TlsAcceptor, TlsMode};
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Per-connection transport-security state.
@@ -175,6 +175,17 @@ pub fn run(
                 }
                 if res >= 0 {
                     let fd = res as RawFd;
+                    // Disable Nagle on the accepted client socket. A pipelining
+                    // client (many in-flight requests per connection, e.g. the
+                    // Hazelcast smart client) otherwise hits Nagle + delayed-ACK
+                    // and eats milliseconds of latency; a strict ping-pong client
+                    // never triggers it, which is why it only shows under real
+                    // clients. (The member transport already sets this.)
+                    {
+                        let s = unsafe { std::net::TcpStream::from_raw_fd(fd) };
+                        let _ = s.set_nodelay(true);
+                        let _ = s.into_raw_fd(); // keep fd open; the reactor owns it
+                    }
                     let id = match free.pop() {
                         Some(i) => {
                             conns[i] = Some(Conn::new(fd, initial_tls(&tls)));
