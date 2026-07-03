@@ -17,3 +17,7 @@ __pycache__/
 
 # Local JDK/Maven (downloaded, not committed)
 /.tools/
+.gstack/
+
+# Go loadgen build artifact (bench/run-all.sh builds it in a container)
+bench/loadgen/loadgen
