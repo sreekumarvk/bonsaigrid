@@ -1,0 +1,25 @@
+{
+  "target": "bonsaigrid",
+  "stages": [
+    {
+      "level": 1,
+      "set": {
+        "op": "set",
+        "count": 39200,
+        "rps": 19600,
+        "p50_us": 27,
+        "p90_us": 30,
+        "p99_us": 142
+      },
+      "get": {
+        "op": "get",
+        "count": 39200,
+        "rps": 19600,
+        "p50_us": 19,
+        "p90_us": 21,
+        "p99_us": 57
+      },
+      "errors": 0
+    }
+  ]
+}

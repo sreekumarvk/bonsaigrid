@@ -1,0 +1,205 @@
+<div class="wrap">
+  <header class="masthead">
+    <div class="eyebrow">Benchmark · single node · localhost · closed-loop ramp</div>
+    <h1>BonsaiGrid throughput &amp; latency</h1>
+    <p class="dek">A bare-metal Rust data grid measured against its protocol-compatible peer
+      <strong>Hazelcast</strong>, and the specialized caches <strong>Redis</strong> and
+      <strong>Memcached</strong> — one Go client, one SET+GET workload, four backends.</p>
+    <div class="chips">
+      <span class="chip"><b>Host</b> ARM Cortex-X925 · 20 cores · Linux 6.17</span>
+      <span class="chip"><b>Client</b> hazelcast-go-client v1.6.0</span>
+      <span class="chip"><b>BonsaiGrid</b> release · 8-core io_uring</span>
+      <span class="chip"><b>Hazelcast</b> 5.7.0</span>
+      <span class="chip"><b>Redis</b> 7.4</span>
+      <span class="chip"><b>Memcached</b> 1.6</span>
+    </div>
+  </header>
+
+  <section class="findings">
+    <article class="stat accent">
+      <div class="stat-k">p99 latency vs Hazelcast, low load</div>
+      <div class="stat-v">10.6&times;<span class="unit"> lower</span></div>
+      <div class="stat-s">BonsaiGrid 92&micro;s vs Hazelcast 974&micro;s (GET, 1 client)</div>
+    </article>
+    <article class="stat">
+      <div class="stat-k">Peak GET throughput vs Hazelcast</div>
+      <div class="stat-v">1.33&times;<span class="unit"> higher</span></div>
+      <div class="stat-s">BonsaiGrid 85k vs Hazelcast 64k ops/sec</div>
+    </article>
+    <article class="stat">
+      <div class="stat-k">Median GET latency, 1 client</div>
+      <div class="stat-v">26<span class="unit"> &micro;s</span></div>
+      <div class="stat-s">round-trip over the Hazelcast wire protocol</div>
+    </article>
+    <article class="stat">
+      <div class="stat-k">Peak GET throughput, this box</div>
+      <div class="stat-v">170k<span class="unit"> ops/s</span></div>
+      <div class="stat-s">Memcached leads the leanest workload; BonsaiGrid does strictly more</div>
+    </article>
+  </section>
+
+  <div class="controls">
+    <div class="legend" id="legend"></div>
+    <div class="toggle" role="group" aria-label="operation">
+      <button data-op="get" class="on">GET</button>
+      <button data-op="set">SET</button>
+    </div>
+  </div>
+
+  <section class="charts">
+    <figure class="card">
+      <figcaption><h2>Throughput</h2><span>operations / sec vs concurrent clients — higher is better</span></figcaption>
+      <div class="plot" id="c-tput"></div>
+    </figure>
+    <figure class="card">
+      <figcaption><h2>Tail latency</h2><span>p99 (&micro;s) vs concurrent clients — lower is better</span></figcaption>
+      <div class="plot" id="c-lat"></div>
+    </figure>
+    <figure class="card wide">
+      <figcaption><h2>Latency vs throughput</h2><span>p99 (&micro;s) against achieved ops/sec — each point is a concurrency stage; down-and-right is better</span></figcaption>
+      <div class="plot" id="c-lvt"></div>
+    </figure>
+  </section>
+
+  <section class="card table-card">
+    <figcaption><h2>Full results <span>every concurrency stage · toggle GET / SET above</span></h2></figcaption>
+    <div class="table-scroll"><table id="results"></table></div>
+  </section>
+
+  <section class="method">
+    <h2>Method &amp; fairness</h2>
+    <ul>
+      <li><b>One client, swap the backend.</b> A single Go program drives every backend with the same SET+GET of a ~90-byte JSON value keyed by UUID. The two Hazelcast-protocol targets — BonsaiGrid and Hazelcast — use the <em>identical</em> <code>hazelcast-go-client</code> code, only the host differs; Redis and Memcached use their native clients.</li>
+      <li><b>Staged closed-loop ramp.</b> Concurrency steps 1&#8202;&rarr;&#8202;128 (geometric); each stage runs 4&nbsp;s after a 2&nbsp;s warm-up. Latency is timed <em>client-side</em> around each op and reduced to p50/p90/p99 per stage.</li>
+      <li><b>Single node, no backups, no persistence</b> for every backend, to match single-instance Redis/Memcached. BonsaiGrid&rsquo;s durability/backup/CP lanes are measured separately.</li>
+      <li><b>Caveats.</b> All processes share one host over loopback, so high-concurrency numbers converge toward a client/loopback ceiling. Redis is single-threaded and Memcached has no partitioning or replication, so this is <em>what a client experiences at parity config</em> — not an architecturally identical comparison. BonsaiGrid and Hazelcast do strictly more (partitioning, sync backups, listeners, SQL).</li>
+      <li><b>Notable:</b> this run also confirmed <code>hazelcast-go-client</code> conformance against BonsaiGrid (connect, cluster view, SetWithTTL/Get) — the Go client had not previously been exercised.</li>
+    </ul>
+  </section>
+
+  <footer class="foot">
+    <span>Reproduce: <code>cargo build -p server --release &amp;&amp; ./target/release/server</code>, start the redis / memcached / hazelcast containers, then <code>TARGET=&lt;backend&gt; go run ./bench/loadgen</code>.</span>
+  </footer>
+</div>
+
+<style>
+  :root{
+    --bg:#0e1216; --panel:#161d24; --panel-2:#1b232b; --line:#26303a; --line-2:#324150;
+    --ink:#e6edf3; --muted:#8593a0; --faint:#5b6875;
+    --bonsai:#4fd1b1; --hz:#f5a04a; --redis:#ec5f57; --mc:#6ea8fe;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono","Cascadia Code",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 600px at 80% -10%, #16222b 0%, rgba(22,34,43,0) 60%),var(--bg);
+    color:var(--ink);font-family:var(--sans);line-height:1.5;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1040px;margin:0 auto;padding:44px 24px 72px;}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--bonsai);margin-bottom:14px;}
+  h1{font-size:clamp(30px,5vw,46px);line-height:1.04;margin:0 0 14px;font-weight:650;letter-spacing:-.02em;text-wrap:balance;}
+  .dek{max-width:64ch;color:#c3ccd5;font-size:17px;margin:0 0 24px;}
+  .dek strong{color:var(--ink);font-weight:600;}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;}
+  .chip{font-family:var(--mono);font-size:11.5px;color:var(--muted);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:5px 9px;}
+  .chip b{color:#b7c2cc;font-weight:600;margin-right:5px;}
+  .findings{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:34px 0 8px;}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 16px 18px;}
+  .stat.accent{border-color:rgba(79,209,177,.4);background:linear-gradient(180deg,rgba(79,209,177,.08),rgba(79,209,177,0));}
+  .stat-k{font-family:var(--mono);font-size:11px;letter-spacing:.03em;color:var(--muted);text-transform:uppercase;min-height:2.6em;}
+  .stat-v{font-family:var(--mono);font-size:34px;font-weight:600;letter-spacing:-.02em;margin:6px 0 4px;font-variant-numeric:tabular-nums;}
+  .stat.accent .stat-v{color:var(--bonsai);}
+  .stat-v .unit{font-size:15px;color:var(--muted);font-weight:500;letter-spacing:0;}
+  .stat-s{font-size:12.5px;color:var(--muted);}
+  .controls{display:flex;justify-content:space-between;align-items:center;gap:16px;margin:32px 0 14px;flex-wrap:wrap;}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;}
+  .legend .li{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:12.5px;color:#c3ccd5;}
+  .legend .sw{width:14px;height:3px;border-radius:2px;display:inline-block;}
+  .toggle{display:inline-flex;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:3px;}
+  .toggle button{font-family:var(--mono);font-size:12px;letter-spacing:.05em;color:var(--muted);background:none;border:0;padding:6px 14px;border-radius:6px;cursor:pointer;}
+  .toggle button.on{background:var(--panel-2);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line-2);}
+  .toggle button:focus-visible{outline:2px solid var(--bonsai);outline-offset:2px;}
+  .charts{display:grid;grid-template-columns:1fr 1fr;gap:18px;}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 18px 8px;}
+  .card.wide{grid-column:1 / -1;}
+  figcaption{margin-bottom:6px;}
+  figcaption h2{font-size:16px;margin:0;font-weight:600;letter-spacing:-.01em;}
+  figcaption span{display:block;font-size:12.5px;color:var(--muted);margin-top:2px;}
+  .plot svg{width:100%;height:auto;display:block;}
+  .plot text{font-family:var(--mono);fill:var(--muted);}
+  .grid line{stroke:var(--line);stroke-width:1;}
+  .axis line{stroke:var(--line-2);stroke-width:1;}
+  .series-line{fill:none;stroke-width:2.25;}
+  .series-dot{stroke:var(--panel);stroke-width:1.5;}
+  .table-card{margin-top:24px;padding-bottom:18px;}
+  .table-scroll{overflow-x:auto;}
+  table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12.5px;font-variant-numeric:tabular-nums;}
+  th,td{padding:7px 10px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap;}
+  th{color:var(--muted);font-weight:500;text-transform:uppercase;font-size:11px;letter-spacing:.04em;}
+  td.name,th.name{text-align:left;} td.name{color:var(--ink);}
+  tr.group td{border-top:1px solid var(--line-2);padding-top:11px;}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:8px;vertical-align:middle;}
+  .method{margin-top:38px;max-width:78ch;}
+  .method h2{font-size:17px;font-weight:600;margin:0 0 10px;}
+  .method ul{margin:0;padding:0;list-style:none;display:grid;gap:11px;}
+  .method li{font-size:14px;color:#c0c9d2;padding-left:16px;position:relative;}
+  .method li::before{content:"";position:absolute;left:0;top:9px;width:5px;height:5px;border-radius:1px;background:var(--bonsai);}
+  .method b{color:var(--ink);font-weight:600;} .method em{color:#cfd7de;text-decoration:underline;text-decoration-color:var(--line-2);text-underline-offset:2px;}
+  code{font-family:var(--mono);font-size:.9em;background:var(--panel-2);border:1px solid var(--line);border-radius:5px;padding:1px 5px;color:#cbd4dc;}
+  .foot{margin-top:34px;padding-top:18px;border-top:1px solid var(--line);font-size:12.5px;color:var(--faint);}
+  @media(max-width:820px){ .findings{grid-template-columns:repeat(2,1fr);} .charts{grid-template-columns:1fr;} }
+  @media(max-width:520px){ .findings{grid-template-columns:1fr;} }
+</style>
+
+<script>
+const DATA = {"bonsaigrid": [{"level": 1, "set": {"op": "set", "count": 57833, "rps": 14458.25, "p50_us": 36, "p90_us": 40, "p99_us": 151}, "get": {"op": "get", "count": 57833, "rps": 14458.25, "p50_us": 26, "p90_us": 30, "p99_us": 92}, "errors": 0}, {"level": 2, "set": {"op": "set", "count": 97074, "rps": 24268.5, "p50_us": 36, "p90_us": 65, "p99_us": 213}, "get": {"op": "get", "count": 97074, "rps": 24268.5, "p50_us": 26, "p90_us": 46, "p99_us": 161}, "errors": 0}, {"level": 4, "set": {"op": "set", "count": 130358, "rps": 32589.5, "p50_us": 53, "p90_us": 107, "p99_us": 247}, "get": {"op": "get", "count": 130358, "rps": 32589.5, "p50_us": 41, "p90_us": 87, "p99_us": 233}, "errors": 0}, {"level": 8, "set": {"op": "set", "count": 187739, "rps": 46934.75, "p50_us": 68, "p90_us": 172, "p99_us": 317}, "get": {"op": "get", "count": 187739, "rps": 46934.75, "p50_us": 61, "p90_us": 146, "p99_us": 313}, "errors": 0}, {"level": 16, "set": {"op": "set", "count": 255277, "rps": 63819.25, "p50_us": 105, "p90_us": 208, "p99_us": 398}, "get": {"op": "get", "count": 255277, "rps": 63819.25, "p50_us": 102, "p90_us": 200, "p99_us": 391}, "errors": 0}, {"level": 32, "set": {"op": "set", "count": 318556, "rps": 79639, "p50_us": 174, "p90_us": 287, "p99_us": 555}, "get": {"op": "get", "count": 318556, "rps": 79639, "p50_us": 175, "p90_us": 288, "p99_us": 546}, "errors": 0}, {"level": 64, "set": {"op": "set", "count": 340319, "rps": 85079.75, "p50_us": 346, "p90_us": 494, "p99_us": 908}, "get": {"op": "get", "count": 340319, "rps": 85079.75, "p50_us": 345, "p90_us": 494, "p99_us": 877}, "errors": 0}, {"level": 128, "set": {"op": "set", "count": 325857, "rps": 81464.25, "p50_us": 707, "p90_us": 949, "p99_us": 1598}, "get": {"op": "get", "count": 325857, "rps": 81464.25, "p50_us": 701, "p90_us": 954, "p99_us": 1596}, "errors": 0}], "hazelcast": [{"level": 1, "set": {"op": "set", "count": 5685, "rps": 1421.25, "p50_us": 323, "p90_us": 645, "p99_us": 981}, "get": {"op": "get", "count": 5685, "rps": 1421.25, "p50_us": 296, "p90_us": 628, "p99_us": 974}, "errors": 0}, {"level": 2, "set": {"op": "set", "count": 7760, "rps": 1940, "p50_us": 494, "p90_us": 871, "p99_us": 1259}, "get": {"op": "get", "count": 7760, "rps": 1940, "p50_us": 483, "p90_us": 861, "p99_us": 1266}, "errors": 0}, {"level": 4, "set": {"op": "set", "count": 15965, "rps": 3991.25, "p50_us": 454, "p90_us": 951, "p99_us": 1282}, "get": {"op": "get", "count": 15965, "rps": 3991.25, "p50_us": 448, "p90_us": 957, "p99_us": 1280}, "errors": 0}, {"level": 8, "set": {"op": "set", "count": 37549, "rps": 9387.25, "p50_us": 345, "p90_us": 866, "p99_us": 1188}, "get": {"op": "get", "count": 37549, "rps": 9387.25, "p50_us": 339, "p90_us": 869, "p99_us": 1198}, "errors": 0}, {"level": 16, "set": {"op": "set", "count": 73520, "rps": 18380, "p50_us": 368, "p90_us": 820, "p99_us": 1183}, "get": {"op": "get", "count": 73520, "rps": 18380, "p50_us": 363, "p90_us": 821, "p99_us": 1175}, "errors": 0}, {"level": 32, "set": {"op": "set", "count": 134619, "rps": 33654.75, "p50_us": 412, "p90_us": 828, "p99_us": 1198}, "get": {"op": "get", "count": 134619, "rps": 33654.75, "p50_us": 407, "p90_us": 826, "p99_us": 1187}, "errors": 0}, {"level": 64, "set": {"op": "set", "count": 220857, "rps": 55214.25, "p50_us": 533, "p90_us": 816, "p99_us": 1251}, "get": {"op": "get", "count": 220857, "rps": 55214.25, "p50_us": 529, "p90_us": 814, "p99_us": 1241}, "errors": 0}, {"level": 128, "set": {"op": "set", "count": 256350, "rps": 64087.5, "p50_us": 962, "p90_us": 1210, "p99_us": 1761}, "get": {"op": "get", "count": 256350, "rps": 64087.5, "p50_us": 960, "p90_us": 1208, "p99_us": 1757}, "errors": 0}], "memcached": [{"level": 1, "set": {"op": "set", "count": 34370, "rps": 8592.5, "p50_us": 42, "p90_us": 54, "p99_us": 507}, "get": {"op": "get", "count": 34370, "rps": 8592.5, "p50_us": 41, "p90_us": 53, "p99_us": 497}, "errors": 0}, {"level": 2, "set": {"op": "set", "count": 75664, "rps": 18916, "p50_us": 32, "p90_us": 65, "p99_us": 413}, "get": {"op": "get", "count": 75664, "rps": 18916, "p50_us": 33, "p90_us": 61, "p99_us": 398}, "errors": 0}, {"level": 4, "set": {"op": "set", "count": 53367, "rps": 13341.75, "p50_us": 105, "p90_us": 316, "p99_us": 521}, "get": {"op": "get", "count": 53367, "rps": 13341.75, "p50_us": 101, "p90_us": 314, "p99_us": 522}, "errors": 0}, {"level": 8, "set": {"op": "set", "count": 105373, "rps": 26343.25, "p50_us": 124, "p90_us": 270, "p99_us": 434}, "get": {"op": "get", "count": 105373, "rps": 26343.25, "p50_us": 120, "p90_us": 266, "p99_us": 438}, "errors": 0}, {"level": 16, "set": {"op": "set", "count": 259503, "rps": 64875.75, "p50_us": 114, "p90_us": 182, "p99_us": 279}, "get": {"op": "get", "count": 259503, "rps": 64875.75, "p50_us": 112, "p90_us": 180, "p99_us": 277}, "errors": 0}, {"level": 32, "set": {"op": "set", "count": 352767, "rps": 88191.75, "p50_us": 162, "p90_us": 291, "p99_us": 458}, "get": {"op": "get", "count": 352767, "rps": 88191.75, "p50_us": 160, "p90_us": 290, "p99_us": 462}, "errors": 0}, {"level": 64, "set": {"op": "set", "count": 493099, "rps": 123274.75, "p50_us": 229, "p90_us": 437, "p99_us": 725}, "get": {"op": "get", "count": 493099, "rps": 123274.75, "p50_us": 227, "p90_us": 441, "p99_us": 800}, "errors": 0}, {"level": 128, "set": {"op": "set", "count": 680622, "rps": 170155.5, "p50_us": 311, "p90_us": 677, "p99_us": 1213}, "get": {"op": "get", "count": 680622, "rps": 170155.5, "p50_us": 309, "p90_us": 690, "p99_us": 1440}, "errors": 0}], "redis": [{"level": 1, "set": {"op": "set", "count": 39451, "rps": 9862.75, "p50_us": 40, "p90_us": 55, "p99_us": 366}, "get": {"op": "get", "count": 39451, "rps": 9862.75, "p50_us": 38, "p90_us": 51, "p99_us": 353}, "errors": 0}, {"level": 2, "set": {"op": "set", "count": 62807, "rps": 15701.75, "p50_us": 42, "p90_us": 110, "p99_us": 412}, "get": {"op": "get", "count": 62807, "rps": 15701.75, "p50_us": 41, "p90_us": 98, "p99_us": 416}, "errors": 0}, {"level": 4, "set": {"op": "set", "count": 43877, "rps": 10969.25, "p50_us": 141, "p90_us": 385, "p99_us": 620}, "get": {"op": "get", "count": 43877, "rps": 10969.25, "p50_us": 129, "p90_us": 382, "p99_us": 621}, "errors": 0}, {"level": 8, "set": {"op": "set", "count": 78721, "rps": 19680.25, "p50_us": 172, "p90_us": 377, "p99_us": 582}, "get": {"op": "get", "count": 78721, "rps": 19680.25, "p50_us": 164, "p90_us": 377, "p99_us": 582}, "errors": 0}, {"level": 16, "set": {"op": "set", "count": 246219, "rps": 61554.75, "p50_us": 118, "p90_us": 190, "p99_us": 318}, "get": {"op": "get", "count": 246219, "rps": 61554.75, "p50_us": 116, "p90_us": 188, "p99_us": 313}, "errors": 0}, {"level": 32, "set": {"op": "set", "count": 305350, "rps": 76337.5, "p50_us": 193, "p90_us": 314, "p99_us": 484}, "get": {"op": "get", "count": 305350, "rps": 76337.5, "p50_us": 192, "p90_us": 312, "p99_us": 479}, "errors": 0}, {"level": 64, "set": {"op": "set", "count": 283230, "rps": 70807.5, "p50_us": 435, "p90_us": 577, "p99_us": 814}, "get": {"op": "get", "count": 283230, "rps": 70807.5, "p50_us": 434, "p90_us": 577, "p99_us": 818}, "errors": 0}, {"level": 128, "set": {"op": "set", "count": 316068, "rps": 79017, "p50_us": 765, "p90_us": 1026, "p99_us": 1712}, "get": {"op": "get", "count": 316068, "rps": 79017, "p50_us": 763, "p90_us": 1024, "p99_us": 1726}, "errors": 0}]};
+const ORDER = ["bonsaigrid","hazelcast","redis","memcached"];
+const LABELS = {bonsaigrid:"BonsaiGrid",hazelcast:"Hazelcast",redis:"Redis",memcached:"Memcached"};
+function gv(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim();}
+const COLOR = {bonsaigrid:gv("--bonsai"),hazelcast:gv("--hz"),redis:gv("--redis"),memcached:gv("--mc")};
+let OP="get";
+function fmtK(n){return n>=1000?(n/1000).toFixed(n>=10000?0:1)+"k":String(Math.round(n));}
+function nice(max){const p=Math.pow(10,Math.floor(Math.log10(max)));for(const m of [1,2,2.5,5,10]){if(p*m>=max)return p*m;}return p*10;}
+function svgLine(series, xs, opts){
+  const W=640,H=opts.h||330,L=58,R=18,T=14,B=40,pw=W-L-R,ph=H-T-B;
+  const yMax=nice(Math.max(...series.flatMap(s=>s.pts.map(p=>p.y)))*1.05);
+  let xMax=1; if(opts.xy){xMax=nice(Math.max(...series.flatMap(s=>s.pts.map(p=>p.x)))*1.05);}
+  const px=i=> L + (xs.length<2?0:i/(xs.length-1))*pw;
+  const sx=v=> L + (v/xMax)*pw;
+  const sy=v=> T + ph - (v/yMax)*ph;
+  let g="";
+  for(let i=0;i<=5;i++){const v=yMax*i/5,y=sy(v);
+    g+=`<g class="grid"><line x1="${L}" y1="${y.toFixed(1)}" x2="${W-R}" y2="${y.toFixed(1)}"/></g>`;
+    g+=`<text x="${L-8}" y="${(y+4).toFixed(1)}" text-anchor="end" font-size="11">${opts.fmt(v)}</text>`;}
+  g+=`<g class="axis"><line x1="${L}" y1="${T+ph}" x2="${W-R}" y2="${T+ph}"/></g>`;
+  if(opts.xy){
+    for(let i=0;i<=5;i++){const v=xMax*i/5;g+=`<text x="${sx(v).toFixed(1)}" y="${T+ph+22}" text-anchor="middle" font-size="11">${fmtK(v)}</text>`;}
+    g+=`<text x="${L+pw/2}" y="${H-2}" text-anchor="middle" font-size="11" fill="${gv('--faint')}">ops / sec &rarr;</text>`;
+  }else{
+    xs.forEach((lab,i)=>{g+=`<text x="${px(i).toFixed(1)}" y="${T+ph+22}" text-anchor="middle" font-size="11">${lab}</text>`;});
+    g+=`<text x="${L+pw/2}" y="${H-2}" text-anchor="middle" font-size="11" fill="${gv('--faint')}">concurrent clients</text>`;
+  }
+  for(const s of series){
+    const pts=s.pts.map((p,i)=> opts.xy?[sx(p.x),sy(p.y)]:[px(i),sy(p.y)]);
+    g+=`<path class="series-line" d="${pts.map((p,i)=>(i?'L':'M')+p[0].toFixed(1)+' '+p[1].toFixed(1)).join(' ')}" stroke="${s.color}"/>`;
+    pts.forEach(p=>{g+=`<circle class="series-dot" cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3" fill="${s.color}"/>`;});
+  }
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="chart">${g}</svg>`;
+}
+function render(){
+  const xs=DATA.bonsaigrid.map(s=>s.level);
+  const tput=ORDER.map(t=>({color:COLOR[t],pts:DATA[t].map(s=>({y:s[OP].rps}))}));
+  const lat =ORDER.map(t=>({color:COLOR[t],pts:DATA[t].map(s=>({y:s[OP].p99_us}))}));
+  const lvt =ORDER.map(t=>({color:COLOR[t],pts:DATA[t].map(s=>({x:s[OP].rps,y:s[OP].p99_us}))}));
+  document.getElementById("c-tput").innerHTML=svgLine(tput,xs,{fmt:fmtK});
+  document.getElementById("c-lat").innerHTML =svgLine(lat,xs,{fmt:fmtK});
+  document.getElementById("c-lvt").innerHTML =svgLine(lvt,xs,{xy:true,h:360,fmt:fmtK});
+  document.getElementById("legend").innerHTML=ORDER.map(t=>`<span class="li"><span class="sw" style="background:${COLOR[t]}"></span>${LABELS[t]}</span>`).join("");
+  let rows=`<tr><th class="name">backend</th><th>clients</th><th>ops/sec</th><th>p50 &micro;s</th><th>p90 &micro;s</th><th>p99 &micro;s</th></tr>`;
+  for(const t of ORDER){DATA[t].forEach((s,i)=>{const o=s[OP];
+    rows+=`<tr class="${i===0?'group':''}"><td class="name">${i===0?`<span class="dot" style="background:${COLOR[t]}"></span>${LABELS[t]}`:''}</td><td>${s.level}</td><td>${Math.round(o.rps).toLocaleString()}</td><td>${o.p50_us}</td><td>${o.p90_us}</td><td>${o.p99_us}</td></tr>`;});}
+  document.getElementById("results").innerHTML=rows;
+}
+document.querySelectorAll(".toggle button").forEach(b=>b.addEventListener("click",()=>{
+  document.querySelectorAll(".toggle button").forEach(x=>x.classList.remove("on"));
+  b.classList.add("on");OP=b.dataset.op;render();}));
+render();
+</script>
