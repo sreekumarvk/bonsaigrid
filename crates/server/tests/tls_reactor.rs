@@ -67,6 +67,7 @@ fn permissive_mode_serves_a_plaintext_client() {
             vec![listener],
             move |_msg, _conn_id, out: &mut Vec<u8>| out.extend_from_slice(MARKER),
             |_p| (404, "text/plain", "no".to_string()),
+            |_cmd: &[u8], _out: &mut Vec<u8>| false,
             |_c, _o| {},
             |_c| {},
             || {},
@@ -122,6 +123,7 @@ fn tls_client_round_trips_a_request_through_the_reactor() {
                 out.extend_from_slice(MARKER);
             },
             |_path| (404, "text/plain", "no".to_string()),
+            |_cmd: &[u8], _out: &mut Vec<u8>| false,
             |_conn_id, _out| {},
             |_conn_id| {},
             || {},

@@ -299,6 +299,8 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
         Rc::new(RefCell::new(HashMap::new()));
     let conns_drop = conns.clone();
     let anon = cfg.security.anonymous();
+    let mc_store = store.clone();
+    let mc_cas = Arc::new(std::sync::atomic::AtomicU64::new(0));
     server::reactor::run(
         vec![listener],
         move |msg, conn_id, out| {
@@ -340,6 +342,21 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
                 );
             }
             http_route(path, n, &mh)
+        },
+        move |cmd, out| {
+            let now_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let (reply, close) = server::memcache::execute(
+                &mc_store,
+                &server::memcache::parse(cmd),
+                now_unix,
+                &mc_cas,
+                env!("CARGO_PKG_VERSION"),
+            );
+            out.extend_from_slice(&reply);
+            close
         },
         move |conn_id, out| {
             for ev in eb.drain(conn_id) {
@@ -435,6 +452,8 @@ fn run_single_node() -> std::io::Result<()> {
 
     let mut handles = Vec::new();
     let tls_acceptor = build_tls_acceptor();
+    // Shared memcached CAS counter — one global unique across all cores.
+    let mc_cas = Arc::new(std::sync::atomic::AtomicU64::new(0));
     for i in 0..cores {
         let store = store.clone();
         let cfg = cfg.clone();
@@ -446,6 +465,7 @@ fn run_single_node() -> std::io::Result<()> {
         let jet_service = jet_service.clone();
         let cluster = cluster.clone();
         let tls_acceptor = tls_acceptor.clone();
+        let mc_cas = mc_cas.clone();
         let main_listener = reuseport_listener(addr)?;
         let tpc_addr: SocketAddr = format!("127.0.0.1:{}", TPC_BASE + i as i32)
             .parse()
@@ -465,6 +485,7 @@ fn run_single_node() -> std::io::Result<()> {
                 Rc::new(RefCell::new(HashMap::new()));
             let conns_drop = conns.clone();
             let anon = cfg.security.anonymous();
+            let mc_store = store.clone();
             let _ = server::reactor::run(
                 vec![main_listener, tpc_listener],
                 move |msg, conn_id, out| {
@@ -492,6 +513,21 @@ fn run_single_node() -> std::io::Result<()> {
                     conns.borrow_mut().insert(conn_id, principal);
                 },
                 move |path| http_route(path, 1, &mh),
+                move |cmd, out| {
+                    let now_unix = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let (reply, close) = server::memcache::execute(
+                        &mc_store,
+                        &server::memcache::parse(cmd),
+                        now_unix,
+                        &mc_cas,
+                        env!("CARGO_PKG_VERSION"),
+                    );
+                    out.extend_from_slice(&reply);
+                    close
+                },
                 move |conn_id, out| {
                     for ev in eb.drain(conn_id) {
                         out.extend_from_slice(&ev);

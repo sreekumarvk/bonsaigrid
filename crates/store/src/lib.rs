@@ -693,6 +693,16 @@ fn wall_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Action returned by an `mc_update` closure — applied atomically under the shard
+/// lock. `Store(value, ttl_ms)` writes (ttl_ms 0 == never), `Remove` deletes, `Keep`
+/// leaves the entry untouched. Used to make memcached conditional/RMW ops
+/// (add/replace/cas/incr/decr/append/prepend/touch) atomic.
+pub enum McAction {
+    Store(Vec<u8>, u64),
+    Remove,
+    Keep,
+}
+
 pub struct Store {
     /// HLC-packed update-stamp clock. A stamp is `physical_ms:41 | member:7 |
     /// counter:16`: physical time occupies the high bits so LatestUpdate merges
@@ -1812,6 +1822,31 @@ impl Store {
         for s in &self.shards {
             s.lock().unwrap().clear(map);
         }
+    }
+
+    /// Atomic read-modify-write on one key: locks the key's shard once, reads the
+    /// current live value (expired entries read as `None`), runs `f`, and applies
+    /// its `McAction` under the same lock. Returns whatever `f` returns alongside the
+    /// action, so callers can compute a memcached reply without a second lookup.
+    pub fn mc_update<F, R>(&self, map: &str, key: &[u8], f: F) -> R
+    where
+        F: FnOnce(Option<&[u8]>) -> (McAction, R),
+    {
+        let stamp = self.next_stamp();
+        let schemas = self.schemas();
+        let mut inner = self.shard(map, key).lock().unwrap();
+        let cur = inner.get(map, key);
+        let (action, r) = f(cur.as_deref());
+        match action {
+            McAction::Store(val, ttl_ms) => {
+                inner.put(map, key, &val, ttl_ms, stamp, schemas);
+            }
+            McAction::Remove => {
+                inner.remove(map, key, schemas);
+            }
+            McAction::Keep => {}
+        }
+        r
     }
 
     pub fn contains_value(&self, map: &str, val: &[u8]) -> bool {

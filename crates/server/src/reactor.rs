@@ -43,9 +43,10 @@ const OUT_CAP: usize = 4 * 1024 * 1024; // reserved so appends never realloc mid
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Mode {
-    Unknown, // haven't seen the preamble yet
-    Binary,  // CP2 client protocol
-    Http,    // REST (health endpoints)
+    Unknown,  // haven't seen the preamble yet
+    Binary,   // CP2 client protocol
+    Http,     // REST (health endpoints)
+    Memcache, // memcached ASCII text protocol
 }
 
 struct Conn {
@@ -121,6 +122,7 @@ pub fn run(
     listeners: Vec<std::net::TcpListener>,
     mut dispatch: impl FnMut(&[u8], u64, &mut Vec<u8>),
     http: impl Fn(&str) -> (u16, &'static str, String),
+    mut memcache: impl FnMut(&[u8], &mut Vec<u8>) -> bool,
     drain_events: impl Fn(u64, &mut Vec<u8>),
     on_close: impl Fn(u64),
     mut on_tick: impl FnMut(),
@@ -217,6 +219,7 @@ pub fn run(
                     &mut pending,
                     &mut dispatch,
                     &http,
+                    &mut memcache,
                     &drain_events,
                     &tls,
                 );
@@ -308,6 +311,7 @@ fn on_recv(
     pending: &mut Vec<io_uring::squeue::Entry>,
     dispatch: &mut impl FnMut(&[u8], u64, &mut Vec<u8>),
     http: &impl Fn(&str) -> (u16, &'static str, String),
+    memcache: &mut impl FnMut(&[u8], &mut Vec<u8>) -> bool,
     drain_events: &impl Fn(u64, &mut Vec<u8>),
     tls: &Option<TlsAcceptor>,
 ) {
@@ -325,8 +329,10 @@ fn on_recv(
         return;
     }
 
-    // Detect the protocol from the first bytes: "CP2" -> binary client, anything
-    // else (an HTTP method) -> REST.
+    // Detect the protocol from the first bytes: "CP2" -> Hazelcast binary; an
+    // uppercase HTTP method (GET/POST/...) -> REST; a lowercase memcached verb
+    // (get/set/...) -> memcached ASCII. HTTP methods are uppercase and memcached
+    // verbs lowercase, so the first byte disambiguates the latter two.
     let c = conns[id].as_mut().unwrap();
     if c.mode == Mode::Unknown {
         if c.acc.len() < 3 {
@@ -336,8 +342,10 @@ fn on_recv(
         if &c.acc[..3] == b"CP2" {
             c.mode = Mode::Binary;
             c.acc.drain(0..3);
-        } else {
+        } else if c.acc[0].is_ascii_uppercase() {
             c.mode = Mode::Http;
+        } else {
+            c.mode = Mode::Memcache;
         }
     }
 
@@ -385,6 +393,29 @@ fn on_recv(
             drain_events(c.conn_id, &mut c.out);
             maybe_arm_send(conns, id, pending);
             arm_recv(conns, id, pending);
+        }
+        Mode::Memcache => {
+            let mut close = false;
+            loop {
+                let c = conns[id].as_mut().unwrap();
+                let crate::memcache::Frame::Have(len) = crate::memcache::frame(&c.acc) else {
+                    break;
+                };
+                let cmd: Vec<u8> = c.acc[..len].to_vec();
+                c.acc.drain(0..len);
+                if memcache(&cmd, &mut c.out) {
+                    close = true;
+                    break;
+                }
+            }
+            let c = conns[id].as_mut().unwrap();
+            if close {
+                c.close_after_flush = true;
+            }
+            maybe_arm_send(conns, id, pending);
+            if !close {
+                arm_recv(conns, id, pending);
+            }
         }
         Mode::Unknown => unreachable!(),
     }
