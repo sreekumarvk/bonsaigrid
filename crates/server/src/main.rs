@@ -300,6 +300,7 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
     let conns_drop = conns.clone();
     let anon = cfg.security.anonymous();
     let mc_store = store.clone();
+    let resp_store = store.clone();
     let mc_cas = Arc::new(std::sync::atomic::AtomicU64::new(0));
     server::reactor::run(
         vec![listener],
@@ -355,6 +356,14 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
                 &mc_cas,
                 env!("CARGO_PKG_VERSION"),
             );
+            out.extend_from_slice(&reply);
+            close
+        },
+        move |cmd, out| {
+            let (reply, close) = match server::resp::parse(cmd) {
+                Some(args) => server::resp::execute(&resp_store, &args),
+                None => (b"-ERR protocol error\r\n".to_vec(), false),
+            };
             out.extend_from_slice(&reply);
             close
         },
@@ -486,6 +495,7 @@ fn run_single_node() -> std::io::Result<()> {
             let conns_drop = conns.clone();
             let anon = cfg.security.anonymous();
             let mc_store = store.clone();
+            let resp_store = store.clone();
             let _ = server::reactor::run(
                 vec![main_listener, tpc_listener],
                 move |msg, conn_id, out| {
@@ -525,6 +535,14 @@ fn run_single_node() -> std::io::Result<()> {
                         &mc_cas,
                         env!("CARGO_PKG_VERSION"),
                     );
+                    out.extend_from_slice(&reply);
+                    close
+                },
+                move |cmd, out| {
+                    let (reply, close) = match server::resp::parse(cmd) {
+                        Some(args) => server::resp::execute(&resp_store, &args),
+                        None => (b"-ERR protocol error\r\n".to_vec(), false),
+                    };
                     out.extend_from_slice(&reply);
                     close
                 },

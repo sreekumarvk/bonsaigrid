@@ -47,6 +47,7 @@ enum Mode {
     Binary,   // CP2 client protocol
     Http,     // REST (health endpoints)
     Memcache, // memcached ASCII text protocol
+    Resp,     // RESP2 (Redis protocol)
 }
 
 struct Conn {
@@ -123,6 +124,7 @@ pub fn run(
     mut dispatch: impl FnMut(&[u8], u64, &mut Vec<u8>),
     http: impl Fn(&str) -> (u16, &'static str, String),
     mut memcache: impl FnMut(&[u8], &mut Vec<u8>) -> bool,
+    mut resp: impl FnMut(&[u8], &mut Vec<u8>) -> bool,
     drain_events: impl Fn(u64, &mut Vec<u8>),
     on_close: impl Fn(u64),
     mut on_tick: impl FnMut(),
@@ -220,6 +222,7 @@ pub fn run(
                     &mut dispatch,
                     &http,
                     &mut memcache,
+                    &mut resp,
                     &drain_events,
                     &tls,
                 );
@@ -312,6 +315,7 @@ fn on_recv(
     dispatch: &mut impl FnMut(&[u8], u64, &mut Vec<u8>),
     http: &impl Fn(&str) -> (u16, &'static str, String),
     memcache: &mut impl FnMut(&[u8], &mut Vec<u8>) -> bool,
+    resp: &mut impl FnMut(&[u8], &mut Vec<u8>) -> bool,
     drain_events: &impl Fn(u64, &mut Vec<u8>),
     tls: &Option<TlsAcceptor>,
 ) {
@@ -342,6 +346,8 @@ fn on_recv(
         if &c.acc[..3] == b"CP2" {
             c.mode = Mode::Binary;
             c.acc.drain(0..3);
+        } else if c.acc[0] == b'*' {
+            c.mode = Mode::Resp; // RESP requests are arrays: *N\r\n...
         } else if c.acc[0].is_ascii_uppercase() {
             c.mode = Mode::Http;
         } else {
@@ -404,6 +410,29 @@ fn on_recv(
                 let cmd: Vec<u8> = c.acc[..len].to_vec();
                 c.acc.drain(0..len);
                 if memcache(&cmd, &mut c.out) {
+                    close = true;
+                    break;
+                }
+            }
+            let c = conns[id].as_mut().unwrap();
+            if close {
+                c.close_after_flush = true;
+            }
+            maybe_arm_send(conns, id, pending);
+            if !close {
+                arm_recv(conns, id, pending);
+            }
+        }
+        Mode::Resp => {
+            let mut close = false;
+            loop {
+                let c = conns[id].as_mut().unwrap();
+                let crate::resp::Frame::Have(len) = crate::resp::frame(&c.acc) else {
+                    break;
+                };
+                let cmd: Vec<u8> = c.acc[..len].to_vec();
+                c.acc.drain(0..len);
+                if resp(&cmd, &mut c.out) {
                     close = true;
                     break;
                 }
