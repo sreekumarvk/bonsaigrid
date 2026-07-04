@@ -193,6 +193,31 @@ runs `bencher run --dry-run` to validate — safe with no server at all.
 
 ---
 
+## Standard-tool benchmark — memtier_benchmark
+
+`bench/run-memtier.sh` drives every backend with **`memtier_benchmark`** (the Redis
+Labs industry standard) through its real wire protocol, in the same cgroup-isolated
+harness. BonsaiGrid is benched via **both** its memcached and RESP protocols, so the
+comparison is apples-to-apples against real Memcached and Redis — same thin client.
+It captures the pillars the loadgen doesn't: **p99.9 tail latency, hit/miss ratio,
+and network throughput**.
+
+```bash
+bench/run-memtier.sh                              # all four; → bench/loadgen/memtier-combined.json
+RATIO=9:1 DATA_SIZE=1024 bench/run-memtier.sh     # 90/10 read/write, 1 KB objects
+bench/run-memtier.sh memcached bonsaigrid-mc      # subset
+```
+
+Backends: `memcached`, `redis`, `bonsaigrid-mc` (memcached protocol → :5701),
+`bonsaigrid-redis` (RESP → :5701). Config: `RATIO` (set:get), `DATA_SIZE`,
+`KEY_MAX` (keyspace → drives hit ratio), `KEY_PATTERN` (`R:R` random, `G:G`
+gaussian hotspot), `LEVELS`, `STAGE_SECS`, plus the isolation vars.
+
+`memtier_report.py` merges the per-level JSON into `memtier-combined.json`, writes
+`memtier-bmf.json` for Bencher, prints a summary, and bakes
+`bench/deploy/memtier.html` (throughput / p99.9 / hit-ratio / network, live-loading
++ embedded snapshot).
+
 ## The self-contained dashboard
 
 `bench/deploy/dashboard.html` is a shareable one-page view of the latest

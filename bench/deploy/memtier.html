@@ -1,0 +1,135 @@
+<title>memtier_benchmark — Cache Comparison</title>
+<style>
+  :root{--surface:#fcfcfb;--plane:#f9f9f7;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;
+    --grid:#e1e0d9;--axis:#c3c2b7;--border:rgba(11,11,11,.1);
+    --memc:#eb6834;--redis:#e87ba4;--bgmc:#eda100;--bgredis:#2a78d6;
+    --shadow:0 1px 2px rgba(11,11,11,.04),0 6px 20px rgba(11,11,11,.05);--font:system-ui,-apple-system,"Segoe UI",sans-serif}
+  @media(prefers-color-scheme:dark){:root{--surface:#1a1a19;--plane:#0d0d0d;--ink:#fff;--ink2:#c3c2b7;
+    --grid:#2c2c2a;--axis:#383835;--border:rgba(255,255,255,.1);
+    --memc:#d95926;--redis:#d55181;--bgmc:#c98500;--bgredis:#3987e5;--shadow:0 1px 2px rgba(0,0,0,.3),0 8px 28px rgba(0,0,0,.45)}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--plane);color:var(--ink);font-family:var(--font);line-height:1.5;padding:32px 20px 64px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1120px;margin:0 auto}
+  .eyebrow{font-size:12px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);font-weight:600;margin:0 0 6px}
+  h1{font-size:clamp(23px,3.2vw,32px);margin:0 0 10px;font-weight:700;letter-spacing:-.01em;text-wrap:balance}
+  .lede{font-size:15px;color:var(--ink2);max-width:74ch;margin:0 0 18px}
+  .lede b{color:var(--ink);font-weight:600}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 24px}
+  .chip{font-size:12px;color:var(--ink2);background:var(--surface);border:1px solid var(--border);border-radius:999px;padding:4px 11px;white-space:nowrap}
+  .chip b{color:var(--ink);font-weight:600}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  @media(max-width:760px){.grid2{grid-template-columns:1fr}}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:18px 18px 12px;box-shadow:var(--shadow);margin-bottom:18px}
+  .card h2{font-size:15px;margin:0 0 2px;font-weight:650}
+  .card .sub{font-size:12.5px;color:var(--muted);margin:0 0 6px}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;margin:2px 0 4px}
+  .lg{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--ink2);font-weight:600}
+  .lg .sw{width:11px;height:11px;border-radius:3px}
+  svg{width:100%;height:auto;display:block;overflow:visible}
+  .tick{fill:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+  .axtitle{fill:var(--muted);font-size:11px;font-weight:600}
+  .endlab{fill:var(--ink);font-size:11px;font-weight:650}
+  table{width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums;margin-top:4px}
+  th,td{padding:6px 8px;text-align:right;border-bottom:1px solid var(--grid);white-space:nowrap}
+  th:first-child,td:first-child{text-align:left}
+  thead th{color:var(--muted);font-weight:600;border-bottom:1px solid var(--axis)}
+  .sw{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px}
+  footer{margin-top:32px;padding-top:16px;border-top:1px solid var(--grid);font-size:12px;color:var(--muted)}
+  footer code{background:var(--surface);border:1px solid var(--border);border-radius:5px;padding:1px 6px}
+</style>
+<div class="wrap">
+  <p class="eyebrow">memtier_benchmark · industry-standard cache comparison</p>
+  <h1>Cache benchmark — memtier_benchmark</h1>
+  <p class="lede">Every backend driven by <b>the same thin client</b> (Redis Labs'
+    <code>memtier_benchmark</code>) through its real wire protocol, in cgroup-isolated cpusets.
+    BonsaiGrid appears twice — via its <b>memcached</b> and <b>RESP</b> protocols — so it's an
+    apples-to-apples comparison against real Memcached and Redis. This captures the pillars our own
+    loadgen doesn't: <b>p99.9 tail latency, hit/miss ratio, and network throughput</b>.
+    <span id="summary"></span></p>
+  <div class="chips" id="chips"></div>
+  <div class="card full"><h2>Throughput</h2><p class="sub">ops/sec. Higher is better.</p><div class="legend" id="lg1"></div><div id="c1"></div></div>
+  <div class="grid2">
+    <div class="card"><h2>Tail latency (p99.9)</h2><p class="sub">Microseconds. Lower is better — the metric averages hide.</p><div class="legend" id="lg2"></div><div id="c2"></div></div>
+    <div class="card"><h2>Hit ratio</h2><p class="sub">% of GETs that hit (memtier reads a keyspace, so misses occur).</p><div class="legend" id="lg3"></div><div id="c3"></div></div>
+  </div>
+  <div class="card"><h2>Network throughput</h2><p class="sub">Server RX+TX, MB/s.</p><div class="legend" id="lg4"></div><div id="c4"></div></div>
+  <div class="card"><h2>Peak stage (all metrics)</h2><div id="tbl"></div></div>
+  <footer><p>Data: <code>bench/loadgen/memtier-combined.json</code> (fetched live when served over http,
+    else the embedded snapshot). Reproduce: <code>bench/run-memtier.sh</code>
+    (config: <code>RATIO</code>, <code>DATA_SIZE</code>, <code>KEY_MAX</code>, <code>KEY_PATTERN</code>).</p></footer>
+</div>
+<script>
+// __MEMTIER_DATA_START__
+let LEVELS=[1, 2, 4, 8, 16, 32, 64, 128];
+const D={
+"memcached":{ops:[37430,79883,157221,338219,770507,995789,1164797,1186814],p999:[511.0,295.0,295.0,167.0,239.0,407.0,559.0,615.0],hit:[4.5,9.0,10.7,10.7,10.7,10.7,10.7,10.7],net:[3617,7996,15946,34304,78123,100957,118080,120314]},
+"redis":{ops:[41629,87493,139628,143649,177098,190225,213021,212351],p999:[343.0,175.0,159.0,207.0,383.0,487.0,751.0,1367.0],hit:[5.0,9.8,10.5,10.4,10.4,10.6,10.3,10.4],net:[4478,9683,15514,15954,19666,21150,23638,23575]},
+"bonsaigrid-mc":{ops:[36517,89708,158867,285205,749243,872533,1050585,1120179],p999:[159.0,143.0,151.0,143.0,87.0,207.0,423.0,479.0],hit:[4.4,8.9,11.1,11.1,11.4,12.1,12.0,12.1],net:[3525,8969,16164,29010,76383,89408,107599,114773]},
+"bonsaigrid-redis":{ops:[42653,88192,165010,335545,766145,893886,1078323,1158667],p999:[159.0,127.0,151.0,143.0,151.0,231.0,567.0,679.0],hit:[5.1,10.1,11.3,12.6,12.6,12.5,12.5,12.5],net:[4592,9776,18417,37730,86127,100473,121181,130194]},
+};
+// __MEMTIER_DATA_END__
+const ORDER=["bonsaigrid-mc","bonsaigrid-redis","memcached","redis"];
+const NAME={"memcached":"Memcached","redis":"Redis","bonsaigrid-mc":"BonsaiGrid · memcached","bonsaigrid-redis":"BonsaiGrid · RESP"};
+const SHORT={"memcached":"Memcached","redis":"Redis","bonsaigrid-mc":"BG · memcached","bonsaigrid-redis":"BG · RESP"};
+const COL={"memcached":"var(--memc)","redis":"var(--redis)","bonsaigrid-mc":"var(--bgmc)","bonsaigrid-redis":"var(--bgredis)"};
+let HAVE=Object.keys(D);
+const fmtK=n=>n>=1000?(n/1000).toFixed(n>=10000?0:1).replace(/\.0$/,"")+"k":Math.round(n)+"";
+const fmtUs=n=>n>=1000?(n/1000).toFixed(1)+" ms":Math.round(n)+" µs";
+const fmtPct=n=>n.toFixed(1)+"%";
+const fmtMB=n=>Math.round(n/1024)+" MB/s";
+function niceMax(v){if(v<=0)return 1;const p=Math.pow(10,Math.floor(Math.log10(v))),n=v/p;const s=n<=1?1:n<=2?2:n<=2.5?2.5:n<=5?5:10;return s*p;}
+function chart(el,legEl,metric,yfmt){
+  const W=720,H=340,m={t:14,r:120,b:40,l:64},iw=W-m.l-m.r,ih=H-m.t-m.b,n=LEVELS.length;
+  const xAt=i=>m.l+(n<2?0:i/(n-1)*iw);
+  let ymax=0;HAVE.forEach(k=>D[k][metric].forEach(v=>{if(v>ymax)ymax=v}));
+  if(metric==="hit")ymax=100; else ymax=niceMax(ymax);
+  const yAt=v=>m.t+ih-v/ymax*ih;
+  const NS="http://www.w3.org/2000/svg",mk=(t,a)=>{const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);return e;};
+  const svg=mk("svg",{viewBox:`0 0 ${W} ${H}`});
+  for(let g=0;g<=5;g++){const val=ymax*g/5,y=yAt(val);svg.appendChild(mk("line",{x1:m.l,x2:m.l+iw,y1:y,y2:y,stroke:"var(--grid)","stroke-width":1}));const t=mk("text",{x:m.l-9,y:y+3.5,"text-anchor":"end",class:"tick"});t.textContent=yfmt(val);svg.appendChild(t);}
+  svg.appendChild(mk("line",{x1:m.l,x2:m.l+iw,y1:m.t+ih,y2:m.t+ih,stroke:"var(--axis)","stroke-width":1}));
+  LEVELS.forEach((lv,i)=>{const t=mk("text",{x:xAt(i),y:m.t+ih+17,"text-anchor":"middle",class:"tick"});t.textContent=lv;svg.appendChild(t);});
+  const xt=mk("text",{x:m.l+iw/2,y:H-1,"text-anchor":"middle",class:"axtitle"});xt.textContent="concurrent connections";svg.appendChild(xt);
+  const ends=[];
+  HAVE.filter(k=>ORDER.includes(k)).sort((a,b)=>ORDER.indexOf(a)-ORDER.indexOf(b)).forEach(k=>{
+    const vals=D[k][metric];const pts=vals.map((v,i)=>`${xAt(i)},${yAt(v)}`).join(" ");
+    svg.appendChild(mk("polyline",{points:pts,fill:"none",stroke:COL[k],"stroke-width":2,"stroke-linejoin":"round"}));
+    vals.forEach((v,i)=>svg.appendChild(mk("circle",{cx:xAt(i),cy:yAt(v),r:3,fill:COL[k],stroke:"var(--surface)","stroke-width":1.5})));
+    ends.push({txt:SHORT[k],color:COL[k],y:yAt(vals[vals.length-1])});
+  });
+  ends.sort((a,b)=>a.y-b.y);for(let i=1;i<ends.length;i++)if(ends[i].y-ends[i-1].y<13)ends[i].y=ends[i-1].y+13;
+  const over=ends[ends.length-1]?.y-(m.t+ih);if(over>0)ends.forEach(e=>e.y-=over);
+  ends.forEach(e=>{const lx=m.l+iw+8;svg.appendChild(mk("rect",{x:lx,y:e.y-8,width:9,height:9,rx:2,fill:e.color}));const t=mk("text",{x:lx+13,y:e.y,class:"endlab"});t.textContent=e.txt;svg.appendChild(t);});
+  el.innerHTML="";el.appendChild(svg);
+  legEl.innerHTML=ORDER.filter(k=>HAVE.includes(k)).map(k=>`<span class="lg"><span class="sw" style="background:${COL[k]}"></span>${NAME[k]}</span>`).join("");
+}
+function table(){
+  const last=a=>a[a.length-1];
+  const rows=ORDER.filter(k=>HAVE.includes(k)).map(k=>({k,ops:last(D[k].ops),p999:last(D[k].p999),hit:last(D[k].hit),net:last(D[k].net)})).sort((a,b)=>b.ops-a.ops);
+  document.getElementById("tbl").innerHTML=`<div style="overflow-x:auto"><table><thead><tr><th>backend</th><th>ops/sec</th><th>p99.9</th><th>hit%</th><th>MB/s</th></tr></thead><tbody>`+
+    rows.map(r=>`<tr><td><span class="sw" style="background:${COL[r.k]}"></span>${NAME[r.k]}</td><td>${fmtK(r.ops)}</td><td>${fmtUs(r.p999)}</td><td>${r.hit.toFixed(1)}</td><td>${Math.round(r.net/1024)}</td></tr>`).join("")+`</tbody></table></div>`;
+  const rk=rows.map((r,i)=>`${SHORT[r.k]} ${fmtK(r.ops)}`).join(" › ");
+  document.getElementById("summary").textContent=`At ${LEVELS[LEVELS.length-1]} connections: ${rk} ops/s.`;
+}
+function render(){
+  chart(document.getElementById("c1"),document.getElementById("lg1"),"ops",fmtK);
+  chart(document.getElementById("c2"),document.getElementById("lg2"),"p999",fmtUs);
+  chart(document.getElementById("c3"),document.getElementById("lg3"),"hit",v=>Math.round(v)+"%");
+  chart(document.getElementById("c4"),document.getElementById("lg4"),"net",v=>Math.round(v/1024)+"");
+  table();
+  document.getElementById("chips").innerHTML=`<span class="chip">tool: <b>memtier_benchmark</b></span><span class="chip">isolated <b>cpusets</b>, equal cpu/mem</span><span class="chip">BonsaiGrid via <b>memcached + RESP</b></span><span class="chip" id="src">embedded snapshot</span>`;
+}
+async function boot(){
+  try{
+    const cj=await(await fetch(new URL("../loadgen/memtier-combined.json",location.href),{cache:"no-store"})).json();
+    const present=Object.keys(cj).filter(k=>Array.isArray(cj[k])&&cj[k].length);
+    if(!present.length)throw 0;
+    LEVELS=cj[present[0]].map(s=>s.level);
+    for(const k of Object.keys(D)) if(!cj[k]) delete D[k];
+    for(const k of present){D[k]={ops:cj[k].map(s=>s.ops),p999:cj[k].map(s=>s.p999_us),hit:cj[k].map(s=>s.hit_ratio),net:cj[k].map(s=>s.kb_s)};}
+    HAVE=present;
+    render();document.getElementById("src").innerHTML="source: <b>live memtier-combined.json</b>";
+  }catch(e){render();}
+}
+boot();
+</script>
