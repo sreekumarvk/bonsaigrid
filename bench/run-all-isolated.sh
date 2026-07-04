@@ -35,7 +35,7 @@ SERVER_MEM="${SERVER_MEM:-4g}"         # memory cap per server
 CLIENT_MEM="${CLIENT_MEM:-8g}"         # memory cap for the client
 
 # ---- workload config -------------------------------------------------------
-BACKENDS_DEFAULT="memcached redis hazelcast bonsaigrid"
+BACKENDS_DEFAULT="memcached redis hazelcast bonsaigrid bonsaigrid-mc"
 LEVELS="${LEVELS:-1,2,4,8,16,32,64,128}"
 STAGE_SECS="${STAGE_SECS:-4}"
 WARMUP_SECS="${WARMUP_SECS:-2}"
@@ -204,8 +204,8 @@ start_backend() {
         "$IMG_HAZELCAST" >/dev/null || die "hazelcast start failed"
       wait_port 127.0.0.1 "$P_HZ" 120 || die "hazelcast did not open :$P_HZ"
       wait_hz_ready bench_hazelcast 120 || warn "hazelcast 'is STARTED' not seen; proceeding"; sleep 2 ;;
-    bonsaigrid)
-      log "bonsaigrid cpuset=$SERVER_CPUS mem=$SERVER_MEM cores=$SERVER_NCPU (containerized)"
+    bonsaigrid|bonsaigrid-mc)
+      log "$t cpuset=$SERVER_CPUS mem=$SERVER_MEM cores=$SERVER_NCPU (containerized)"
       $DOCKER run -d --name bench_bonsaigrid --network host \
         --cpuset-cpus="$SERVER_CPUS" --memory="$SERVER_MEM" \
         --security-opt seccomp=unconfined \
@@ -220,7 +220,7 @@ stop_backend() { case "$1" in
     memcached) $DOCKER rm -f bench_memcached >/dev/null 2>&1 || true ;;
     redis)     $DOCKER rm -f bench_redis >/dev/null 2>&1 || true ;;
     hazelcast) $DOCKER rm -f bench_hazelcast >/dev/null 2>&1 || true ;;
-    bonsaigrid)$DOCKER rm -f bench_bonsaigrid >/dev/null 2>&1 || true ;;
+    bonsaigrid|bonsaigrid-mc) $DOCKER rm -f bench_bonsaigrid >/dev/null 2>&1 || true ;;
   esac; }
 
 # ---- run the loadgen (pinned to the CLIENT cpuset) -------------------------
@@ -256,13 +256,15 @@ run_ladder() {
 bench_one() {
   local t="$1"
   start_backend "$t"
-  # start sampling the server's cgroup for the duration of the load
+  # start sampling the server's cgroup for the duration of the load. bonsaigrid-mc
+  # reuses the bonsaigrid container (same server, memcached client).
+  local cont="bench_$t"; [ "$t" = "bonsaigrid-mc" ] && cont="bench_bonsaigrid"
   local cg samp="/tmp/bench_res_$t.txt" spid=""
-  cg="$(resolve_cgroup "bench_$t")"
+  cg="$(resolve_cgroup "$cont")"
   if [ -n "$cg" ] && [ -r "$cg/cpu.stat" ]; then
     : > "$samp"; sample_loop "$cg" "$SERVER_NCPU" "$samp" & spid=$!
   else
-    warn "could not read cgroup for bench_$t; CPU/mem not sampled"
+    warn "could not read cgroup for $cont; CPU/mem not sampled"
   fi
   log "Load generating against $t (client on cpuset $CLIENT_CPUS)"
   if run_loadgen "$t"; then info "wrote results-$t.json"; else warn "loadgen failed for $t"; fi

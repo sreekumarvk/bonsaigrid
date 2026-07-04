@@ -35,6 +35,10 @@ func NewStore(ctx context.Context, target string) (Store, error) {
 		return newRedisStore(env("REDIS_HOST", "127.0.0.1:6379")), nil
 	case "memcached":
 		return newMcStore(env("MC_HOST", "127.0.0.1:11211")), nil
+	case "bonsaigrid-mc":
+		// BonsaiGrid driven through its memcached ASCII protocol with the thin
+		// gomemcache client — the apples-to-apples number vs real Memcached.
+		return newMcStore(env("BGMC_HOST", "127.0.0.1:5701")), nil
 	default:
 		return nil, fmt.Errorf("unknown TARGET %q", target)
 	}

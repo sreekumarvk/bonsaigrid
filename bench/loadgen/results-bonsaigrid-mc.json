@@ -1,0 +1,261 @@
+{
+  "target": "bonsaigrid-mc",
+  "stages": [
+    {
+      "level": 1,
+      "set": {
+        "op": "set",
+        "count": 83703,
+        "rps": 20925.75,
+        "p50_us": 21,
+        "p90_us": 26,
+        "p99_us": 38
+      },
+      "get": {
+        "op": "get",
+        "count": 83703,
+        "rps": 20925.75,
+        "p50_us": 21,
+        "p90_us": 26,
+        "p99_us": 39
+      },
+      "errors": 0,
+      "mismatch": 0,
+      "t_start_ms": 1783145928228,
+      "t_end_ms": 1783145932229,
+      "cpu": {
+        "avg_pct": 5.6,
+        "max_pct": 13.5
+      },
+      "mem": {
+        "avg_mb": 209.1,
+        "max_mb": 231.8
+      },
+      "res_samples": 15
+    },
+    {
+      "level": 2,
+      "set": {
+        "op": "set",
+        "count": 131742,
+        "rps": 32935.5,
+        "p50_us": 26,
+        "p90_us": 31,
+        "p99_us": 142
+      },
+      "get": {
+        "op": "get",
+        "count": 131742,
+        "rps": 32935.5,
+        "p50_us": 26,
+        "p90_us": 31,
+        "p99_us": 143
+      },
+      "errors": 0,
+      "mismatch": 0,
+      "t_start_ms": 1783145932231,
+      "t_end_ms": 1783145936233,
+      "cpu": {
+        "avg_pct": 8.9,
+        "max_pct": 9.4
+      },
+      "mem": {
+        "avg_mb": 278.0,
+        "max_mb": 293.6
+      },
+      "res_samples": 15
+    },
+    {
+      "level": 4,
+      "set": {
+        "op": "set",
+        "count": 240291,
+        "rps": 60072.75,
+        "p50_us": 28,
+        "p90_us": 42,
+        "p99_us": 137
+      },
+      "get": {
+        "op": "get",
+        "count": 240291,
+        "rps": 60072.75,
+        "p50_us": 28,
+        "p90_us": 42,
+        "p99_us": 136
+      },
+      "errors": 0,
+      "mismatch": 0,
+      "t_start_ms": 1783145936238,
+      "t_end_ms": 1783145940241,
+      "cpu": {
+        "avg_pct": 13.7,
+        "max_pct": 14.7
+      },
+      "mem": {
+        "avg_mb": 326.8,
+        "max_mb": 386.2
+      },
+      "res_samples": 15
+    },
+    {
+      "level": 8,
+      "set": {
+        "op": "set",
+        "count": 466849,
+        "rps": 116712.25,
+        "p50_us": 29,
+        "p90_us": 43,
+        "p99_us": 70
+      },
+      "get": {
+        "op": "get",
+        "count": 466849,
+        "rps": 116712.25,
+        "p50_us": 30,
+        "p90_us": 43,
+        "p99_us": 70
+      },
+      "errors": 0,
+      "mismatch": 0,
+      "t_start_ms": 1783145940259,
+      "t_end_ms": 1783145944267,
+      "cpu": {
+        "avg_pct": 27.5,
+        "max_pct": 28.9
+      },
+      "mem": {
+        "avg_mb": 480.2,
+        "max_mb": 581.4
+      },
+      "res_samples": 15
+    },
+    {
+      "level": 16,
+      "set": {
+        "op": "set",
+        "count": 788411,
+        "rps": 197102.75,
+        "p50_us": 33,
+        "p90_us": 55,
+        "p99_us": 95
+      },
+      "get": {
+        "op": "get",
+        "count": 788411,
+        "rps": 197102.75,
+        "p50_us": 33,
+        "p90_us": 55,
+        "p99_us": 95
+      },
+      "errors": 0,
+      "mismatch": 0,
+      "t_start_ms": 1783145944291,
+      "t_end_ms": 1783145948302,
+      "cpu": {
+        "avg_pct": 47.9,
+        "max_pct": 51.3
+      },
+      "mem": {
+        "avg_mb": 724.4,
+        "max_mb": 901.9
+      },
+      "res_samples": 16
+    },
+    {
+      "level": 32,
+      "set": {
+        "op": "set",
+        "count": 1289791,
+        "rps": 322447.75,
+        "p50_us": 39,
+        "p90_us": 66,
+        "p99_us": 175
+      },
+      "get": {
+        "op": "get",
+        "count": 1289791,
+        "rps": 322447.75,
+        "p50_us": 39,
+        "p90_us": 67,
+        "p99_us": 193
+      },
+      "errors": 0,
+      "mismatch": 0,
+      "t_start_ms": 1783145948358,
+      "t_end_ms": 1783145952377,
+      "cpu": {
+        "avg_pct": 70.4,
+        "max_pct": 74.2
+      },
+      "mem": {
+        "avg_mb": 1110.8,
+        "max_mb": 1215.3
+      },
+      "res_samples": 15
+    },
+    {
+      "level": 64,
+      "set": {
+        "op": "set",
+        "count": 1403964,
+        "rps": 350991,
+        "p50_us": 64,
+        "p90_us": 126,
+        "p99_us": 484
+      },
+      "get": {
+        "op": "get",
+        "count": 1403964,
+        "rps": 350991,
+        "p50_us": 65,
+        "p90_us": 128,
+        "p99_us": 661
+      },
+      "errors": 0,
+      "mismatch": 0,
+      "t_start_ms": 1783145952453,
+      "t_end_ms": 1783145956471,
+      "cpu": {
+        "avg_pct": 73.9,
+        "max_pct": 82.2
+      },
+      "mem": {
+        "avg_mb": 1690.8,
+        "max_mb": 1909.4
+      },
+      "res_samples": 16
+    },
+    {
+      "level": 128,
+      "set": {
+        "op": "set",
+        "count": 1432574,
+        "rps": 358143.5,
+        "p50_us": 113,
+        "p90_us": 296,
+        "p99_us": 1092
+      },
+      "get": {
+        "op": "get",
+        "count": 1432574,
+        "rps": 358143.5,
+        "p50_us": 115,
+        "p90_us": 304,
+        "p99_us": 1382
+      },
+      "errors": 0,
+      "mismatch": 0,
+      "t_start_ms": 1783145956570,
+      "t_end_ms": 1783145960585,
+      "cpu": {
+        "avg_pct": 74.7,
+        "max_pct": 84.3
+      },
+      "mem": {
+        "avg_mb": 2146.2,
+        "max_mb": 2612.9
+      },
+      "res_samples": 15
+    }
+  ]
+}

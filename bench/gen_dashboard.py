@@ -20,7 +20,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 HTML = os.path.join(HERE, "deploy", "dashboard.html")
 START = "// __BENCH_DATA_START__"
 END = "// __BENCH_DATA_END__"
-ORDER = [("bonsaigrid", "BG"), ("hazelcast", "HZ"), ("redis", "RD"), ("memcached", "MC")]
+ORDER = [("bonsaigrid", "BG"), ("hazelcast", "HZ"), ("redis", "RD"), ("memcached", "MC"), ("bonsaigrid-mc", "BM")]
 
 
 def arr(stages, pick):

@@ -4,7 +4,7 @@
     --surface-1:#fcfcfb; --plane:#f9f9f7;
     --ink:#0b0b0b; --ink-2:#52514e; --muted:#898781;
     --grid:#e1e0d9; --axis:#c3c2b7; --border:rgba(11,11,11,.10);
-    --bonsai:#2a78d6; --hazel:#008300; --redis:#e87ba4; --memc:#eb6834;
+    --bonsai:#2a78d6; --hazel:#008300; --redis:#e87ba4; --memc:#eb6834; --bgmc:#eda100;
     --good:#006300;
     --shadow:0 1px 2px rgba(11,11,11,.04),0 6px 20px rgba(11,11,11,.05);
     --font:system-ui,-apple-system,"Segoe UI",sans-serif;
@@ -14,7 +14,7 @@
       --surface-1:#1a1a19; --plane:#0d0d0d;
       --ink:#fff; --ink-2:#c3c2b7; --muted:#898781;
       --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,.10);
-      --bonsai:#3987e5; --hazel:#008300; --redis:#d55181; --memc:#d95926;
+      --bonsai:#3987e5; --hazel:#008300; --redis:#d55181; --memc:#d95926; --bgmc:#c98500;
       --good:#0ca30c;
       --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 28px rgba(0,0,0,.45);
     }
@@ -191,10 +191,14 @@
     <p><b>Verified every run.</b> The loadgen compares every GET to the value just written; the
       <b>Correctness</b> tile must read 0 mismatches. This catches a server that acks writes without
       storing them (throughput and latency alone can't — a miss is cheap).</p>
-    <p><b>Same-client vs cross-client.</b> BonsaiGrid and Hazelcast are driven by the <b>same</b>
-      official Hazelcast client, so that pair is directly comparable; Redis and Memcached use their
-      thin native clients, so cross-backend numbers are directional. The dashed line is BonsaiGrid's
-      server driven by a thin raw-protocol client — its ceiling with the client tax removed.</p>
+    <p><b>Apples-to-apples: the memcached-client line.</b> BonsaiGrid now speaks the <b>memcached
+      protocol</b>, so the same thin <code>gomemcache</code> client that drives real Memcached drives
+      BonsaiGrid too (the <b>BG · memcached</b> series). That is the honest server-vs-server number —
+      it lands level with / ahead of Memcached, confirming the gap on the Hazelcast-client line is the
+      heavyweight client, not the store. BonsaiGrid and Hazelcast share that Hazelcast client, so that
+      pair is directly comparable; the dashed line is a thin raw-protocol client — the same server's
+      ceiling. Every GET is value-verified, so the memcached round-trip's <b>0 mismatches</b> is also
+      a protocol-correctness check.</p>
   </div>
 
   <div class="sat-title">Server saturation — sampled live from each server's cgroup</div>
@@ -240,7 +244,7 @@
 let LEVELS = [1,2,4,8,16,32,64,128];
 // which backends to draw (all present in the embedded fallback; narrowed to
 // whatever combined.json actually contains once it loads)
-const HAVE = {bonsaigrid:true, hazelcast:true, redis:true, memcached:true};
+const HAVE = {bonsaigrid:true, hazelcast:true, redis:true, memcached:true, "bonsaigrid-mc":true};
 let NATIVE = true;    // show the native-driver reference line
 let HAVE_RES = true;  // CPU/mem sampled (present in the embedded snapshot + isolated runs)
 
@@ -248,35 +252,41 @@ let HAVE_RES = true;  // CPU/mem sampled (present in the embedded snapshot + iso
 // Embedded snapshot of the latest run. When served over http the page also reloads
 // combined.json live. Regenerate: bench/gen_dashboard.py bench/loadgen/combined.json
 const BG = { // BG
-  rps:[2856,7348,21842,64684,160463,254511,276799,276871],
-  set:{p50:[189,97,57,46,40,49,79,118], p90:[303,260,207,86,65,84,189,506], p99:[483,412,326,255,163,200,624,1258]},
-  get:{p50:[181,88,55,44,39,48,78,118], p90:[283,259,204,82,64,83,189,507], p99:[483,404,324,254,162,200,622,1265]},
-  cpu:[6.1,7.2,12.7,22.7,42.3,59.4,63.6,62.2], mem:[147.9,183.4,188.5,269.7,453.4,763.5,1161.4,1675.1],
+  rps:[2745,7001,19332,55051,139574,226033,254814,267693],
+  set:{p50:[190,106,62,48,42,49,75,113], p90:[311,266,217,100,70,87,197,537], p99:[576,432,358,386,264,525,1198,1547]},
+  get:{p50:[188,98,60,47,40,48,74,112], p90:[291,265,214,94,68,86,197,537], p99:[584,422,349,374,271,523,1195,1541]},
+  cpu:[6.2,7.3,12.6,21.2,39.5,55.6,60.7,62.2], mem:[151.9,151.5,181.4,246.6,385.6,696.3,1059.8,1455.2],
 };
-let BG_NATIVE_RPS = [21159,48133,89672,162312,265763,403259,457741,472835];
+let BG_NATIVE_RPS = [20507,44583,94908,175663,260038,384293,445775,470465];
 const HZ = { // HZ
-  rps:[2047,4714,11225,45266,111576,126478,128587,144591],
-  set:{p50:[229,207,178,64,60,99,190,307], p90:[407,353,323,187,107,233,496,929], p99:[616,502,453,334,237,532,918,1585]},
-  get:{p50:[219,196,171,61,58,94,183,294], p90:[404,347,322,185,101,207,473,917], p99:[594,486,448,334,223,462,886,1564]},
-  cpu:[8.9,8.9,16.2,31.6,59.5,66.6,73.5,78.0], mem:[665.9,664.0,700.3,832.4,1173.5,1567.3,1888.4,2231.5],
+  rps:[1901,4501,13110,44793,111151,120003,122498,142259],
+  set:{p50:[252,215,133,65,60,106,201,315], p90:[426,369,297,188,107,239,506,954], p99:[642,525,422,336,243,569,962,1629]},
+  get:{p50:[230,205,103,62,58,101,194,300], p90:[417,366,295,185,100,215,484,938], p99:[633,524,416,336,216,501,937,1611]},
+  cpu:[9.0,9.2,17.4,33.1,59.3,67.2,73.3,77.1], mem:[638.3,636.2,685.8,994.1,1180.7,1530.8,1868.8,2279.7],
 };
 const RD = { // RD
-  rps:[17345,44742,43272,58475,66113,69776,84637,84140],
-  set:{p50:[23,18,34,53,98,213,365,739], p90:[34,31,69,102,219,359,511,908], p99:[174,63,208,328,414,557,754,1532]},
-  get:{p50:[21,18,34,53,97,209,366,740], p90:[32,30,66,97,215,354,507,900], p99:[157,55,201,322,416,562,749,1523]},
-  cpu:[5.5,8.6,8.7,10.1,10.6,11.7,12.2,12.3], mem:[52.0,84.2,134.3,191.7,256.2,353.1,419.7,504.1],
+  rps:[16120,44557,46426,56197,65566,68582,83652,85782],
+  set:{p50:[27,18,33,55,100,217,367,721], p90:[34,31,63,112,216,360,516,892], p99:[166,68,176,339,405,559,760,1495]},
+  get:{p50:[25,18,33,54,99,215,368,722], p90:[32,30,61,105,212,356,512,883], p99:[131,61,171,336,408,556,764,1492]},
+  cpu:[6.0,8.5,8.9,10.0,10.7,11.8,12.2,12.2], mem:[52.2,84.6,135.5,193.8,255.1,352.4,417.1,502.2],
 };
 const MC = { // MC
-  rps:[17732,34684,54102,119113,218557,350569,378214,378360],
-  set:{p50:[25,23,30,29,31,32,57,108], p90:[30,29,48,42,53,63,132,314], p99:[161,174,178,88,106,371,630,1051]},
-  get:{p50:[24,24,29,29,30,32,57,108], p90:[29,29,47,42,52,61,130,312], p99:[136,162,171,71,91,284,690,1332]},
-  cpu:[6.1,10.0,15.0,29.9,53.2,71.0,73.0,71.6], mem:[145.7,177.1,228.9,330.6,540.6,871.1,1322.2,1746.1],
+  rps:[18399,34197,56260,116562,206794,336621,344888,354230],
+  set:{p50:[23,23,29,30,32,33,60,112], p90:[30,29,46,44,56,66,148,348], p99:[101,183,163,91,120,388,694,1153]},
+  get:{p50:[23,24,29,30,31,33,59,111], p90:[29,29,45,43,55,64,145,345], p99:[80,172,156,75,101,325,782,1416]},
+  cpu:[6.4,9.7,15.3,30.6,53.1,69.2,71.3,69.2], mem:[142.3,173.3,226.7,327.6,530.1,841.7,1266.9,1660.3],
+};
+const BM = { // BM
+  rps:[20926,32936,60073,116712,197103,322448,350991,358144],
+  set:{p50:[21,26,28,29,33,39,64,113], p90:[26,31,42,43,55,66,126,296], p99:[38,142,137,70,95,175,484,1092]},
+  get:{p50:[21,26,28,30,33,39,65,115], p90:[26,31,42,43,55,67,128,304], p99:[39,143,136,70,95,193,661,1382]},
+  cpu:[5.6,8.9,13.7,27.5,47.9,70.4,73.9,74.7], mem:[209.1,278.0,326.8,480.2,724.4,1110.8,1690.8,2146.2],
 };
 let TOTAL_MISMATCH = 0;
-const BAKED_PRESENT = ["bonsaigrid", "hazelcast", "redis", "memcached"];
+const BAKED_PRESENT = ["bonsaigrid", "hazelcast", "redis", "memcached", "bonsaigrid-mc"];
 // __BENCH_DATA_END__
 
-const C={bonsai:"var(--bonsai)",hazel:"var(--hazel)",redis:"var(--redis)",memc:"var(--memc)"};
+const C={bonsai:"var(--bonsai)",hazel:"var(--hazel)",redis:"var(--redis)",memc:"var(--memc)",bgmc:"var(--bgmc)"};
 
 const fmtInt = n => n>=1000 ? (n/1000).toFixed(n>=10000?0:1).replace(/\.0$/,"")+"k" : String(Math.round(n));
 const fmtUs  = n => n>=1000 ? (n/1000).toFixed(1)+" ms" : Math.round(n)+" µs";
@@ -286,7 +296,9 @@ function niceMax(v){ if(v<=0)return 1; const p=Math.pow(10,Math.floor(Math.log10
 // series descriptors ---------------------------------------------------------
 function tpSeries(){
   const s=[];
-  if(HAVE.bonsaigrid) s.push({name:"BonsaiGrid (official client)", short:"BonsaiGrid", color:C.bonsai, vals:BG.rps});
+  if(HAVE.bonsaigrid) s.push({name:"BonsaiGrid (Hazelcast client)", short:"BonsaiGrid", color:C.bonsai, vals:BG.rps});
+  if(HAVE["bonsaigrid-mc"] && BM.rps.length===LEVELS.length)
+    s.push({name:"BonsaiGrid (memcached client)", short:"BG · memcached", color:C.bgmc, vals:BM.rps});
   if(HAVE.memcached)  s.push({name:"Memcached", short:"Memcached", color:C.memc, vals:MC.rps});
   if(HAVE.hazelcast)  s.push({name:"Hazelcast", short:"Hazelcast", color:C.hazel, vals:HZ.rps});
   if(HAVE.redis)      s.push({name:"Redis", short:"Redis", color:C.redis, vals:RD.rps});
@@ -297,6 +309,8 @@ function tpSeries(){
 function latSeries(op,pct){
   const s=[];
   if(HAVE.bonsaigrid) s.push({name:"BonsaiGrid", short:"BonsaiGrid", color:C.bonsai, vals:BG[op][pct]});
+  if(HAVE["bonsaigrid-mc"] && BM[op][pct].length===LEVELS.length)
+    s.push({name:"BonsaiGrid (memcached)", short:"BG · memcached", color:C.bgmc, vals:BM[op][pct]});
   if(HAVE.hazelcast)  s.push({name:"Hazelcast", short:"Hazelcast", color:C.hazel, vals:HZ[op][pct]});
   if(HAVE.redis)      s.push({name:"Redis", short:"Redis", color:C.redis, vals:RD[op][pct]});
   if(HAVE.memcached)  s.push({name:"Memcached", short:"Memcached", color:C.memc, vals:MC[op][pct]});
@@ -305,6 +319,7 @@ function latSeries(op,pct){
 function resSeries(metric){ // 'cpu' | 'mem'
   const s=[];
   if(HAVE.bonsaigrid) s.push({name:"BonsaiGrid", short:"BonsaiGrid", color:C.bonsai, vals:BG[metric]});
+  if(HAVE["bonsaigrid-mc"]) s.push({name:"BonsaiGrid (memcached)", short:"BG · memcached", color:C.bgmc, vals:BM[metric]});
   if(HAVE.memcached)  s.push({name:"Memcached", short:"Memcached", color:C.memc, vals:MC[metric]});
   if(HAVE.hazelcast)  s.push({name:"Hazelcast", short:"Hazelcast", color:C.hazel, vals:HZ[metric]});
   if(HAVE.redis)      s.push({name:"Redis", short:"Redis", color:C.redis, vals:RD[metric]});
@@ -390,7 +405,7 @@ function table(elId, series, fmt){
 }
 
 // headline/tiles computed from the loaded data — never hand-written
-const NAMES={bonsaigrid:"BonsaiGrid",hazelcast:"Hazelcast",redis:"Redis",memcached:"Memcached"};
+const NAMES={bonsaigrid:"BonsaiGrid",hazelcast:"Hazelcast",redis:"Redis",memcached:"Memcached","bonsaigrid-mc":"BonsaiGrid (memcached)"};
 function setText(id,t){const e=document.getElementById(id);if(e)e.textContent=t;}
 function renderSummary(){
   const peak=k=>{const a=DATASET[k].rps;return a[a.length-1];};
@@ -442,7 +457,7 @@ function render(){
 ["tp","set","get","cpu","mem"].forEach(id=>{const t=document.createElement("div");t.className="tip";t.id="tip-"+id;document.getElementById("c-"+id).appendChild(t);});
 
 // ---- live data: fetch combined.json, fall back to the embedded snapshot -----
-const DATASET={bonsaigrid:BG, hazelcast:HZ, redis:RD, memcached:MC};
+const DATASET={bonsaigrid:BG, hazelcast:HZ, redis:RD, memcached:MC, "bonsaigrid-mc":BM};
 function fromStages(stages){
   const col=(op,p)=>stages.map(s=>s[op][p]);
   return {rps:stages.map(s=>s.set.rps),
