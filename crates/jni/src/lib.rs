@@ -103,6 +103,8 @@ pub extern "system" fn Java_com_bonsaigrid_BonsaiGrid_startServer(_env: JNIEnv, 
                 conns.borrow_mut().insert(conn_id, principal);
             },
             move |_path| (404, "Not Found", "Not Found".to_string()), // mock http route for now
+            |_cmd: &[u8], _out: &mut Vec<u8>| false, // memcached protocol not served on the embedded listener
+            |_cmd: &[u8], _out: &mut Vec<u8>| false, // RESP protocol not served on the embedded listener
             move |conn_id, out| {
                 for ev in eb.drain(conn_id) {
                     out.extend_from_slice(&ev);
