@@ -65,7 +65,9 @@ fn permissive_mode_serves_a_plaintext_client() {
     std::thread::spawn(move || {
         let _ = server::reactor::run(
             vec![listener],
-            move |_msg, _conn_id, out: &mut Vec<u8>| out.extend_from_slice(MARKER),
+            move |_msg, _conn_id, _pc: Option<&[u8]>, out: &mut Vec<u8>| {
+                out.extend_from_slice(MARKER)
+            },
             |_p| (404, "text/plain", "no".to_string()),
             |_cmd: &[u8], _out: &mut Vec<u8>| false,
             |_cmd: &[u8], _out: &mut Vec<u8>| false,
@@ -119,7 +121,7 @@ fn tls_client_round_trips_a_request_through_the_reactor() {
     std::thread::spawn(move || {
         let _ = server::reactor::run(
             vec![listener],
-            move |_msg, _conn_id, out: &mut Vec<u8>| {
+            move |_msg, _conn_id, _pc: Option<&[u8]>, out: &mut Vec<u8>| {
                 // Any dispatched binary request gets the marker response.
                 out.extend_from_slice(MARKER);
             },

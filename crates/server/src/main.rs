@@ -326,7 +326,7 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
     let mc_cas = Arc::new(std::sync::atomic::AtomicU64::new(0));
     server::reactor::run(
         vec![listener],
-        move |msg, conn_id, out| {
+        move |msg, conn_id, peer_cert, out| {
             md.inc_request();
             let cluster = cl_d.borrow();
             let mut principal = conns
@@ -347,6 +347,7 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
                 &txn_d,
                 &jet_d,
                 &mut principal,
+                peer_cert,
                 out,
             );
             conns.borrow_mut().insert(conn_id, principal);
@@ -521,7 +522,7 @@ fn run_single_node() -> std::io::Result<()> {
             let resp_store = store.clone();
             let _ = server::reactor::run(
                 vec![main_listener, tpc_listener],
-                move |msg, conn_id, out| {
+                move |msg, conn_id, peer_cert, out| {
                     md.inc_request();
                     let mut principal = conns
                         .borrow()
@@ -541,6 +542,7 @@ fn run_single_node() -> std::io::Result<()> {
                         &txn_d,
                         &jet_d,
                         &mut principal,
+                        peer_cert,
                         out,
                     );
                     conns.borrow_mut().insert(conn_id, principal);

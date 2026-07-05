@@ -165,6 +165,17 @@ impl Handshake {
         })
     }
 
+    /// The peer's leaf certificate (DER), available once the handshake has
+    /// completed. `None` if the peer presented no certificate (no mTLS). Capture
+    /// this before handing off to kTLS (which drops the rustls session).
+    pub fn peer_cert_der(&self) -> Option<Vec<u8>> {
+        let certs = match &self.side {
+            Side::Server(c) => c.peer_certificates(),
+            Side::Client(c) => c.peer_certificates(),
+        }?;
+        certs.first().map(|c| c.as_ref().to_vec())
+    }
+
     /// Feed newly-received bytes. Outgoing TLS bytes (handshake/alerts) are
     /// appended to `send`; any decrypted application plaintext is appended to
     /// `plain`. Returns `true` once the handshake is complete AND all buffered

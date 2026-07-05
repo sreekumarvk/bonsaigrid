@@ -78,7 +78,7 @@ pub extern "system" fn Java_com_bonsaigrid_BonsaiGrid_startServer(_env: JNIEnv, 
         let anon = cfg.security.anonymous();
         let _ = server::reactor::run(
             vec![main_listener, tpc_listener],
-            move |msg, conn_id, out| {
+            move |msg, conn_id, _peer_cert, out| {
                 md.inc_request();
                 let mut principal = conns
                     .borrow()
@@ -98,6 +98,7 @@ pub extern "system" fn Java_com_bonsaigrid_BonsaiGrid_startServer(_env: JNIEnv, 
                     &txn_service,
                     &jet_service,
                     &mut principal,
+                    None, // embedded listener: no TLS, so no client cert
                     out,
                 );
                 conns.borrow_mut().insert(conn_id, principal);

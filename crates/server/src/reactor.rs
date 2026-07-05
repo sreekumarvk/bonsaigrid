@@ -65,6 +65,10 @@ struct Conn {
     open: bool,
     frag: Reassembler,
     tls: ConnTls,
+    /// The mTLS client's leaf certificate (DER), captured at handshake completion;
+    /// `None` for plaintext or one-way TLS. Lets `ClientAuthentication` resolve the
+    /// cert identity to a principal.
+    peer_cert: Option<Vec<u8>>,
 }
 
 impl Conn {
@@ -86,6 +90,7 @@ impl Conn {
             open: true,
             frag: Reassembler::new(),
             tls,
+            peer_cert: None,
         }
     }
 }
@@ -121,7 +126,7 @@ fn send_ud(id: usize) -> u64 {
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     listeners: Vec<std::net::TcpListener>,
-    mut dispatch: impl FnMut(&[u8], u64, &mut Vec<u8>),
+    mut dispatch: impl FnMut(&[u8], u64, Option<&[u8]>, &mut Vec<u8>),
     http: impl Fn(&str) -> (u16, &'static str, String),
     mut memcache: impl FnMut(&[u8], &mut Vec<u8>) -> bool,
     mut resp: impl FnMut(&[u8], &mut Vec<u8>) -> bool,
@@ -312,7 +317,7 @@ fn on_recv(
     id: usize,
     res: i32,
     pending: &mut Vec<io_uring::squeue::Entry>,
-    dispatch: &mut impl FnMut(&[u8], u64, &mut Vec<u8>),
+    dispatch: &mut impl FnMut(&[u8], u64, Option<&[u8]>, &mut Vec<u8>),
     http: &impl Fn(&str) -> (u16, &'static str, String),
     memcache: &mut impl FnMut(&[u8], &mut Vec<u8>) -> bool,
     resp: &mut impl FnMut(&[u8], &mut Vec<u8>) -> bool,
@@ -380,17 +385,26 @@ fn on_recv(
                 // unfragmented message (the common, fast path).
                 if read_u16_le(&c.acc, 4) & UNFRAGMENTED == UNFRAGMENTED {
                     let Conn {
-                        acc, out, conn_id, ..
+                        acc,
+                        out,
+                        conn_id,
+                        peer_cert,
+                        ..
                     } = c;
-                    dispatch(&acc[..len], *conn_id, out);
+                    dispatch(&acc[..len], *conn_id, peer_cert.as_deref(), out);
                     acc.drain(0..len);
                 } else {
                     // A fragment: reassemble; dispatch once the message completes.
                     let frag: Vec<u8> = c.acc[..len].to_vec();
                     c.acc.drain(0..len);
                     if let Some(assembled) = c.frag.push(&frag) {
-                        let Conn { out, conn_id, .. } = c;
-                        dispatch(&assembled, *conn_id, out);
+                        let Conn {
+                            out,
+                            conn_id,
+                            peer_cert,
+                            ..
+                        } = c;
+                        dispatch(&assembled, *conn_id, peer_cert.as_deref(), out);
                     }
                 }
             }
@@ -576,6 +590,8 @@ fn pump_handshake(
                     c.acc.extend_from_slice(&plain);
                 }
                 if ready {
+                    // Capture the mTLS client cert before kTLS drops the session.
+                    c.peer_cert = hs.peer_cert_der();
                     match hs.into_ktls(c.fd) {
                         Ok(()) => c.tls = ConnTls::Ktls,
                         Err(_) => c.open = false,

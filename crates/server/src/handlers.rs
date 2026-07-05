@@ -103,6 +103,7 @@ fn try_fast_get(
 fn maybe_rebind_principal(
     msg: &[u8],
     cfg: &Cfg,
+    peer_cert: Option<&[u8]>,
     principal: &mut std::sync::Arc<security::Principal>,
 ) {
     let Some((c0, _)) = frame_at(msg, 0) else {
@@ -114,10 +115,14 @@ fn maybe_rebind_principal(
     if let Some((frames, _)) = read_message(msg) {
         let req = codecs::auth::decode_request(&frames);
         if req.cluster_name == cfg.cluster_name {
+            // Password credentials take precedence; otherwise fall back to the mTLS
+            // client certificate identity (its subject CN resolved to a principal).
             if let Some(p) = cfg
                 .security
                 .authenticate(req.username.as_deref(), req.password.as_deref())
             {
+                *principal = p;
+            } else if let Some(p) = peer_cert.and_then(|c| cfg.security.authenticate_cert(c)) {
                 *principal = p;
             }
         }
@@ -191,11 +196,12 @@ pub fn dispatch_bytes(
     txn_service: &crate::txn::TransactionService,
     jet_service: &jet::executor::JetService,
     principal: &mut std::sync::Arc<security::Principal>,
+    peer_cert: Option<&[u8]>,
     out: &mut Vec<u8>,
 ) {
     // A successful ClientAuthentication rebinds this connection's principal; all
     // subsequent ops on the connection authorize against it.
-    maybe_rebind_principal(msg, cfg, principal);
+    maybe_rebind_principal(msg, cfg, peer_cert, principal);
     if try_fast_get(msg, store, principal, out) {
         return;
     }
