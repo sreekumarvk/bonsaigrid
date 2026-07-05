@@ -34,11 +34,11 @@ has **shipped** (with commits/crates as evidence) versus what **remains**.
 | 3 | **Persistence / durable log** (enabler) | ✅ **shipped** (sync-ack enhancement remains) | L | store internals |
 | 2 | **CP Subsystem** (Raft) | 🟢 **substantially shipped** (5 primitives + sessions) | XL | member transport; persistence spine |
 | 5 | **Streaming / SQL depth** | 🟢 **substantially shipped** (distributed SQL + windowing) | L | — (independent) |
-| 4 | **Geo-replication / WAN** | ❌ **not started** | L–XL | persistence spine (3) — now available |
+| 4 | **Geo-replication / WAN** | ✅ **shipped** (active-active, IMap + structures) | L–XL | persistence spine (3) |
 
 **Sequence achieved:** Security → Persistence spine → CP Subsystem → Streaming/SQL
-depth. **Geo/WAN (4) is the one remaining major gap** — and it is now well-primed:
-the persistence spine and the skew-tolerant HLC merge it depends on both exist.
+depth → Geo/WAN. **All five major platform gaps are now shipped or substantially
+shipped** — the last untouched box (Disaster Recovery & Geo-Replication) is closed.
 
 ---
 
@@ -146,25 +146,40 @@ serialized Java callables those APIs carry.
 
 ---
 
-## Gap 4 — Geo-replication / WAN ❌ NOT STARTED
+## Gap 4 — Geo-replication / WAN ✅ SHIPPED
 
-**Scope:** asynchronous cross-cluster replication to a remote datacenter/region —
-Hazelcast's WAN Replication (the platform-diagram "Disaster Recovery and
-Geo-Replication" box). The **last untouched major gap.**
+**Spec:** `docs/superpowers/specs/2026-07-02-geo-wan-replication-design.md`.
+**Plan:** `docs/superpowers/plans/2026-07-02-geo-wan-replication.md`.
+**Memory:** `bonsaigrid-geo-wan`. **Crate:** `crates/wan`.
 
-**Now unblocked:** WAN needs a durable, replayable outbound buffer and a
-skew-tolerant merge on the far side — both dependencies (the persistence spine and
-the HLC/LatestUpdate merge) now exist.
+Asynchronous **active-active** cross-cluster replication — Hazelcast's WAN Replication
+(the platform-diagram "Disaster Recovery and Geo-Replication" box). The last untouched
+major box is now closed.
 
-**First deliverables:**
-- WAN publisher: capture committed mutations → durable outbound queue (reuse the
-  Gap-3 WAL discipline) → batch → ship to the remote cluster (async,
-  at-least-once).
-- WAN consumer: apply with the existing HLC/LatestUpdate merge for active-active.
-- Config: target clusters, batching, backpressure, conflict policy.
+**Done (Phases A–D):**
+- **Capture (`wan_sink`) + `apply_wan` loop prevention** — a second store sink mirrors
+  local IMap mutations after the in-memory apply; inbound WAN records apply via
+  `apply_wan` (HLC `put_merge`, persisted but never re-published), so active-active
+  does not echo. Lock-free no-op when WAN is off (zero-alloc hot path preserved).
+- **Durable outbound `WanQueue`** — framed, crc32/torn-tail-safe, fsync'd, with a
+  durable committed cursor; recovers unacked records on reopen; byte-bound gate.
+- **Convergence** — concurrent writes converge via the existing HLC/LatestUpdate
+  merge; at-least-once delivery dedups for free under the stamp. Proven by a
+  deterministic two-cluster sim (one-way, active-active, loop-free, outage-replay).
+- **Live transport** — a per-cluster WAN thread (dedicated blocking TCP, off the hot
+  path): inbound listener applies+acks batches; outbound loop drains the capture ring
+  into the queue (throw / drop-oldest backpressure) and ships to each target, acking
+  only what all targets confirm. Verified by a live two-cluster loopback-TCP test.
+- **Structures (Phase D)** — extends capture to every persistence-covered structure
+  (queue/list/set/multimap/ringbuffer/pncounter) via a `WanOp::Aux(kind)` record and
+  the store's `emit_aux`; applied through `install_aux` (loop-free).
+- **Config** — `BONSAI_WAN_TARGETS` / `_PORT` / `_BATCH` / `_QUEUE_MB` /
+  `_BACKPRESSURE` / `_DIR`, wired via `setup_wan` at both server run paths.
 
-**Guardrail note:** entirely off the hot path (async). Main design work is
-durability + backpressure + conflict resolution (HLC merge already helps).
+**Remaining (follow-ups):** WAN over TLS (reuse the member mTLS bundle); initial
+full-state bootstrap (v1 replicates from enable-forward); delta/compression + event
+filtering; dynamic WAN topology/discovery; merge policies beyond HLC LatestUpdate;
+per-target ack cursors (v1 uses one cursor = all-targets-confirmed).
 
 ---
 
