@@ -110,3 +110,25 @@ fn outage_then_replay() {
     }
     assert_eq!(a.queue.acked(), 5);
 }
+
+#[test]
+fn replicates_non_map_structures() {
+    // Phase D: a Queue offer on A is captured (aux state) and replayed on B.
+    let mut a = Cluster::new(tmp("a4"));
+    let b = Cluster::new(tmp("b4"));
+    a.store.queue_offer("q", b"one".to_vec());
+    a.store.queue_offer("q", b"two".to_vec());
+    ship(&mut a, &b, true);
+    assert_eq!(
+        b.store.queue_size("q"),
+        2,
+        "queue state replicated over WAN"
+    );
+    // Applying an aux state via install_aux did not re-capture on B (no loop).
+    let mut b = b;
+    b.pump();
+    assert!(
+        b.queue.unacked().is_empty(),
+        "aux apply was not re-published"
+    );
+}

@@ -36,7 +36,14 @@ impl WalSink for WanPublisher {
             value: Vec::new(),
         });
     }
-    fn aux_state(&self, _kind: u8, _name: &str, _state: &[u8]) {
-        // Non-map structures are Phase D.
+    fn aux_state(&self, kind: u8, name: &str, state: &[u8]) {
+        let _ = self.tx.push(WanRecord {
+            op: WanOp::Aux(kind),
+            stamp: 0,
+            ttl_ms: 0,
+            map: name.to_string(),
+            key: Vec::new(),
+            value: state.to_vec(),
+        });
     }
 }

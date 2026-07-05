@@ -6,6 +6,10 @@
 pub enum WanOp {
     Put,
     Remove,
+    /// A full non-map structure state (`kind` = one of the store's `AUX_*`
+    /// constants). For an aux record `map` carries the structure name, `value`
+    /// the serialized state, and `key` is empty.
+    Aux(u8),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,11 +40,15 @@ fn get_blob(b: &[u8], p: usize) -> Option<(&[u8], usize)> {
 }
 
 pub fn encode(rec: &WanRecord) -> Vec<u8> {
-    let mut body = Vec::with_capacity(17 + rec.map.len() + rec.key.len() + rec.value.len());
-    body.push(match rec.op {
-        WanOp::Put => 1,
-        WanOp::Remove => 2,
-    });
+    let mut body = Vec::with_capacity(18 + rec.map.len() + rec.key.len() + rec.value.len());
+    match rec.op {
+        WanOp::Put => body.push(1),
+        WanOp::Remove => body.push(2),
+        WanOp::Aux(kind) => {
+            body.push(3);
+            body.push(kind);
+        }
+    }
     body.extend_from_slice(&rec.stamp.to_le_bytes());
     body.extend_from_slice(&rec.ttl_ms.to_le_bytes());
     put_blob(&mut body, rec.map.as_bytes());
@@ -71,14 +79,22 @@ pub fn decode(bytes: &[u8]) -> Decoded {
     if crc32fast::hash(body) != crc {
         return Decoded::Torn;
     }
-    let op = match body[0] {
-        1 => WanOp::Put,
-        2 => WanOp::Remove,
+    // op byte, then (aux only) a kind byte; `base` is where the fixed header starts.
+    let (op, base) = match body.first() {
+        Some(1) => (WanOp::Put, 1),
+        Some(2) => (WanOp::Remove, 1),
+        Some(3) => match body.get(1) {
+            Some(&kind) => (WanOp::Aux(kind), 2),
+            None => return Decoded::Torn,
+        },
         _ => return Decoded::Torn,
     };
-    let stamp = u64::from_le_bytes(body[1..9].try_into().unwrap());
-    let ttl_ms = u64::from_le_bytes(body[9..17].try_into().unwrap());
-    let Some((map, o1)) = get_blob(body, 17) else {
+    if body.len() < base + 16 {
+        return Decoded::Torn;
+    }
+    let stamp = u64::from_le_bytes(body[base..base + 8].try_into().unwrap());
+    let ttl_ms = u64::from_le_bytes(body[base + 8..base + 16].try_into().unwrap());
+    let Some((map, o1)) = get_blob(body, base + 16) else {
         return Decoded::Torn;
     };
     let Some((key, o2)) = get_blob(body, o1) else {
@@ -124,6 +140,27 @@ mod tests {
                 assert_eq!(consumed, bytes.len());
             }
             _ => panic!("expected a decoded record"),
+        }
+    }
+
+    #[test]
+    fn aux_roundtrips_with_kind() {
+        let rec = WanRecord {
+            op: WanOp::Aux(7),
+            stamp: 0,
+            ttl_ms: 0,
+            map: "myqueue".into(),
+            key: Vec::new(),
+            value: vec![1, 2, 3, 4],
+        };
+        let bytes = encode(&rec);
+        match decode(&bytes) {
+            Decoded::Record { rec: got, consumed } => {
+                assert_eq!(got, rec);
+                assert_eq!(got.op, WanOp::Aux(7));
+                assert_eq!(consumed, bytes.len());
+            }
+            _ => panic!("expected a decoded aux record"),
         }
     }
 

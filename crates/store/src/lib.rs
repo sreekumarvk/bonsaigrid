@@ -875,8 +875,14 @@ impl Store {
     /// Emit a structure's full state to the WAL sink after a mutation (no-op when
     /// no sink). Serializes under the structure's lock; call after mutating.
     fn emit_aux(&self, kind: u8, name: &str) {
-        if let Some(s) = self.wal_sink.get() {
-            s.aux_state(kind, name, &self.serialize_aux(kind, name));
+        if self.wal_sink.get().is_some() || self.wan_sink.get().is_some() {
+            let bytes = self.serialize_aux(kind, name);
+            if let Some(s) = self.wal_sink.get() {
+                s.aux_state(kind, name, &bytes);
+            }
+            if let Some(s) = self.wan_sink.get() {
+                s.aux_state(kind, name, &bytes);
+            }
         }
     }
 
