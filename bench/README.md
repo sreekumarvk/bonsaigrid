@@ -1,18 +1,36 @@
 # Benchmarks
 
-Two layers of benchmark, one tracker. **Data and presentation are separate:**
-benchmarks emit JSON; a tracker (Bencher) graphs and gates it over commits.
-Nothing is hand-authored.
+New here? Read **[QUICKSTART.md](QUICKSTART.md)** first — it's the two-minute version.
 
-| Layer | What it measures | Tool |
-|-------|------------------|------|
-| **Macro** (system) | client→server throughput, latency percentiles, server CPU/mem, correctness | Go loadgen (`bench/loadgen`), cgroup-isolated |
-| **Micro** (in-process) | slab allocator + store index put/get | Criterion (`crates/store/benches`) |
-| **Tracking** | history per branch/commit, regression gates, graphs | Bencher (local SQLite or cloud) |
+A suite of benchmarks that each stress a different axis, one tracker, and one combined
+report. **Data and presentation are separate:** every benchmark emits JSON; the
+dashboards and the Bencher tracker render it. Nothing is hand-authored.
+
+## At a glance
+
+| Benchmark | What it stresses | Tool | Dashboard |
+|---|---|---|---|
+| `run-all-isolated.sh` | fair four-backend throughput/latency ladder + server CPU/mem + JVM GC | Go loadgen, cgroup-isolated | `deploy/dashboard.html` |
+| `run-memtier.sh` | industry-standard tool — p99.9 tail, hit/miss, network | memtier_benchmark | `deploy/memtier.html` |
+| `run-openloop.sh` | coordinated-omission-correct capacity (the latency elbow) | Go loadgen (open-loop) | `deploy/openloop.html` |
+| `run-ycsb.sh` | YCSB core workloads A–F over a Zipfian keyspace | go-ycsb (+ patched memcache driver) | `deploy/ycsb.html` |
+| `cargo bench -p store` | in-process slab + index hot path | Criterion | `target/criterion/` |
+| **`benchmark-all.sh`** | **runs all of the above, bakes one report** | — | **`deploy/index.html`** |
+| `track.sh` | history per commit + regression gates | Bencher (local SQLite/cloud) | Bencher web |
+
+Backends: **BonsaiGrid** (`:5701`) — driven via the Hazelcast client, via its
+**memcached** protocol (`bonsaigrid-mc`), and via its **RESP** protocol
+(`bonsaigrid-redis`) — against real **Memcached** (`:11211`), **Redis** (`:6379`), and
+**Hazelcast** (`:5702`). memtier, the open-loop bench, and YCSB drive BonsaiGrid with
+the *same thin client* as an incumbent, giving apples-to-apples server-vs-server
+numbers; the isolated macro run uses the heavyweight Hazelcast client (see Caveats).
 
 ```
-run-all-isolated.sh ─► combined.json ─► to_bmf.py ─► track.sh ─┐
-cargo bench -p store ─► target/criterion/ ────────────────────► Bencher ─► graphs + gates
+run-all-isolated.sh ─► combined.json ─┐
+run-memtier.sh      ─► memtier-*.json ─┤
+run-openloop.sh     ─► openloop-*.json ├─► gen_index.py ─► deploy/index.html (one report)
+run-ycsb.sh         ─► ycsb-*.json ────┘         └► to_bmf.py ─► track.sh ─► Bencher
+cargo bench -p store ─► target/criterion/ ───────────────────────────────► Bencher
 ```
 
 ---
@@ -39,7 +57,7 @@ Memcached `11211`; Bencher API `6610`, console `3000`.
 ```bash
 # 0. Run EVERY benchmark suite and build one combined report page (~20 min).
 #    Runs the four suites below in sequence, then bakes bench/deploy/index.html —
-#    an executive summary + tabs into each full dashboard.
+#    a self-contained report with an executive summary + every benchmark's charts inline.
 bench/benchmark-all.sh                          # → bench/deploy/index.html
 #   smaller machine:      SERVER_CPUS=0-3 CLIENT_CPUS=4-7 bench/benchmark-all.sh
 #   subset / faster:      SKIP="ycsb openloop" STAGE_SECS=3 bench/benchmark-all.sh
@@ -303,16 +321,24 @@ this is the per-run comparison view.
 
 | Path | What |
 |------|------|
-| `run-all-isolated.sh` | fair four-backend run (cgroup + cpuset isolation, CPU/mem sampling) |
+| **`QUICKSTART.md`** | **two-minute getting-started guide (read first)** |
+| `benchmark-all.sh` | run every suite in sequence, then bake the combined report |
+| `gen_index.py` | bake all `*-combined.json` into `deploy/index.html` (the report) |
+| `run-all-isolated.sh` | fair four-backend run (cgroup + cpuset isolation, CPU/mem + GC sampling) |
 | `run-all.sh` | quick co-located run (not fair) |
-| `preflight.sh` | env checks + stale-container cleanup (auto-run by `run-all-isolated.sh`) |
+| `run-memtier.sh` / `memtier_report.py` | memtier_benchmark run + merge/bake `deploy/memtier.html` |
+| `run-openloop.sh` / `openloop_report.py` | open-loop (CO-correct) run + merge/bake `deploy/openloop.html` |
+| `run-ycsb.sh` / `ycsb_report.py` | YCSB matrix + merge/bake `deploy/ycsb.html` |
+| `ycsb/workloads/` | YCSB core workload files (A–F) |
+| `ycsb/patch/` | memcache driver compiled into `go-ycsb` at build time |
+| `preflight.sh` | env checks (docker/cargo/python3, CPU governor) + stale-container cleanup |
 | `verify-correctness.sh` | end-to-end write/read-back correctness check over the wire |
-| `to_bmf.py` | `combined.json` → Bencher Metric Format |
-| `track.sh` | convert + upload to Bencher (local SQLite or cloud) with a regression gate |
-| `gen_dashboard.py` | bake `combined.json` into the self-contained dashboard (auto-run each run) |
-| `loadgen/` | the Go load generator (`main.go`, per-backend `store_*.go`) |
-| `loadgen/combined.json` | merged results (checked in) |
-| `deploy/dashboard.html` | secondary self-contained dashboard |
+| `to_bmf.py` / `track.sh` | `combined.json` → Bencher Metric Format → upload with a regression gate |
+| `gen_dashboard.py` | bake `combined.json` into `deploy/dashboard.html` (auto-run each run) |
+| `loadgen/` | the Go load generator: `main.go`, `workload.go`, `openloop.go`, per-backend `store_*.go` |
+| `loadgen/*-combined.json` | merged results per benchmark (checked in) |
+| `deploy/index.html` | the one-page combined report (all suites, charts inline) |
+| `deploy/{dashboard,memtier,openloop,ycsb}.html` | per-benchmark self-contained dashboards |
 | `crates/store/benches/hotpath.rs` | Criterion micro-benchmarks |
 | `crates/bench/` | raw-protocol driver: `ladder` (server-isolated) + `verify` |
 
@@ -320,11 +346,14 @@ this is the per-run comparison view.
 
 ## Caveats
 
-- **Cross-client comparison.** BonsaiGrid and Hazelcast are driven through the same
-  heavyweight official Hazelcast client; Redis/Memcached use their thin native
-  clients. Cross-backend numbers are therefore *directional*. The controlled results
-  are: BonsaiGrid vs Hazelcast (identical client), and `bench ladder` (client
-  isolated) for the server ceiling.
-- **First run pulls images and Go modules** (needs network; modules cache to
-  `~/.cache/bonsai-bench`). A full four-backend run is ~5–8 min including pulls.
-- **Ctrl-C is safe** — a trap tears down all containers on exit.
+- **Which comparisons are apples-to-apples.** In `run-all-isolated.sh`, BonsaiGrid and
+  Hazelcast share the same heavyweight official Hazelcast client while Redis/Memcached
+  use thin native clients, so *cross-backend* numbers there are directional (the
+  controlled pair is BonsaiGrid vs Hazelcast). The **memtier, open-loop, and YCSB**
+  benchmarks remove that asymmetry — they drive BonsaiGrid with the *same thin client*
+  as the incumbent (memcached protocol vs Memcached, RESP vs Redis), so those are true
+  server-vs-server results. `bench ladder` is the client-isolated server ceiling.
+- **First run pulls images and builds** (needs network; Go/Rust caches to
+  `~/.cache/bonsai-bench`). A single four-backend suite is ~5–8 min including pulls;
+  `benchmark-all.sh` (all four) is ~20 min.
+- **Ctrl-C is safe** — every runner traps and tears down its containers on exit.
