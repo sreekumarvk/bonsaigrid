@@ -229,6 +229,52 @@ fn cpmap_ops_replicate_through_raft() {
     }
 }
 
+#[test]
+fn read_lease_holds_on_leader_and_lapses_when_partitioned() {
+    use raft::cp::cm_command;
+    use raft::cpmap::MapOp;
+    let mut sim = CpSim::new(5);
+    sim.run(120);
+    let leader = sim.leader().expect("a leader");
+    assert!(
+        sim.groups[leader].has_read_lease(),
+        "an established leader holds the read lease"
+    );
+
+    // A committed write is then visible to a lease-read (local SM, no log append).
+    sim.submit(
+        leader,
+        1,
+        cm_command("m", &MapOp::Put(b"k".to_vec(), b"v".to_vec())),
+    );
+    sim.run(40);
+    assert!(sim.groups[leader].has_read_lease());
+    assert_eq!(
+        sim.groups[leader].sm().cp_map().get("m", b"k"),
+        Some(b"v".to_vec()),
+        "lease read returns the committed value"
+    );
+
+    // Partition the leader from every other member.
+    for other in 0..5 {
+        if other != leader {
+            sim.cut.insert((leader, other));
+            sim.cut.insert((other, leader));
+        }
+    }
+    // With no majority contact, the old leader's lease lapses (so it will NOT serve a
+    // possibly-stale read), while the majority side elects a fresh leader with a lease.
+    sim.run(250);
+    assert!(
+        !sim.groups[leader].has_read_lease(),
+        "a partitioned leader loses its read lease (no stale reads)"
+    );
+    assert!(
+        (0..5).any(|i| i != leader && sim.groups[i].has_read_lease()),
+        "the majority side elected a new leader that holds the lease"
+    );
+}
+
 /// Helper: extract a Long reply for `client`.
 fn long_reply(sim: &CpSim, client: ClientId) -> i64 {
     match sim.completion(client).map(|c| &c.reply) {

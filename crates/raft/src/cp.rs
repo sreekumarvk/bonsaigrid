@@ -244,6 +244,11 @@ impl CpGroup {
     pub fn is_leader(&self) -> bool {
         self.raft.is_leader()
     }
+    /// True if this member can answer a linearizable read from its local `sm()`
+    /// without appending to the log (the leader read-lease / ReadIndex-lease).
+    pub fn has_read_lease(&self) -> bool {
+        self.raft.has_read_lease()
+    }
     pub fn leader(&self) -> Option<NodeId> {
         self.raft.leader()
     }

@@ -83,6 +83,13 @@ pub struct RaftNode {
     elapsed: u64,          // ticks since last leader contact / heartbeat
     election_timeout: u64, // randomized per follower/candidate
     heartbeat_period: u64,
+    // Leader read-lease. `contacted` = peers that ack'd AppendEntries this heartbeat
+    // round; `since_majority` = ticks since a majority last confirmed this node's
+    // leadership. A read is linearizable-safe while `since_majority < election_timeout`
+    // — no new leader could have been elected in that window (those majority followers
+    // heard from this leader that recently), so this leader is still the only one.
+    contacted: Vec<bool>,
+    since_majority: u64,
     rng: u64, // seeded splitmix64 state for timeout jitter
 }
 
@@ -104,6 +111,8 @@ impl RaftNode {
             votes: vec![false; n],
             next_index: vec![1; n],
             match_index: vec![0; n],
+            contacted: vec![false; n],
+            since_majority: 0,
             elapsed: 0,
             election_timeout: 0,
             heartbeat_period: 1,
@@ -121,6 +130,14 @@ impl RaftNode {
     }
     pub fn is_leader(&self) -> bool {
         self.role == Role::Leader
+    }
+
+    /// Whether this node can serve a linearizable read locally without appending to
+    /// the log: it is the leader and a majority confirmed its leadership within the
+    /// last election-timeout window (the leader read-lease / ReadIndex-lease). The
+    /// SM's committed state is then safe to read directly.
+    pub fn has_read_lease(&self) -> bool {
+        self.role == Role::Leader && self.since_majority < self.election_timeout
     }
     pub fn leader(&self) -> Option<NodeId> {
         self.leader
@@ -193,8 +210,12 @@ impl RaftNode {
         self.elapsed += 1;
         match self.role {
             Role::Leader => {
+                self.since_majority = self.since_majority.saturating_add(1);
                 if self.elapsed >= self.heartbeat_period {
                     self.elapsed = 0;
+                    // Start a fresh contact round (self always counts).
+                    self.contacted.iter_mut().for_each(|c| *c = false);
+                    self.contacted[self.id] = true;
                     self.broadcast_append(out);
                 }
             }
@@ -248,6 +269,16 @@ impl RaftNode {
                 self.match_index[*p] = 0;
             }
             self.match_index[self.id] = last;
+            // Fresh contact round: no read-lease yet unless self is already a majority
+            // (single-node group); otherwise the lease is granted once a majority acks.
+            self.contacted.iter_mut().for_each(|c| *c = false);
+            self.contacted[self.id] = true;
+            self.since_majority =
+                if self.contacted.iter().filter(|&&c| c).count() >= self.majority() {
+                    0
+                } else {
+                    self.election_timeout
+                };
             self.elapsed = self.heartbeat_period; // send heartbeats immediately
             self.broadcast_append(out);
         }
@@ -441,6 +472,12 @@ impl RaftNode {
         if success {
             self.match_index[from] = self.match_index[from].max(match_index);
             self.next_index[from] = self.match_index[from] + 1;
+            // Read-lease: once a majority has ack'd this round, leadership is
+            // confirmed — reset the lease timer.
+            self.contacted[from] = true;
+            if self.contacted.iter().filter(|&&c| c).count() >= self.majority() {
+                self.since_majority = 0;
+            }
             self.advance_commit();
         } else {
             // Back off and retry.
