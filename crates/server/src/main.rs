@@ -142,6 +142,27 @@ fn setup_persistence(store: &Arc<store::Store>) -> Option<std::thread::JoinHandl
     ))
 }
 
+/// If WAN is configured (`BONSAI_WAN_TARGETS`), attach the WAN capture sink and
+/// spawn the WAN thread (inbound listener + outbound ship). Returns the thread
+/// handle (kept alive by the caller). No-op / `None` when unset.
+fn setup_wan(store: &Arc<store::Store>) -> Option<std::thread::JoinHandle<()>> {
+    let cfg = server::wan_thread::wan_config()?;
+    let dir: std::path::PathBuf = std::env::var("BONSAI_WAN_DIR")
+        .unwrap_or_else(|_| "./wan-data".into())
+        .into();
+    let (tx, rx) = spsc::channel::<wan::WanRecord>(1 << 20);
+    store.set_wan_sink(Arc::new(wan::WanPublisher::new(tx)));
+    eprintln!(
+        "BonsaiGrid WAN: listen :{} -> targets {:?} (batch {}, queue {} MB, {:?})",
+        cfg.listen,
+        cfg.targets,
+        cfg.batch,
+        cfg.queue_bytes / (1024 * 1024),
+        cfg.backpressure
+    );
+    Some(server::wan_thread::spawn_wan(dir, store.clone(), rx, cfg))
+}
+
 fn cluster_members(n: usize) -> Vec<Member> {
     (0..n)
         .map(|i| Member {
@@ -202,6 +223,7 @@ fn run_multi_node(members: usize, self_index: usize) -> std::io::Result<()> {
     };
     let store = Arc::new(store::Store::with_shards_seed(1, self_index as u64));
     let _persist = setup_persistence(&store); // recover + attach WAL sink before serving
+    let _wan = setup_wan(&store); // attach WAN capture + spawn the WAN thread if configured
     server::jobs::set_store(store.clone()); // streaming SQL jobs look up the IMap here
     let broker = Arc::new(server::events::EventBroker::new(self_uuid));
     let schemas = Arc::new(serialization::schema::SchemaService::new());
@@ -444,6 +466,7 @@ fn run_single_node() -> std::io::Result<()> {
     });
     let store = Arc::new(store::Store::with_shards(cores));
     let _persist = setup_persistence(&store); // recover + attach WAL sink before serving
+    let _wan = setup_wan(&store); // attach WAN capture + spawn the WAN thread if configured
     server::jobs::set_store(store.clone()); // streaming SQL jobs look up the IMap here
                                             // Single-member cluster, no backups; shared read-only across cores.
     let cluster = Arc::new(Cluster::new(bootstrap_members(1), 0, 1));

@@ -15,6 +15,7 @@ spsc = { path = "../spsc" }
 security = { path = "../security" }
 persistence = { path = "../persistence" }
 raft = { path = "../raft" }
+wan = { path = "../wan" }
 io-uring = "0.6"
 libc = "0.2"
 socket2 = { version = "0.5", features = ["all"] }
@@ -27,5 +28,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 protocol = { path = "../protocol" }
 codecs = { path = "../codecs" }
 store = { path = "../store" }
+spsc = { path = "../spsc" }
+wan = { path = "../wan" }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }

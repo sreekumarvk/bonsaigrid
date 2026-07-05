@@ -17,6 +17,7 @@ pub mod metrics;
 pub mod migration;
 pub mod persist_thread;
 pub mod reactor;
+pub mod wan_thread;
 #[cfg(test)]
 mod sim;
 pub mod txn;
