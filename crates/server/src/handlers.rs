@@ -652,6 +652,52 @@ fn cp_atomiclong(
 
 /// Dispatch an AtomicReference CP request (mirrors [`cp_atomiclong`]; replies are
 /// nullable Data or bool).
+/// Dispatch a CPMap CP request: decode it, map to the replicated `MapOp`, and submit
+/// to the CP subsystem. Reply is deferred (delivered by the member thread on commit).
+fn cp_cpmap(
+    msg_type: i32,
+    req: &[Frame],
+    conn_id: u64,
+    corr: i64,
+    replicator: Option<&Replicator>,
+) -> Vec<Vec<Frame>> {
+    use crate::member_thread::ReplyKind;
+    use codecs::cpmap::CpMapReq as R;
+    use raft::cpmap::MapOp;
+
+    let Some(rep) = replicator else {
+        let mut e = error_response(
+            42,
+            "com.hazelcast.cp.exception.CPSubsystemException",
+            "CP subsystem is not enabled on this member",
+        );
+        set_correlation_id(&mut e, corr);
+        return vec![e];
+    };
+    let Some(dec) = codecs::cpmap::decode_request(msg_type, req) else {
+        return vec![];
+    };
+    let resp_type = msg_type + 1;
+    let (op, kind) = match dec.op {
+        R::Get(k) => (MapOp::Get(k), ReplyKind::Data),
+        R::Put(k, v) => (MapOp::Put(k, v), ReplyKind::Data),
+        R::Set(k, v) => (MapOp::Set(k, v), ReplyKind::Void),
+        R::Remove(k) => (MapOp::Remove(k), ReplyKind::Data),
+        // delete = remove but discards the old value (void reply).
+        R::Delete(k) => (MapOp::Remove(k), ReplyKind::Void),
+        R::CompareAndSet(k, e, n) => (MapOp::CompareAndSet(k, e, n), ReplyKind::Bool),
+        R::PutIfAbsent(k, v) => (MapOp::PutIfAbsent(k, v), ReplyKind::Data),
+    };
+    rep.submit_cp(
+        conn_id,
+        corr,
+        resp_type,
+        kind,
+        raft::cp::cm_command(&dec.name, &op),
+    );
+    vec![]
+}
+
 fn cp_atomicref(
     msg_type: i32,
     req: &[Frame],
@@ -1878,6 +1924,7 @@ pub fn dispatch(
             cp_atomiclong(t, &req, conn_id, corr, replicator)
         }
         t if codecs::atomicref::is_atomicref(t) => cp_atomicref(t, &req, conn_id, corr, replicator),
+        t if codecs::cpmap::is_cpmap(t) => cp_cpmap(t, &req, conn_id, corr, replicator),
         t if codecs::cpcount::is_cp_count(t) => cp_counter(t, &req, conn_id, corr, replicator),
         t if codecs::cpsession::is_cp_session(t) => cp_session(t, &req, conn_id, corr, replicator),
         t if codecs::fencedlock::is_fencedlock(t) => {
@@ -2165,7 +2212,11 @@ mod tests {
             &crate::txn::TransactionService::new(),
             &jet::executor::JetService::new(),
         );
-        assert_eq!(msg_type(&out[0]), 0, "MapSet below quorum -> exception (type 0)");
+        assert_eq!(
+            msg_type(&out[0]),
+            0,
+            "MapSet below quorum -> exception (type 0)"
+        );
         assert_eq!(
             store.get("m", &[1]),
             None,
@@ -2289,7 +2340,10 @@ mod tests {
         );
         let out = disp(get_request("m", &[7, 7], 6), &store);
         assert_eq!(msg_type(&out[0]), 66049);
-        assert!(!out[0][1].is_null(), "value must come back on GET after MapSet");
+        assert!(
+            !out[0][1].is_null(),
+            "value must come back on GET after MapSet"
+        );
         assert_eq!(out[0][1].content, vec![42]);
     }
 
