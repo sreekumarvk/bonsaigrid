@@ -16,6 +16,10 @@ func (s *redisStore) Set(ctx context.Context, key string, val []byte, ttl time.D
 	return s.rdb.Set(ctx, key, val, ttl).Err()
 }
 func (s *redisStore) Get(ctx context.Context, key string) ([]byte, error) {
-	return s.rdb.Get(ctx, key).Bytes()
+	b, err := s.rdb.Get(ctx, key).Bytes()
+	if err == redis.Nil {
+		return nil, nil // a miss is not a transport error
+	}
+	return b, err
 }
 func (s *redisStore) Close() error { return s.rdb.Close() }

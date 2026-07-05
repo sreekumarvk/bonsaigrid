@@ -19,6 +19,9 @@ func (s *mcStore) Set(_ context.Context, key string, val []byte, ttl time.Durati
 }
 func (s *mcStore) Get(_ context.Context, key string) ([]byte, error) {
 	it, err := s.mc.Get(key)
+	if err == memcache.ErrCacheMiss {
+		return nil, nil // a miss is not a transport error
+	}
 	if err != nil {
 		return nil, err
 	}

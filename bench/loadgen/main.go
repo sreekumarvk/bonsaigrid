@@ -22,9 +22,10 @@ type OpStat struct {
 	Op    string  `json:"op"`
 	Count int64   `json:"count"`
 	RPS   float64 `json:"rps"`
-	P50us float64 `json:"p50_us"`
-	P90us float64 `json:"p90_us"`
-	P99us float64 `json:"p99_us"`
+	P50us  float64 `json:"p50_us"`
+	P90us  float64 `json:"p90_us"`
+	P99us  float64 `json:"p99_us"`
+	P999us float64 `json:"p999_us"`
 }
 
 type Stage struct {
@@ -32,9 +33,14 @@ type Stage struct {
 	Set      OpStat `json:"set"`
 	Get      OpStat `json:"get"`
 	Errs     int64  `json:"errors"`
-	Mismatch int64  `json:"mismatch"`   // GET returned wrong value or a miss (correctness)
+	Mismatch int64  `json:"mismatch"`   // GET returned wrong value (corruption)
 	TStartMs int64  `json:"t_start_ms"` // wall-clock stage window, for aligning
 	TEndMs   int64  `json:"t_end_ms"`   // externally-sampled server CPU/mem
+	// open-loop mode only (zero in closed-loop):
+	TargetRate  int     `json:"target_rate,omitempty"`  // offered ops/sec
+	AchievedRPS float64 `json:"achieved_rps,omitempty"` // ops/sec actually sustained
+	Hits        int64   `json:"hits,omitempty"`         // GETs that returned the expected value
+	Misses      int64   `json:"misses,omitempty"`       // GETs of a not-yet-written key
 }
 
 type Result struct {
@@ -123,9 +129,10 @@ func stat(op string, lat []int64, dur time.Duration) OpStat {
 		Op:    op,
 		Count: int64(len(lat)),
 		RPS:   float64(len(lat)) / dur.Seconds(),
-		P50us: pctile(lat, 0.50),
-		P90us: pctile(lat, 0.90),
-		P99us: pctile(lat, 0.99),
+		P50us:  pctile(lat, 0.50),
+		P90us:  pctile(lat, 0.90),
+		P99us:  pctile(lat, 0.99),
+		P999us: pctile(lat, 0.999),
 	}
 }
 
@@ -144,6 +151,12 @@ func main() {
 		log.Fatalf("connect %s: %v", target, err)
 	}
 	defer s.Close()
+
+	// MODE=open: coordinated-omission-correct, offered-rate sweep (see openloop.go).
+	if env("MODE", "closed") == "open" {
+		runOpenLoop(ctx, s, target)
+		return
+	}
 
 	log.Printf("[%s] warmup %s ...", target, warmup)
 	runStage(ctx, s, 16, warmup) // discarded
