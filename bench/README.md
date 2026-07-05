@@ -37,6 +37,16 @@ Memcached `11211`; Bencher API `6610`, console `3000`.
 ## Quick start
 
 ```bash
+# 0. Run EVERY benchmark suite and build one combined report page (~20 min).
+#    Runs the four suites below in sequence, then bakes bench/deploy/index.html —
+#    an executive summary + tabs into each full dashboard.
+bench/benchmark-all.sh                          # → bench/deploy/index.html
+#   smaller machine:      SERVER_CPUS=0-3 CLIENT_CPUS=4-7 bench/benchmark-all.sh
+#   subset / faster:      SKIP="ycsb openloop" STAGE_SECS=3 bench/benchmark-all.sh
+#   view it:              (python3 -m http.server) then open /bench/deploy/index.html
+
+# --- or run a single suite ---
+
 # 1. Run the fair, four-backend benchmark (all servers + client in isolated cgroups)
 bench/run-all-isolated.sh                      # → bench/loadgen/combined.json
 
