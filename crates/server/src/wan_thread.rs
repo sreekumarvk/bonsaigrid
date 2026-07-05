@@ -151,19 +151,23 @@ pub fn spawn_wan(
                 }
                 let _ = q.append(&r);
             }
-            // Ship unacked records, batched; ack only what ALL targets confirm.
-            let un = q.unacked();
-            for chunk in un.chunks(cfg.batch.max(1)) {
-                let up_to = chunk.last().unwrap().0;
-                let recs: Vec<WanRecord> = chunk.iter().map(|(_, r)| r.clone()).collect();
-                let mut min_ack = up_to;
-                for t in &cfg.targets {
+            // Ship each target its OWN unacked tail, batched, and advance that
+            // target's cursor independently — a lagging/down remote does not pin a
+            // fast one, and a fast remote never re-ships what it already confirmed.
+            for t in &cfg.targets {
+                let un = q.unacked_for(t);
+                for chunk in un.chunks(cfg.batch.max(1)) {
+                    let up_to = chunk.last().unwrap().0;
+                    let recs: Vec<WanRecord> = chunk.iter().map(|(_, r)| r.clone()).collect();
                     match ship_batch(t, up_to, &recs) {
-                        Ok(a) => min_ack = min_ack.min(a),
-                        Err(_) => min_ack = q.acked(), // target down → don't advance
+                        Ok(a) => {
+                            let _ = q.ack_target(t, a);
+                        }
+                        // Target down: stop shipping to it this round; retry next tick
+                        // from its (unadvanced) cursor.
+                        Err(_) => break,
                     }
                 }
-                let _ = q.ack(min_ack);
             }
             std::thread::sleep(Duration::from_millis(cfg.poll_ms));
         }

@@ -1,21 +1,26 @@
 //! Durable per-target outbound buffer. Records are appended (framed, fsync'd) to
-//! `records.log`; a committed cursor (`acked` sequence) lives in `cursor` and is
-//! fsync'd on advance. On reopen, records replay (stopping at a torn tail) and
-//! only those past the cursor are unacked. Mirrors the persistence WAL discipline.
+//! `records.log`; a committed cursor **per target** (target -> highest acked seq)
+//! lives in `cursors` and is fsync'd on advance. On reopen, records replay (stopping
+//! at a torn tail) and each target's tail is whatever sits past its cursor — so a
+//! slow/lagging remote doesn't pin a fast one, and a fast remote never re-ships what
+//! it already confirmed. Mirrors the persistence WAL discipline.
 
 use crate::record::{decode, encode, Decoded, WanRecord};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 const LOG_FILE: &str = "records.log";
-const CURSOR_FILE: &str = "cursor";
+const CURSOR_FILE: &str = "cursors";
+/// The single-target convenience cursor (used by `ack`/`acked`/`unacked`).
+const DEFAULT_TARGET: &str = "";
 
 pub struct WanQueue {
     dir: PathBuf,
     seg: std::fs::File,
     records: Vec<(u64, WanRecord)>, // (seq, record), seq starts at 1
     next_seq: u64,
-    acked: u64,
+    cursors: HashMap<String, u64>, // target -> highest contiguously-acked seq
     bytes: u64,
 }
 
@@ -43,7 +48,7 @@ impl WanQueue {
                 _ => break, // torn / short tail
             }
         }
-        let acked = read_cursor(&dir.join(CURSOR_FILE))?;
+        let cursors = read_cursors(&dir.join(CURSOR_FILE))?;
         let seg = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -54,7 +59,7 @@ impl WanQueue {
             seg,
             records,
             next_seq: seq + 1,
-            acked,
+            cursors,
             bytes,
         })
     }
@@ -70,28 +75,54 @@ impl WanQueue {
         Ok(seq)
     }
 
-    pub fn unacked(&self) -> Vec<(u64, WanRecord)> {
+    // ---- per-target shipping ----
+
+    /// Records still unacked by `target` (its own tail).
+    pub fn unacked_for(&self, target: &str) -> Vec<(u64, WanRecord)> {
+        let c = self.target_acked(target);
         self.records
             .iter()
-            .filter(|(s, _)| *s > self.acked)
+            .filter(|(s, _)| *s > c)
             .cloned()
             .collect()
     }
 
-    pub fn ack(&mut self, up_to_seq: u64) -> std::io::Result<()> {
-        if up_to_seq <= self.acked {
-            return Ok(());
+    /// Advance `target`'s cursor and persist it.
+    pub fn ack_target(&mut self, target: &str, up_to_seq: u64) -> std::io::Result<()> {
+        let capped = up_to_seq.min(self.next_seq.saturating_sub(1));
+        let cur = self.cursors.entry(target.to_string()).or_insert(0);
+        if capped > *cur {
+            *cur = capped;
+            self.persist_cursors()?;
         }
-        self.acked = up_to_seq.min(self.next_seq - 1);
-        write_cursor(&self.dir.join(CURSOR_FILE), self.acked)?;
         Ok(())
     }
 
-    pub fn acked(&self) -> u64 {
-        self.acked
+    pub fn target_acked(&self, target: &str) -> u64 {
+        self.cursors.get(target).copied().unwrap_or(0)
     }
+
+    /// Lowest cursor across all known targets — records at or below it are confirmed
+    /// everywhere (reclaimable). 0 if no target has acked yet.
+    pub fn min_acked(&self) -> u64 {
+        self.cursors.values().copied().min().unwrap_or(0)
+    }
+
+    // ---- single-target convenience (the default "" cursor) ----
+    pub fn unacked(&self) -> Vec<(u64, WanRecord)> {
+        self.unacked_for(DEFAULT_TARGET)
+    }
+    pub fn ack(&mut self, up_to_seq: u64) -> std::io::Result<()> {
+        self.ack_target(DEFAULT_TARGET, up_to_seq)
+    }
+    pub fn acked(&self) -> u64 {
+        self.target_acked(DEFAULT_TARGET)
+    }
+
+    /// Count of records not yet confirmed by every target.
     pub fn len(&self) -> usize {
-        self.records.iter().filter(|(s, _)| *s > self.acked).count()
+        let c = self.min_acked();
+        self.records.iter().filter(|(s, _)| *s > c).count()
     }
     pub fn is_empty(&self) -> bool {
         self.len() == 0
@@ -104,21 +135,41 @@ impl WanQueue {
     pub fn would_exceed(&self, max_bytes: u64) -> bool {
         self.bytes >= max_bytes
     }
-}
 
-fn read_cursor(path: &Path) -> std::io::Result<u64> {
-    match std::fs::read(path) {
-        Ok(b) if b.len() >= 8 => Ok(u64::from_le_bytes(b[0..8].try_into().unwrap())),
-        Ok(_) => Ok(0),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
-        Err(e) => Err(e),
+    fn persist_cursors(&self) -> std::io::Result<()> {
+        let mut b = Vec::new();
+        for (t, s) in &self.cursors {
+            b.extend_from_slice(&(t.len() as u32).to_le_bytes());
+            b.extend_from_slice(t.as_bytes());
+            b.extend_from_slice(&s.to_le_bytes());
+        }
+        let tmp = self.dir.join("cursors.tmp");
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&b)?;
+        f.sync_data()?;
+        std::fs::rename(&tmp, self.dir.join(CURSOR_FILE))
     }
 }
 
-fn write_cursor(path: &Path, seq: u64) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    let mut f = std::fs::File::create(&tmp)?;
-    f.write_all(&seq.to_le_bytes())?;
-    f.sync_data()?;
-    std::fs::rename(&tmp, path)
+fn read_cursors(path: &Path) -> std::io::Result<HashMap<String, u64>> {
+    let b = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(e) => return Err(e),
+    };
+    let mut m = HashMap::new();
+    let mut p = 0;
+    while p + 4 <= b.len() {
+        let n = u32::from_le_bytes(b[p..p + 4].try_into().unwrap()) as usize;
+        p += 4;
+        if p + n + 8 > b.len() {
+            break; // torn tail
+        }
+        let target = String::from_utf8_lossy(&b[p..p + n]).into_owned();
+        p += n;
+        let seq = u64::from_le_bytes(b[p..p + 8].try_into().unwrap());
+        p += 8;
+        m.insert(target, seq);
+    }
+    Ok(m)
 }

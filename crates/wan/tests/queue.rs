@@ -55,3 +55,29 @@ fn reports_when_over_the_byte_bound() {
     assert!(q.would_exceed(10), "many records exceed a tiny bound");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn per_target_cursors_are_independent_and_durable() {
+    let dir = tmp("pertarget");
+    {
+        let mut q = WanQueue::open(&dir).unwrap();
+        for i in 1..=5 {
+            q.append(&rec(i, "k")).unwrap();
+        }
+        // "fast" confirms everything; "slow" confirms nothing.
+        q.ack_target("fast", 5).unwrap();
+        assert_eq!(q.target_acked("fast"), 5);
+        assert_eq!(q.target_acked("slow"), 0);
+        assert!(
+            q.unacked_for("fast").is_empty(),
+            "fast has nothing to re-ship"
+        );
+        assert_eq!(q.unacked_for("slow").len(), 5, "slow still owes all 5");
+    }
+    // Per-target cursors survive reopen.
+    let q = WanQueue::open(&dir).unwrap();
+    assert_eq!(q.target_acked("fast"), 5);
+    assert_eq!(q.target_acked("slow"), 0);
+    assert_eq!(q.unacked_for("slow").len(), 5);
+    std::fs::remove_dir_all(&dir).ok();
+}
