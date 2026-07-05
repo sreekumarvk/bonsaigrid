@@ -191,9 +191,14 @@ per-target ack cursors (v1 uses one cursor = all-targets-confirmed).
 + client codecs) · ✅ **Client-cert-as-principal** (CN → RBAC principal) · ✅ **WAN
 per-target ack cursors** · ✅ **CP CPMap** · ✅ **CP read-index lease reads**.
 
+**Also shipped:** ✅ **CPMap client wiring** (codec + dispatch — now end-to-end
+reachable) · ✅ **mTLS client-cert → RBAC** in the reactor auth path · ✅ **WAN queue
+reclaim** (compacts confirmed records; the unbounded-growth bug fixed) · ✅
+**JDBC/PostgreSQL connector** (loads a query into an IMap; Docker-tested).
+
 **Remaining (external-infra or larger):**
-- **Connectors:** Kafka (rskafka) + MapStore/MapLoader + file source shipped; JDBC,
-  CDC, socket sources/sinks need a live backend to test.
+- **Connectors:** Kafka + MapStore/MapLoader + file source + **JDBC/PostgreSQL**
+  shipped; CDC and socket sources/sinks still need a live backend.
 - **Management Center depth:** metrics + Prometheus + MC codecs exist; close
   remaining `MC*` operations for full GUI parity.
 - **Auth backends:** LDAP/JAAS behind the `IdentityProvider` seam (needs a directory).
