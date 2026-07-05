@@ -39,6 +39,7 @@ pub const OBJ_COUNTDOWN_LATCH: u8 = 2;
 pub const OBJ_SEMAPHORE: u8 = 3;
 pub const OBJ_FENCED_LOCK: u8 = 4;
 pub const OBJ_SESSION: u8 = 5;
+pub const OBJ_CP_MAP: u8 = 6;
 
 /// A committed reply, shaped by the operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +85,13 @@ pub fn fl_command(name: &str, op: &FlOp) -> Vec<u8> {
     c
 }
 
+/// Build a CPMap command: `[OBJ_CP_MAP][cpmap body]`.
+pub fn cm_command(name: &str, op: &crate::cpmap::MapOp) -> Vec<u8> {
+    let mut c = vec![OBJ_CP_MAP];
+    c.extend_from_slice(&crate::cpmap::encode(name, op));
+    c
+}
+
 /// Build a CP-session command: `[OBJ_SESSION][body]`.
 pub fn sess_command(op: &SessOp) -> Vec<u8> {
     let mut c = vec![OBJ_SESSION];
@@ -101,6 +109,7 @@ pub struct CpSm {
     semaphore: SemaphoreSm,
     fenced_lock: FencedLockSm,
     sessions: SessionSm,
+    cp_map: crate::cpmap::CpMapSm,
 }
 
 impl CpSm {
@@ -124,6 +133,7 @@ impl CpSm {
             OBJ_SEMAPHORE => self.semaphore.apply(body),
             OBJ_FENCED_LOCK => self.fenced_lock.apply(body),
             OBJ_SESSION => self.apply_session(body),
+            OBJ_CP_MAP => self.cp_map.apply(body),
             _ => CpReply::Nil,
         }
     }
@@ -142,6 +152,9 @@ impl CpSm {
     }
     pub fn fenced_lock(&self) -> &FencedLockSm {
         &self.fenced_lock
+    }
+    pub fn cp_map(&self) -> &crate::cpmap::CpMapSm {
+        &self.cp_map
     }
     pub fn sessions(&self) -> &SessionSm {
         &self.sessions

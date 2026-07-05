@@ -180,6 +180,55 @@ fn interleaved_ops_from_all_members_are_linearizable() {
     }
 }
 
+#[test]
+fn cpmap_ops_replicate_through_raft() {
+    use raft::cp::cm_command;
+    use raft::cpmap::MapOp;
+    let mut sim = CpSim::new(3);
+    sim.run(80);
+    let leader = sim.leader().expect("a leader");
+
+    // First put → no previous; second put → the old value; both via the log.
+    sim.submit(
+        leader,
+        1,
+        cm_command("m", &MapOp::Put(b"k".to_vec(), b"v1".to_vec())),
+    );
+    sim.run(40);
+    assert_eq!(sim.completion(1).unwrap().reply, CpReply::Data(None));
+    sim.submit(
+        leader,
+        2,
+        cm_command("m", &MapOp::Put(b"k".to_vec(), b"v2".to_vec())),
+    );
+    sim.run(40);
+    assert_eq!(
+        sim.completion(2).unwrap().reply,
+        CpReply::Data(Some(b"v1".to_vec()))
+    );
+
+    // A stale CAS fails linearizably.
+    sim.submit(
+        leader,
+        3,
+        cm_command(
+            "m",
+            &MapOp::CompareAndSet(b"k".to_vec(), b"WRONG".to_vec(), b"v3".to_vec()),
+        ),
+    );
+    sim.run(40);
+    assert_eq!(sim.completion(3).unwrap().reply, CpReply::Bool(false));
+
+    // Every replica applied the same committed state.
+    for i in 0..3 {
+        assert_eq!(
+            sim.groups[i].sm().cp_map().get("m", b"k"),
+            Some(b"v2".to_vec()),
+            "replica {i}"
+        );
+    }
+}
+
 /// Helper: extract a Long reply for `client`.
 fn long_reply(sim: &CpSim, client: ClientId) -> i64 {
     match sim.completion(client).map(|c| &c.reply) {
