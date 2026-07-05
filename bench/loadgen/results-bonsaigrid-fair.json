@@ -1,13 +1,13 @@
 {
   "target": "bonsaigrid",
   "stages": [
-    { "level": 1, "set": { "op": "set", "count": 83049, "rps": 20762.25, "p50_us": 25, "p90_us": 27, "p99_us": 33 }, "get": { "op": "get", "count": 83049, "rps": 20762.25, "p50_us": 23, "p90_us": 24, "p99_us": 29 }, "errors": 0 },
-    { "level": 2, "set": { "op": "set", "count": 223005, "rps": 55751.25, "p50_us": 18, "p90_us": 24, "p99_us": 26 }, "get": { "op": "get", "count": 223005, "rps": 55751.25, "p50_us": 16, "p90_us": 22, "p99_us": 24 }, "errors": 0 },
-    { "level": 4, "set": { "op": "set", "count": 350702, "rps": 87675.50, "p50_us": 24, "p90_us": 27, "p99_us": 30 }, "get": { "op": "get", "count": 350702, "rps": 87675.50, "p50_us": 22, "p90_us": 24, "p99_us": 27 }, "errors": 0 },
-    { "level": 8, "set": { "op": "set", "count": 704740, "rps": 176185.00, "p50_us": 23, "p90_us": 28, "p99_us": 34 }, "get": { "op": "get", "count": 704740, "rps": 176185.00, "p50_us": 21, "p90_us": 25, "p99_us": 32 }, "errors": 0 },
-    { "level": 16, "set": { "op": "set", "count": 1076475, "rps": 269118.75, "p50_us": 30, "p90_us": 42, "p99_us": 53 }, "get": { "op": "get", "count": 1076475, "rps": 269118.75, "p50_us": 27, "p90_us": 39, "p99_us": 50 }, "errors": 0 },
-    { "level": 32, "set": { "op": "set", "count": 1512001, "rps": 378000.25, "p50_us": 44, "p90_us": 61, "p99_us": 78 }, "get": { "op": "get", "count": 1512001, "rps": 378000.25, "p50_us": 41, "p90_us": 58, "p99_us": 75 }, "errors": 0 },
-    { "level": 64, "set": { "op": "set", "count": 1797072, "rps": 449268.00, "p50_us": 62, "p90_us": 114, "p99_us": 143 }, "get": { "op": "get", "count": 1797072, "rps": 449268.00, "p50_us": 60, "p90_us": 112, "p99_us": 140 }, "errors": 0 },
-    { "level": 128, "set": { "op": "set", "count": 1856687, "rps": 464171.75, "p50_us": 128, "p90_us": 178, "p99_us": 214 }, "get": { "op": "get", "count": 1856687, "rps": 464171.75, "p50_us": 127, "p90_us": 176, "p99_us": 211 }, "errors": 0 }
+    { "level": 1, "set": { "op": "set", "count": 75811, "rps": 18952.75, "p50_us": 27, "p90_us": 28, "p99_us": 32 }, "get": { "op": "get", "count": 75811, "rps": 18952.75, "p50_us": 24, "p90_us": 26, "p99_us": 29 }, "errors": 0 },
+    { "level": 2, "set": { "op": "set", "count": 172873, "rps": 43218.25, "p50_us": 22, "p90_us": 28, "p99_us": 31 }, "get": { "op": "get", "count": 172873, "rps": 43218.25, "p50_us": 20, "p90_us": 25, "p99_us": 27 }, "errors": 0 },
+    { "level": 4, "set": { "op": "set", "count": 362336, "rps": 90584.00, "p50_us": 23, "p90_us": 27, "p99_us": 30 }, "get": { "op": "get", "count": 362336, "rps": 90584.00, "p50_us": 21, "p90_us": 25, "p99_us": 27 }, "errors": 0 },
+    { "level": 8, "set": { "op": "set", "count": 709228, "rps": 177307.00, "p50_us": 23, "p90_us": 29, "p99_us": 33 }, "get": { "op": "get", "count": 709228, "rps": 177307.00, "p50_us": 21, "p90_us": 26, "p99_us": 31 }, "errors": 0 },
+    { "level": 16, "set": { "op": "set", "count": 1151150, "rps": 287787.50, "p50_us": 29, "p90_us": 36, "p99_us": 43 }, "get": { "op": "get", "count": 1151150, "rps": 287787.50, "p50_us": 26, "p90_us": 33, "p99_us": 40 }, "errors": 0 },
+    { "level": 32, "set": { "op": "set", "count": 1522450, "rps": 380612.50, "p50_us": 37, "p90_us": 68, "p99_us": 87 }, "get": { "op": "get", "count": 1522450, "rps": 380612.50, "p50_us": 34, "p90_us": 66, "p99_us": 85 }, "errors": 0 },
+    { "level": 64, "set": { "op": "set", "count": 1831169, "rps": 457792.25, "p50_us": 70, "p90_us": 97, "p99_us": 123 }, "get": { "op": "get", "count": 1831169, "rps": 457792.25, "p50_us": 68, "p90_us": 95, "p99_us": 120 }, "errors": 0 },
+    { "level": 128, "set": { "op": "set", "count": 1898819, "rps": 474704.75, "p50_us": 134, "p90_us": 168, "p99_us": 202 }, "get": { "op": "get", "count": 1898819, "rps": 474704.75, "p50_us": 133, "p90_us": 166, "p99_us": 199 }, "errors": 0 }
   ]
 }
