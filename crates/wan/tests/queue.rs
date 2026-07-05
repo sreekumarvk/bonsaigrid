@@ -81,3 +81,53 @@ fn per_target_cursors_are_independent_and_durable() {
     assert_eq!(q.unacked_for("slow").len(), 5);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn reclaim_compacts_records_confirmed_by_all_targets() {
+    let dir = tmp("reclaim");
+    let targets = ["a".to_string(), "b".to_string()];
+    {
+        let mut q = WanQueue::open(&dir).unwrap();
+        q.set_targets(&targets);
+        for i in 1..=6 {
+            q.append(&rec(i, "k")).unwrap();
+        }
+        // Only "a" has acked → the reclaim floor is pinned at "b" (0).
+        q.ack_target("a", 4).unwrap();
+        assert_eq!(q.reclaim().unwrap(), 0, "a lagging target blocks reclaim");
+        // Both confirm through 4 → 1..=4 are reclaimable; 5,6 retained.
+        q.ack_target("b", 4).unwrap();
+        assert_eq!(q.reclaim().unwrap(), 4);
+        assert_eq!(
+            q.unacked_for("a")
+                .iter()
+                .map(|(s, _)| *s)
+                .collect::<Vec<_>>(),
+            vec![5, 6],
+            "absolute seqs preserved across compaction"
+        );
+        q.ack_target("a", 6).unwrap();
+        q.ack_target("b", 6).unwrap();
+        assert_eq!(q.reclaim().unwrap(), 2);
+        assert!(q.unacked_for("a").is_empty());
+    }
+    // Reopen: cursors + base survive; the compacted log replays with correct seqs,
+    // and a new append continues the absolute sequence.
+    let mut q = WanQueue::open(&dir).unwrap();
+    q.set_targets(&targets);
+    assert_eq!(q.target_acked("a"), 6);
+    assert!(q.unacked_for("a").is_empty());
+    assert_eq!(
+        q.append(&rec(7, "k")).unwrap(),
+        7,
+        "seq continues past the reclaimed base"
+    );
+    assert_eq!(
+        q.unacked_for("a")
+            .iter()
+            .map(|(s, _)| *s)
+            .collect::<Vec<_>>(),
+        vec![7]
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

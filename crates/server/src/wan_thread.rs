@@ -135,6 +135,8 @@ pub fn spawn_wan(
                 return;
             }
         };
+        // Register every target so reclaim's floor accounts for a not-yet-acked one.
+        q.set_targets(&cfg.targets);
         loop {
             // Drain captured records into the durable queue, honoring the bound.
             while let Some(r) = rx.pop() {
@@ -169,6 +171,9 @@ pub fn spawn_wan(
                     }
                 }
             }
+            // Compact records confirmed by every target out of memory + the log
+            // (cheap no-op when the floor hasn't advanced).
+            let _ = q.reclaim();
             std::thread::sleep(Duration::from_millis(cfg.poll_ms));
         }
     })

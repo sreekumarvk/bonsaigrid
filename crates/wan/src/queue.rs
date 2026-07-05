@@ -1,9 +1,11 @@
 //! Durable per-target outbound buffer. Records are appended (framed, fsync'd) to
 //! `records.log`; a committed cursor **per target** (target -> highest acked seq)
-//! lives in `cursors` and is fsync'd on advance. On reopen, records replay (stopping
-//! at a torn tail) and each target's tail is whatever sits past its cursor — so a
-//! slow/lagging remote doesn't pin a fast one, and a fast remote never re-ships what
-//! it already confirmed. Mirrors the persistence WAL discipline.
+//! lives in `cursors` and is fsync'd on advance. A record confirmed by *every*
+//! target is reclaimable: `reclaim()` drops it from memory and compacts it out of
+//! the log, so a long-running link doesn't grow the queue without bound. A persisted
+//! `base` (the seq before the first retained record) keeps absolute seqs — and thus
+//! the cursors — stable across compaction and reopen. Mirrors the persistence WAL
+//! discipline; a slow/lagging remote never pins a fast one.
 
 use crate::record::{decode, encode, Decoded, WanRecord};
 use std::collections::HashMap;
@@ -12,13 +14,15 @@ use std::path::{Path, PathBuf};
 
 const LOG_FILE: &str = "records.log";
 const CURSOR_FILE: &str = "cursors";
+const BASE_FILE: &str = "base";
 /// The single-target convenience cursor (used by `ack`/`acked`/`unacked`).
 const DEFAULT_TARGET: &str = "";
 
 pub struct WanQueue {
     dir: PathBuf,
     seg: std::fs::File,
-    records: Vec<(u64, WanRecord)>, // (seq, record), seq starts at 1
+    records: Vec<(u64, WanRecord)>, // (seq, record); seqs are absolute (may start > 1)
+    base_seq: u64,                  // seq of the record just before the first retained one
     next_seq: u64,
     cursors: HashMap<String, u64>, // target -> highest contiguously-acked seq
     bytes: u64,
@@ -27,6 +31,7 @@ pub struct WanQueue {
 impl WanQueue {
     pub fn open(dir: &Path) -> std::io::Result<WanQueue> {
         std::fs::create_dir_all(dir)?;
+        let base_seq = read_u64(&dir.join(BASE_FILE))?;
         let mut buf = Vec::new();
         match std::fs::File::open(dir.join(LOG_FILE)) {
             Ok(mut f) => {
@@ -37,7 +42,7 @@ impl WanQueue {
         }
         let mut records = Vec::new();
         let mut off = 0;
-        let mut seq = 0;
+        let mut seq = base_seq;
         while off < buf.len() {
             match decode(&buf[off..]) {
                 Decoded::Record { rec, consumed } => {
@@ -53,14 +58,14 @@ impl WanQueue {
             .create(true)
             .append(true)
             .open(dir.join(LOG_FILE))?;
-        let bytes = off as u64;
         Ok(WanQueue {
             dir: dir.to_path_buf(),
             seg,
             records,
+            base_seq,
             next_seq: seq + 1,
             cursors,
-            bytes,
+            bytes: off as u64,
         })
     }
 
@@ -73,6 +78,14 @@ impl WanQueue {
         self.next_seq += 1;
         self.records.push((seq, rec.clone()));
         Ok(seq)
+    }
+
+    /// Register the full target set so reclaim accounts for every one (an unacked
+    /// target sits at seq 0, pinning the reclaim floor). Idempotent.
+    pub fn set_targets(&mut self, targets: &[String]) {
+        for t in targets {
+            self.cursors.entry(t.clone()).or_insert(0);
+        }
     }
 
     // ---- per-target shipping ----
@@ -106,6 +119,36 @@ impl WanQueue {
     /// everywhere (reclaimable). 0 if no target has acked yet.
     pub fn min_acked(&self) -> u64 {
         self.cursors.values().copied().min().unwrap_or(0)
+    }
+
+    /// Drop records confirmed by every known target from memory and the on-disk log,
+    /// advancing the durable base. Safe: `set_targets` ensures a not-yet-acked target
+    /// keeps the floor at its cursor. Returns how many records were reclaimed.
+    pub fn reclaim(&mut self) -> std::io::Result<usize> {
+        let floor = self.min_acked();
+        if floor <= self.base_seq {
+            return Ok(0);
+        }
+        let before = self.records.len();
+        self.records.retain(|(s, _)| *s > floor);
+        // Rewrite the log with only the retained records (atomic tmp + rename).
+        let tmp = self.dir.join("records.tmp");
+        let mut f = std::fs::File::create(&tmp)?;
+        let mut bytes = 0u64;
+        for (_, rec) in &self.records {
+            let framed = encode(rec);
+            f.write_all(&framed)?;
+            bytes += framed.len() as u64;
+        }
+        f.sync_data()?;
+        std::fs::rename(&tmp, self.dir.join(LOG_FILE))?;
+        self.base_seq = floor;
+        write_u64(&self.dir.join(BASE_FILE), self.base_seq)?;
+        self.seg = std::fs::OpenOptions::new()
+            .append(true)
+            .open(self.dir.join(LOG_FILE))?;
+        self.bytes = bytes;
+        Ok(before - self.records.len())
     }
 
     // ---- single-target convenience (the default "" cursor) ----
@@ -172,4 +215,21 @@ fn read_cursors(path: &Path) -> std::io::Result<HashMap<String, u64>> {
         m.insert(target, seq);
     }
     Ok(m)
+}
+
+fn read_u64(path: &Path) -> std::io::Result<u64> {
+    match std::fs::read(path) {
+        Ok(b) if b.len() >= 8 => Ok(u64::from_le_bytes(b[0..8].try_into().unwrap())),
+        Ok(_) => Ok(0),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(e) => Err(e),
+    }
+}
+
+fn write_u64(path: &Path, v: u64) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(&v.to_le_bytes())?;
+    f.sync_data()?;
+    std::fs::rename(&tmp, path)
 }
