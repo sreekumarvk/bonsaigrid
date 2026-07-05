@@ -171,7 +171,7 @@ function render(){
     const bks=ord(closedBk());
     lineChart(document.getElementById("c-closed"),{x:closedLevels().map(String),xtitle:"concurrent connections",yfmt:fmtK,
       series:bks.map(b=>({key:b,vals:DATA.closed[b].map(s=>s.set.rps)}))});
-    legend(document.getElementById("lg-closed"),bks);
+    legend(document.getElementById("lg-c-closed"),bks);
     const gc=DATA.gc&&DATA.gc.hazelcast;
     document.getElementById("n-closed").innerHTML=gc?`<b>JVM GC:</b> Hazelcast paused <b>${gc.pauses}</b> times (${gc.total_ms} ms total, ${gc.max_ms} ms max) — BonsaiGrid, Redis and Memcached are not garbage-collected: <b>zero</b>.`:"";
   }
@@ -179,7 +179,7 @@ function render(){
     const bks=ord(mtBk());
     lineChart(document.getElementById("c-mt"),{x:DATA.memtier[bks[0]].map(s=>fmtK(s.level)),xtitle:"connections",yfmt:fmtK,
       series:bks.map(b=>({key:b,vals:DATA.memtier[b].map(s=>s.ops)}))});
-    legend(document.getElementById("lg-mt"),bks);
+    legend(document.getElementById("lg-c-mt"),bks);
     const last=b=>DATA.memtier[b][DATA.memtier[b].length-1];
     document.getElementById("n-mt").innerHTML="At peak: "+ord(mtBk()).map(b=>`<b>${SHORT[b]}</b> ${fmtK(last(b).ops)} (p99.9 ${fmtUs(last(b).p999_us)}, hit ${last(b).hit_ratio}%)`).join(" · ")+".";
   }
@@ -187,17 +187,17 @@ function render(){
     const bks=ord(olBk()),rates=DATA.openloop[bks[0]].map(s=>fmtK(s.rate));
     lineChart(document.getElementById("c-olp"),{x:rates,xtitle:"offered ops/sec",yfmt:fmtUs,logY:true,
       series:bks.map(b=>({key:b,vals:DATA.openloop[b].map(s=>s.p99)}))});
-    legend(document.getElementById("lg-olp"),bks);
+    legend(document.getElementById("lg-c-olp"),bks);
     lineChart(document.getElementById("c-ola"),{x:rates,xtitle:"offered ops/sec",yfmt:fmtK,ideal:DATA.openloop[bks[0]].map(s=>s.rate),
       series:bks.map(b=>({key:b,vals:DATA.openloop[b].map(s=>s.achieved)}))});
-    legend(document.getElementById("lg-ola"),bks,`<span class="lg dash"><span class="sw"></span>ideal</span>`);
+    legend(document.getElementById("lg-c-ola"),bks,`<span class="lg dash"><span class="sw"></span>ideal</span>`);
     document.getElementById("n-ol").innerHTML="Usable throughput (p99 ≤ "+fmtUs(SLO)+"): "+ord(olBk()).map(b=>[b,usable(DATA.openloop[b])]).sort((a,b)=>b[1]-a[1]).map(([b,u])=>`<b>${SHORT[b]}</b> ${fmtK(u)}`).join(" › ")+".";
   }
   if(PRESENT.includes("ycsb")){
     const bks=ord(ycBk()),wl=["a","b","c","d","f"].filter(w=>bks.some(b=>DATA.ycsb[b][w]));
     barChart(document.getElementById("c-yc"),{groups:wl.map(w=>w.toUpperCase()),yfmt:fmtK,
       series:bks.map(b=>({key:b,vals:wl.map(w=>DATA.ycsb[b][w]?DATA.ycsb[b][w].ops:0)}))});
-    legend(document.getElementById("lg-yc"),bks);
+    legend(document.getElementById("lg-c-yc"),bks);
     const y=DATA.ycsb;
     document.getElementById("n-yc").innerHTML=(y["bonsaigrid-redis"]&&y["redis"])?"BonsaiGrid·RESP vs Redis: "+wl.map(w=>y["bonsaigrid-redis"][w]&&y["redis"][w]?`${w.toUpperCase()} <b>${(y["bonsaigrid-redis"][w].ops/y["redis"][w].ops).toFixed(1)}×</b>`:"").filter(Boolean).join(" · ")+".":"";
   }
