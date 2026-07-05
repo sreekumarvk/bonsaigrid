@@ -108,11 +108,12 @@ the platform-diagram "Consistency" box, beyond strict OSS parity.
 - **Live wiring** — Raft/CP messages over the member io_uring transport;
   AtomicLong/etc. client codecs with deferred replies via the broker.
 
-**Remaining:** `CPMap`; multiple named CP groups; read-index (lease) linearizable
-reads; `InstallSnapshot` for a long-down/rejoining member; Semaphore per-session
-auto-release; FencedLock `getLockOwnershipState`; the live-cluster **real
-Hazelcast-client conformance test** (the algorithm is deterministically verified;
-frame-level client compat needs a running cluster).
+**Shipped since:** ✅ `CPMap` (`crates/raft/cpmap.rs`, sim-verified); ✅ read-index
+(lease) linearizable reads (`RaftNode::has_read_lease`).
+**Remaining:** multiple named CP groups; `InstallSnapshot` for a long-down/rejoining
+member; Semaphore per-session auto-release; FencedLock `getLockOwnershipState`; the
+live-cluster **real Hazelcast-client conformance test** (the algorithm is
+deterministically verified; frame-level client compat needs a running cluster).
 
 ---
 
@@ -185,14 +186,19 @@ per-target ack cursors (v1 uses one cursor = all-targets-confirmed).
 
 ## Minor / residual parity items (smaller, opportunistic)
 
-- **Connectors:** Kafka (rskafka) + MapStore/MapLoader + file source shipped; add
-  JDBC, CDC, socket sources/sinks.
+**Shipped 2026-07-05** (see `docs/plans/opportunistic-tail.md`):
+✅ **CardinalityEstimator** (HyperLogLog, full stack: algorithm + persist/snapshot/WAN
++ client codecs) · ✅ **Client-cert-as-principal** (CN → RBAC principal) · ✅ **WAN
+per-target ack cursors** · ✅ **CP CPMap** · ✅ **CP read-index lease reads**.
+
+**Remaining (external-infra or larger):**
+- **Connectors:** Kafka (rskafka) + MapStore/MapLoader + file source shipped; JDBC,
+  CDC, socket sources/sinks need a live backend to test.
 - **Management Center depth:** metrics + Prometheus + MC codecs exist; close
   remaining `MC*` operations for full GUI parity.
-- **Auth backends:** LDAP/JAAS behind the `IdentityProvider` seam.
-- **Data-structure tail:** CardinalityEstimator, ReplicatedMap depth, JCache/ICache
-  edge ops, ReliableTopic guarantees — audit against the client codecs.
-- **Client-cert-as-principal** mapping.
+- **Auth backends:** LDAP/JAAS behind the `IdentityProvider` seam (needs a directory).
+- **Data-structure tail:** ReplicatedMap depth, JCache/ICache edge ops, ReliableTopic
+  guarantees — audit against the client codecs.
 
 ## Already closed earlier (context)
 
