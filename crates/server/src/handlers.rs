@@ -471,6 +471,7 @@ fn is_quorum_gated_write(msg_type: i32) -> bool {
             | 131328 | 131840                // multimap: put, remove (key-partitioned)
             | 1508864                        // ringbuffer: add
             | 1901056 // pncounter: add
+            | 1638656 // cardinality estimator: add
     )
 }
 
@@ -1757,6 +1758,20 @@ pub fn dispatch(
             let v = store.pn_add(&n, delta, get_before);
             let r = map::pncounter_response(1901057, v, 1, uuid, store.pn_tick());
             aux_reply(&n, r, corr, store, cluster, replicator, conn_id)
+        }
+        // ---- CardinalityEstimator (HyperLogLog) ----
+        1638656 => {
+            // add(name, hash): fold the client-computed hash into the sketch.
+            let n = map::decode_name(&req);
+            let hash = read_i64_le(&req[0].content, 16) as u64;
+            store.hll_add(&n, hash);
+            let r = codecs::atomiclong::encode_void_response(1638657);
+            aux_reply(&n, r, corr, store, cluster, replicator, conn_id)
+        }
+        1638912 => {
+            // estimate(name) -> long
+            let v = store.hll_estimate(&map::decode_name(&req)) as i64;
+            vec![codecs::atomiclong::encode_long_response(1638913, v)]
         }
         // ---- FlakeIdGenerator ----
         1835264 => {

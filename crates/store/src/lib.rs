@@ -9,6 +9,7 @@
 //! ops route to one shard, aggregate ops fold over all. The per-shard `Mutex`
 //! is the increment-3 realization of per-core ownership.
 
+pub mod hll;
 pub mod mapstore;
 mod slab;
 
@@ -724,6 +725,7 @@ pub struct Store {
     locks: Mutex<HashMap<(String, Vec<u8>), LockState>>,
     ringbuffers: Mutex<HashMap<String, Ring>>,
     pncounters: Mutex<HashMap<String, i64>>,
+    hlls: Mutex<HashMap<String, hll::Hll>>,
     flake: Mutex<HashMap<String, i64>>,
     schemas: std::sync::OnceLock<serialization::schema::SchemaService>,
     map_stores: Mutex<HashMap<String, std::sync::Arc<dyn crate::mapstore::MapStore>>>,
@@ -820,6 +822,7 @@ impl Store {
             locks: Mutex::new(HashMap::new()),
             ringbuffers: Mutex::new(HashMap::new()),
             pncounters: Mutex::new(HashMap::new()),
+            hlls: Mutex::new(HashMap::new()),
             flake: Mutex::new(HashMap::new()),
             schemas: std::sync::OnceLock::new(),
             map_stores: Mutex::new(HashMap::new()),
@@ -942,6 +945,13 @@ impl Store {
                 .get(name)
                 .map(|v| v.to_le_bytes().to_vec())
                 .unwrap_or_default(),
+            AUX_HLL => self
+                .hlls
+                .lock()
+                .unwrap()
+                .get(name)
+                .map(|h| h.to_bytes())
+                .unwrap_or_default(),
             _ => Vec::new(),
         }
     }
@@ -1016,6 +1026,12 @@ impl Store {
             AUX_PNCOUNTER if data.len() >= 8 => {
                 let v = i64::from_le_bytes(data[0..8].try_into().unwrap());
                 self.pncounters.lock().unwrap().insert(name.to_string(), v);
+            }
+            AUX_HLL => {
+                self.hlls
+                    .lock()
+                    .unwrap()
+                    .insert(name.to_string(), hll::Hll::from_bytes(data));
             }
             _ => {}
         }
@@ -1172,6 +1188,26 @@ impl Store {
         };
         self.emit_aux(AUX_PNCOUNTER, name);
         ret
+    }
+
+    /// Fold a 64-bit hash into the named CardinalityEstimator (HyperLogLog).
+    pub fn hll_add(&self, name: &str, hash: u64) {
+        self.hlls
+            .lock()
+            .unwrap()
+            .entry(name.to_string())
+            .or_default()
+            .add(hash);
+        self.emit_aux(AUX_HLL, name);
+    }
+    /// Estimated distinct count of the named CardinalityEstimator (0 if absent).
+    pub fn hll_estimate(&self, name: &str) -> u64 {
+        self.hlls
+            .lock()
+            .unwrap()
+            .get(name)
+            .map(|h| h.estimate())
+            .unwrap_or(0)
     }
 
     // ---- FlakeIdGenerator: hand out monotonic id batches (base, increment=1, size) ----
@@ -1997,6 +2033,12 @@ impl Store {
             secs.extend_from_slice(&v.to_le_bytes());
             n += 1;
         }
+        for (name, h) in self.hlls.lock().unwrap().iter().filter(|(k, _)| on(k)) {
+            secs.push(AUX_HLL);
+            put_blob(&mut secs, name.as_bytes());
+            put_blob(&mut secs, &h.to_bytes()); // length-prefixed register array
+            n += 1;
+        }
 
         let mut out = Vec::with_capacity(4 + secs.len());
         put_u32(&mut out, n);
@@ -2069,6 +2111,13 @@ impl Store {
                     let Some(v) = r.i64() else { return };
                     self.flake.lock().unwrap().insert(name, v);
                 }
+                AUX_HLL => {
+                    let Some(b) = r.blob() else { return };
+                    self.hlls
+                        .lock()
+                        .unwrap()
+                        .insert(name, hll::Hll::from_bytes(&b));
+                }
                 _ => return,
             }
         }
@@ -2083,6 +2132,7 @@ pub const AUX_MULTIMAP: u8 = 4;
 pub const AUX_RINGBUFFER: u8 = 5;
 pub const AUX_PNCOUNTER: u8 = 6;
 const AUX_FLAKE: u8 = 7;
+pub const AUX_HLL: u8 = 8;
 
 /// The partition a distributed object's name maps to — matching the client, which
 /// hashes the name's String `Data` (`[partitionHash=0][type=-11][len][utf8]`).
@@ -2157,6 +2207,39 @@ impl AuxReader<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cardinality_estimator_persists_and_snapshots() {
+        // A good 64-bit mix (splitmix64) — real callers hash values with a strong hash.
+        let mix = |i: u64| {
+            let mut z = i.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        };
+        let s = Store::new();
+        for i in 0..10_000u64 {
+            s.hll_add("visitors", mix(i));
+        }
+        let est = s.hll_estimate("visitors");
+        assert!(
+            (est as f64 - 10_000.0).abs() / 10_000.0 < 0.03,
+            "estimate {est} off for 10k distinct"
+        );
+        assert_eq!(s.hll_estimate("absent"), 0);
+
+        // single-structure aux roundtrip (the WAL/WAN capture path)
+        let blob = s.serialize_aux(AUX_HLL, "visitors");
+        let s2 = Store::new();
+        s2.install_aux(AUX_HLL, "visitors", &blob);
+        assert_eq!(s2.hll_estimate("visitors"), est);
+
+        // partition-snapshot roundtrip (Hot Restart path)
+        let snap = s.aux_state_for_partition(0, 1);
+        let s3 = Store::new();
+        s3.install_aux_state(&snap);
+        assert_eq!(s3.hll_estimate("visitors"), est);
+    }
 
     #[test]
     fn apply_wan_persists_but_does_not_republish() {
