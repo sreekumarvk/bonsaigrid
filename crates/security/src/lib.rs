@@ -48,6 +48,14 @@ impl SecurityContext {
         self.provider.authenticate(user, pass)
     }
 
+    /// Authenticate a mutually-authenticated TLS client by its certificate: extract
+    /// the subject CN and resolve it to a principal (the cert is the credential).
+    /// `None` if the CN can't be read or has no matching principal.
+    pub fn authenticate_cert(&self, cert_der: &[u8]) -> Option<Arc<Principal>> {
+        let cn = principal::cn_from_cert_der(cert_der)?;
+        self.provider.authenticate_cert(&cn)
+    }
+
     /// The principal to use before/without authentication.
     pub fn anonymous(&self) -> Arc<Principal> {
         self.provider.anonymous()

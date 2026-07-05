@@ -13,6 +13,12 @@ use std::sync::Arc;
 pub trait IdentityProvider: Send + Sync {
     /// Authenticate; `None` means rejected.
     fn authenticate(&self, user: Option<&str>, pass: Option<&str>) -> Option<Arc<Principal>>;
+    /// Resolve a mutually-authenticated TLS client identity (its cert subject CN) to
+    /// a principal. The certificate is the credential (already verified by the mTLS
+    /// handshake), so no password is checked. Default: unsupported (`None`).
+    fn authenticate_cert(&self, _cn: &str) -> Option<Arc<Principal>> {
+        None
+    }
     /// The principal used when authentication is not required (dev/no-config).
     fn anonymous(&self) -> Arc<Principal>;
     /// Whether credentials are mandatory (a real principal must authenticate).
@@ -73,6 +79,11 @@ impl IdentityProvider for StaticIdentityProvider {
         }
     }
 
+    /// A cert CN maps to the principal of the same name (the cert is the credential).
+    fn authenticate_cert(&self, cn: &str) -> Option<Arc<Principal>> {
+        self.principals.get(cn).map(|(_, p)| p.clone())
+    }
+
     fn anonymous(&self) -> Arc<Principal> {
         self.anonymous.clone()
     }
@@ -114,6 +125,20 @@ mod tests {
     #[test]
     fn wrong_password_rejected() {
         assert!(provider().authenticate(Some("app"), Some("nope")).is_none());
+    }
+
+    #[test]
+    fn cert_cn_resolves_to_the_matching_principal() {
+        let p = provider();
+        // The mTLS handshake verified the cert; the CN "app" maps to that principal
+        // with no password.
+        let princ = p.authenticate_cert("app").expect("cert CN 'app' resolves");
+        assert_eq!(princ.name, "app");
+        assert!(princ.authorize(ResourceType::Map, "orders9", Action::Read));
+        assert!(
+            p.authenticate_cert("ghost").is_none(),
+            "unknown CN rejected"
+        );
     }
 
     #[test]

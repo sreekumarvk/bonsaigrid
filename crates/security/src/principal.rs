@@ -47,10 +47,61 @@ impl Principal {
     }
 }
 
+/// Extract the subject Common Name (CN) from a DER-encoded X.509 certificate.
+///
+/// The CN attribute is OID 2.5.4.3, DER-encoded as `06 03 55 04 03`, immediately
+/// followed by the value's TLV (a directory string). A cert carries the issuer DN
+/// then the subject DN, so the LAST CN in the DER is the subject's — the client's
+/// identity. This is a deliberately small, dependency-free scan (short-form lengths,
+/// which cover every realistic CN); a mutually-authenticated cert has already been
+/// cryptographically verified by the TLS handshake, so this only reads the name.
+pub fn cn_from_cert_der(der: &[u8]) -> Option<String> {
+    const CN_OID: [u8; 5] = [0x06, 0x03, 0x55, 0x04, 0x03];
+    let mut found = None;
+    let mut i = 0;
+    while i + CN_OID.len() + 2 <= der.len() {
+        if der[i..i + CN_OID.len()] == CN_OID {
+            let tag_pos = i + CN_OID.len(); // value tag (e.g. 0x0C UTF8String, 0x13 Printable)
+            let len = der[tag_pos + 1] as usize;
+            let start = tag_pos + 2;
+            if len < 0x80 && start + len <= der.len() {
+                if let Ok(s) = std::str::from_utf8(&der[start..start + len]) {
+                    found = Some(s.to_string()); // keep scanning → subject wins over issuer
+                }
+            }
+        }
+        i += 1;
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::permission::ActionSet;
+
+    #[test]
+    fn cn_extractor_reads_subject_cn() {
+        // A minimal DER fragment: CN OID + UTF8String "alice".
+        let mut der = vec![0x30, 0x11]; // filler SEQUENCE header
+        der.extend_from_slice(&[0x06, 0x03, 0x55, 0x04, 0x03]); // CN OID
+        der.extend_from_slice(&[0x0C, 0x05]); // UTF8String, len 5
+        der.extend_from_slice(b"alice");
+        der.extend_from_slice(&[0x00, 0xFF]); // trailing bytes
+        assert_eq!(cn_from_cert_der(&der).as_deref(), Some("alice"));
+        assert_eq!(cn_from_cert_der(b"no cert here"), None);
+    }
+
+    #[test]
+    fn cn_extractor_prefers_subject_over_issuer() {
+        // issuer CN "ca" appears before subject CN "bob"; the subject must win.
+        let mut der = Vec::new();
+        for cn in ["ca", "bob"] {
+            der.extend_from_slice(&[0x06, 0x03, 0x55, 0x04, 0x03, 0x13, cn.len() as u8]);
+            der.extend_from_slice(cn.as_bytes());
+        }
+        assert_eq!(cn_from_cert_der(&der).as_deref(), Some("bob"));
+    }
 
     fn read_only_on_orders() -> Principal {
         Principal {
