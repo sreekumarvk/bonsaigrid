@@ -193,6 +193,33 @@ runs `bencher run --dry-run` to validate — safe with no server at all.
 
 ---
 
+## Open-loop benchmark — coordinated-omission-correct (`run-openloop.sh`)
+
+The closed-loop harness (above) reports peak ops/sec but **understates tail latency**:
+each worker waits for its own reply before sending again, so a server stall simply
+slows the whole loop — the requests that *would* have been sent during the stall are
+never counted (**coordinated omission**). `bench/run-openloop.sh` fixes this with the
+wrk2 method: a dispatcher issues requests at a fixed **offered rate**, and each
+request's latency is measured from its **ideal send time**. When the server
+saturates, the backlog shows up as an exploding tail — the **latency elbow**.
+
+```bash
+bench/run-openloop.sh                                   # 4 backends, offered-rate ladder
+RATIO=1:9 DATA_SIZE=1024 bench/run-openloop.sh          # 90% reads, 1 KB objects
+```
+
+It also fixes the **workload realism** gaps: a **Zipf keyspace** (`KEY_MAX`, `ZIPF_S`)
+so GETs of cold keys genuinely miss (a real **hit/miss ratio**), a configurable
+read/write **`RATIO`**, and **`DATA_SIZE`** objects. Values stay per-key-deterministic,
+so every hit is still verified (0 mismatches). Config: `RATES`, `CONNS`, `STAGE_SECS`,
+`WARMUP_SECS`, plus the isolation vars. The MODE=open path lives in the Go loadgen
+(`openloop.go` / `workload.go`, unit-tested).
+
+`openloop_report.py` merges `results-open-*.json` → `openloop-combined.json`, reports
+**usable throughput** (highest offered rate holding p99 under `SLO_US`, default 10 ms),
+and bakes `bench/deploy/openloop.html` (the elbow: p99/p99.9 vs offered load, and
+achieved-vs-offered with the ideal line).
+
 ## Standard-tool benchmark — memtier_benchmark
 
 `bench/run-memtier.sh` drives every backend with **`memtier_benchmark`** (the Redis

@@ -1,0 +1,141 @@
+<title>Open-loop (coordinated-omission-correct) benchmark</title>
+<style>
+  :root{--surface:#fcfcfb;--plane:#f9f9f7;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;
+    --grid:#e1e0d9;--axis:#c3c2b7;--border:rgba(11,11,11,.1);
+    --memc:#eb6834;--redis:#e87ba4;--bgmc:#eda100;--bgredis:#2a78d6;--bonsai:#2a78d6;
+    --shadow:0 1px 2px rgba(11,11,11,.04),0 6px 20px rgba(11,11,11,.05);--font:system-ui,-apple-system,"Segoe UI",sans-serif}
+  @media(prefers-color-scheme:dark){:root{--surface:#1a1a19;--plane:#0d0d0d;--ink:#fff;--ink2:#c3c2b7;
+    --grid:#2c2c2a;--axis:#383835;--border:rgba(255,255,255,.1);
+    --memc:#d95926;--redis:#d55181;--bgmc:#c98500;--bgredis:#3987e5;--bonsai:#3987e5;--shadow:0 1px 2px rgba(0,0,0,.3),0 8px 28px rgba(0,0,0,.45)}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--plane);color:var(--ink);font-family:var(--font);line-height:1.5;padding:32px 20px 64px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1120px;margin:0 auto}
+  .eyebrow{font-size:12px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);font-weight:600;margin:0 0 6px}
+  h1{font-size:clamp(23px,3.2vw,32px);margin:0 0 10px;font-weight:700;letter-spacing:-.01em;text-wrap:balance}
+  .lede{font-size:15px;color:var(--ink2);max-width:76ch;margin:0 0 18px}
+  .lede b{color:var(--ink);font-weight:600}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 24px}
+  .chip{font-size:12px;color:var(--ink2);background:var(--surface);border:1px solid var(--border);border-radius:999px;padding:4px 11px;white-space:nowrap}
+  .chip b{color:var(--ink);font-weight:600}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  @media(max-width:760px){.grid2{grid-template-columns:1fr}}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:18px 18px 12px;box-shadow:var(--shadow);margin-bottom:18px}
+  .card h2{font-size:15px;margin:0 0 2px;font-weight:650}
+  .card .sub{font-size:12.5px;color:var(--muted);margin:0 0 6px}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;margin:2px 0 4px}
+  .lg{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--ink2);font-weight:600}
+  .lg .sw{width:11px;height:11px;border-radius:3px}
+  .lg.dash .sw{border-radius:0;background:none!important;border-top:3px dashed var(--muted);height:0;width:15px}
+  svg{width:100%;height:auto;display:block;overflow:visible}
+  .tick{fill:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+  .axtitle{fill:var(--muted);font-size:11px;font-weight:600}
+  .endlab{fill:var(--ink);font-size:11px;font-weight:650}
+  table{width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums;margin-top:4px}
+  th,td{padding:6px 8px;text-align:right;border-bottom:1px solid var(--grid);white-space:nowrap}
+  th:first-child,td:first-child{text-align:left}
+  thead th{color:var(--muted);font-weight:600;border-bottom:1px solid var(--axis)}
+  .sw{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px}
+  .callout{background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--bonsai);border-radius:12px;padding:15px 18px;margin:8px 0 22px;box-shadow:var(--shadow)}
+  .callout b{color:var(--ink)} .callout{font-size:13.5px;color:var(--ink2)}
+  footer{margin-top:32px;padding-top:16px;border-top:1px solid var(--grid);font-size:12px;color:var(--muted)}
+  footer code{background:var(--surface);border:1px solid var(--border);border-radius:5px;padding:1px 6px}
+</style>
+<div class="wrap">
+  <p class="eyebrow">open-loop · coordinated-omission-correct · cgroup-isolated</p>
+  <h1>Open-loop benchmark — the latency elbow</h1>
+  <p class="lede">Requests are issued at a fixed <b>offered rate</b>, and each one's latency is measured
+    from its <b>ideal send time</b> — so when the server saturates and the pipe backs up, the tail shows
+    the real queueing delay instead of hiding it. This is the <b>coordinated-omission</b> bug that
+    closed-loop load generators have. Sweeping the offered rate traces the <b>elbow</b>: latency stays
+    flat until the server saturates, then explodes. <span id="summary"></span></p>
+  <div class="callout"><b>Usable throughput</b> is the honest capacity number: the highest offered rate a
+    server sustains while keeping p99 under the SLO. Past it, you're buying throughput with unbounded tail
+    latency — a trade a closed-loop "peak ops/sec" figure never reveals.</div>
+  <div class="chips" id="chips"></div>
+  <div class="grid2">
+    <div class="card"><h2>p99 latency vs offered load</h2><p class="sub">Log scale. The elbow is where it leaves the floor.</p><div class="legend" id="lg1"></div><div id="c1"></div></div>
+    <div class="card"><h2>Achieved vs offered</h2><p class="sub">Dashed = ideal (achieved = offered). Where a line peels off is saturation.</p><div class="legend" id="lg2"></div><div id="c2"></div></div>
+  </div>
+  <div class="card"><h2>p99.9 tail latency vs offered load</h2><p class="sub">Log scale — the far tail degrades even earlier.</p><div class="legend" id="lg3"></div><div id="c3"></div></div>
+  <div class="card"><h2>Usable throughput (p99 under SLO)</h2><div id="tbl"></div></div>
+  <footer><p>Data: <code>bench/loadgen/openloop-combined.json</code> (live when served, else embedded).
+    Reproduce: <code>bench/run-openloop.sh</code> (<code>RATES</code>, <code>CONNS</code>, <code>RATIO</code>,
+    <code>DATA_SIZE</code>, <code>KEY_MAX</code>, <code>ZIPF_S</code>).</p></footer>
+</div>
+<script>
+// __OL_DATA_START__
+let RATES=[25000, 50000, 100000, 200000, 400000, 600000, 800000, 1000000];
+const D={
+"memcached":{achieved:[25000,50000,100000,200000,400000,600238,784872,783684],p99:[1219,637,725,479,348,1258,90886,858177],p999:[1369,1186,1227,1408,953,3000,91971,864174],hit:[85.5,85.3,85.5,85.6,85.7,86.1,86.5,87.0]},
+"bonsaigrid-mc":{achieved:[24995,49999,100000,200000,400000,600240,790085,792256],p99:[1248,1059,1024,815,363,5555,69456,823178],p999:[1535,1273,1304,2884,884,10609,69988,830063],hit:[85.5,85.4,85.5,85.7,85.8,86.1,86.6,87.0]},
+"redis":{achieved:[24997,50000,100000,170404,165921,165081,164406,166614],p99:[1495,1183,1116,585390,2317307,2872721,3148216,3302559],p999:[4776,1490,1469,591698,2339184,2897980,3175600,3330774],hit:[78.3,78.3,78.6,79.1,79.4,80.0,80.4,80.9]},
+"bonsaigrid-redis":{achieved:[25000,50000,99985,200000,400000,548687,552660,548911],p99:[1259,1131,887,597,462,340537,1226235,1786865],p999:[1577,1316,1304,1240,1004,343355,1235566,1802790],hit:[83.9,83.7,83.9,84.1,84.4,84.8,85.3,85.7]},
+};
+// __OL_DATA_END__
+const ORDER=["bonsaigrid-mc","bonsaigrid-redis","memcached","redis","bonsaigrid"];
+const NAME={"memcached":"Memcached","redis":"Redis","bonsaigrid-mc":"BonsaiGrid · memcached","bonsaigrid-redis":"BonsaiGrid · RESP","bonsaigrid":"BonsaiGrid · Hazelcast"};
+const SHORT={"memcached":"Memcached","redis":"Redis","bonsaigrid-mc":"BG · memcached","bonsaigrid-redis":"BG · RESP","bonsaigrid":"BG · Hz"};
+const COL={"memcached":"var(--memc)","redis":"var(--redis)","bonsaigrid-mc":"var(--bgmc)","bonsaigrid-redis":"var(--bgredis)","bonsaigrid":"var(--bonsai)"};
+let HAVE=Object.keys(D);
+const fmtK=n=>n>=1e6?(n/1e6).toFixed(n>=1e7?0:1).replace(/\.0$/,"")+"M":n>=1000?(n/1000).toFixed(n>=1e4?0:1).replace(/\.0$/,"")+"k":Math.round(n)+"";
+const fmtUs=n=>n>=1e6?(n/1e6).toFixed(1)+" s":n>=1000?(n/1000).toFixed(1)+" ms":Math.round(n)+" µs";
+function niceMax(v){if(v<=0)return 1;const p=Math.pow(10,Math.floor(Math.log10(v))),n=v/p;const s=n<=1?1:n<=2?2:n<=2.5?2.5:n<=5?5:10;return s*p;}
+const NS="http://www.w3.org/2000/svg",mk=(t,a)=>{const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);return e;};
+function chart(el,legEl,pick,yfmt,opt){
+  opt=opt||{};const W=720,H=340,m={t:14,r:120,b:40,l:66},iw=W-m.l-m.r,ih=H-m.t-m.b,n=RATES.length;
+  const xAt=i=>m.l+(n<2?0:i/(n-1)*iw);
+  const svg=mk("svg",{viewBox:`0 0 ${W} ${H}`});
+  let yAt,ticks;
+  if(opt.log){
+    let mx=1;HAVE.forEach(k=>pick(k).forEach(v=>{if(v>mx)mx=v}));
+    const lo=0,hi=Math.ceil(Math.log10(mx));yAt=v=>{const lv=Math.log10(Math.max(v,1));return m.t+ih-(lv-lo)/(hi-lo)*ih;};
+    ticks=[];for(let e=lo;e<=hi;e++)ticks.push(Math.pow(10,e));
+  }else{
+    let mx=0;HAVE.forEach(k=>pick(k).forEach(v=>{if(v>mx)mx=v}));if(opt.ideal)RATES.forEach(v=>{if(v>mx)mx=v});mx=niceMax(mx);
+    yAt=v=>m.t+ih-v/mx*ih;ticks=[];for(let g=0;g<=5;g++)ticks.push(mx*g/5);
+  }
+  ticks.forEach(val=>{const y=yAt(val);svg.appendChild(mk("line",{x1:m.l,x2:m.l+iw,y1:y,y2:y,stroke:"var(--grid)","stroke-width":1}));const t=mk("text",{x:m.l-9,y:y+3.5,"text-anchor":"end",class:"tick"});t.textContent=yfmt(val);svg.appendChild(t);});
+  svg.appendChild(mk("line",{x1:m.l,x2:m.l+iw,y1:m.t+ih,y2:m.t+ih,stroke:"var(--axis)","stroke-width":1}));
+  RATES.forEach((r,i)=>{const t=mk("text",{x:xAt(i),y:m.t+ih+17,"text-anchor":"middle",class:"tick"});t.textContent=fmtK(r);svg.appendChild(t);});
+  const xt=mk("text",{x:m.l+iw/2,y:H-1,"text-anchor":"middle",class:"axtitle"});xt.textContent="offered load (ops/sec)";svg.appendChild(xt);
+  if(opt.ideal){const pts=RATES.map((r,i)=>`${xAt(i)},${yAt(r)}`).join(" ");svg.appendChild(mk("polyline",{points:pts,fill:"none",stroke:"var(--muted)","stroke-width":1.5,"stroke-dasharray":"5 4"}));}
+  const ends=[];
+  HAVE.filter(k=>ORDER.includes(k)).sort((a,b)=>ORDER.indexOf(a)-ORDER.indexOf(b)).forEach(k=>{
+    const vals=pick(k);const pts=vals.map((v,i)=>`${xAt(i)},${yAt(v)}`).join(" ");
+    svg.appendChild(mk("polyline",{points:pts,fill:"none",stroke:COL[k],"stroke-width":2,"stroke-linejoin":"round"}));
+    vals.forEach((v,i)=>svg.appendChild(mk("circle",{cx:xAt(i),cy:yAt(v),r:3,fill:COL[k],stroke:"var(--surface)","stroke-width":1.5})));
+    ends.push({txt:SHORT[k],color:COL[k],y:yAt(vals[vals.length-1])});
+  });
+  ends.sort((a,b)=>a.y-b.y);for(let i=1;i<ends.length;i++)if(ends[i].y-ends[i-1].y<13)ends[i].y=ends[i-1].y+13;
+  ends.forEach(e=>{const lx=m.l+iw+8;svg.appendChild(mk("rect",{x:lx,y:e.y-8,width:9,height:9,rx:2,fill:e.color}));const t=mk("text",{x:lx+13,y:Math.min(e.y,m.t+ih),class:"endlab"});t.textContent=e.txt;svg.appendChild(t);});
+  el.innerHTML="";el.appendChild(svg);
+  legEl.innerHTML=ORDER.filter(k=>HAVE.includes(k)).map(k=>`<span class="lg"><span class="sw" style="background:${COL[k]}"></span>${NAME[k]}</span>`).join("")+(opt.ideal?`<span class="lg dash"><span class="sw"></span>ideal (achieved = offered)</span>`:"");
+}
+const SLO=Number(new URLSearchParams(location.search).get("slo")||10000);
+function usable(k){let best=0;const a=D[k];RATES.forEach((r,i)=>{if(a.p99[i]<=SLO&&a.achieved[i]>=0.9*r)best=Math.max(best,a.achieved[i]);});return best;}
+function table(){
+  const rows=ORDER.filter(k=>HAVE.includes(k)).map(k=>({k,u:usable(k),hit:D[k].hit[D[k].hit.length-1]})).sort((a,b)=>b.u-a.u);
+  document.getElementById("tbl").innerHTML=`<div style="overflow-x:auto"><table><thead><tr><th>backend</th><th>usable ops/s (p99≤${fmtUs(SLO)})</th><th>hit%</th></tr></thead><tbody>`+
+    rows.map(r=>`<tr><td><span class="sw" style="background:${COL[r.k]}"></span>${NAME[r.k]}</td><td>${fmtK(r.u)}</td><td>${r.hit.toFixed(1)}</td></tr>`).join("")+`</tbody></table></div>`;
+  document.getElementById("summary").textContent=`Usable throughput at p99≤${fmtUs(SLO)}: `+rows.map(r=>`${SHORT[r.k]} ${fmtK(r.u)}`).join(" › ")+".";
+}
+function render(){
+  chart(document.getElementById("c1"),document.getElementById("lg1"),k=>D[k].p99,fmtUs,{log:true});
+  chart(document.getElementById("c2"),document.getElementById("lg2"),k=>D[k].achieved,fmtK,{ideal:true});
+  chart(document.getElementById("c3"),document.getElementById("lg3"),k=>D[k].p999,fmtUs,{log:true});
+  table();
+  document.getElementById("chips").innerHTML=`<span class="chip">method: <b>open-loop / wrk2</b></span><span class="chip"><b>Zipf</b> keyspace, real hit/miss</span><span class="chip">latency from <b>ideal send time</b></span><span class="chip" id="src">embedded snapshot</span>`;
+}
+async function boot(){
+  try{
+    const cj=await(await fetch(new URL("../loadgen/openloop-combined.json",location.href),{cache:"no-store"})).json();
+    const present=Object.keys(cj).filter(k=>Array.isArray(cj[k])&&cj[k].length);
+    if(!present.length)throw 0;
+    RATES=cj[present[0]].map(s=>s.rate);
+    for(const k of Object.keys(D))delete D[k];
+    for(const k of present)D[k]={achieved:cj[k].map(s=>s.achieved),p99:cj[k].map(s=>s.p99),p999:cj[k].map(s=>s.p999),hit:cj[k].map(s=>s.hit)};
+    HAVE=present;render();document.getElementById("src").innerHTML="source: <b>live openloop-combined.json</b>";
+  }catch(e){render();}
+}
+boot();
+</script>
