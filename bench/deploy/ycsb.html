@@ -1,10 +1,10 @@
 <title>YCSB workload matrix — BonsaiGrid vs Redis</title>
 <style>
   :root{--surface:#fcfcfb;--plane:#f9f9f7;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;
-    --grid:#e1e0d9;--axis:#c3c2b7;--border:rgba(11,11,11,.1);--redis:#e87ba4;--bgredis:#2a78d6;
+    --grid:#e1e0d9;--axis:#c3c2b7;--border:rgba(11,11,11,.1);--redis:#e87ba4;--bgredis:#2a78d6;--memc:#eb6834;--bgmc:#eda100;
     --shadow:0 1px 2px rgba(11,11,11,.04),0 6px 20px rgba(11,11,11,.05);--font:system-ui,-apple-system,"Segoe UI",sans-serif}
   @media(prefers-color-scheme:dark){:root{--surface:#1a1a19;--plane:#0d0d0d;--ink:#fff;--ink2:#c3c2b7;
-    --grid:#2c2c2a;--axis:#383835;--border:rgba(255,255,255,.1);--redis:#d55181;--bgredis:#3987e5;--shadow:0 1px 2px rgba(0,0,0,.3),0 8px 28px rgba(0,0,0,.45)}}
+    --grid:#2c2c2a;--axis:#383835;--border:rgba(255,255,255,.1);--redis:#d55181;--bgredis:#3987e5;--memc:#d95926;--bgmc:#c98500;--shadow:0 1px 2px rgba(0,0,0,.3),0 8px 28px rgba(0,0,0,.45)}}
   *{box-sizing:border-box}
   body{margin:0;background:var(--plane);color:var(--ink);font-family:var(--font);line-height:1.5;padding:32px 20px 64px;-webkit-font-smoothing:antialiased}
   .wrap{max-width:1120px;margin:0 auto}
@@ -35,28 +35,29 @@
 </style>
 <div class="wrap">
   <p class="eyebrow">YCSB core workloads · go-ycsb · cgroup-isolated</p>
-  <h1>YCSB workload matrix — BonsaiGrid vs Redis</h1>
+  <h1>YCSB workload matrix — BonsaiGrid vs Redis &amp; Memcached</h1>
   <p class="lede">The <b>Yahoo! Cloud Serving Benchmark</b> core workloads model real applications the
     throughput ladder can't: <b>A</b> update-heavy, <b>B</b> read-heavy (95/5), <b>C</b> read-only,
     <b>D</b> read-latest (recency skew), <b>F</b> read-modify-write — all over a <b>Zipfian</b> keyspace.
-    Driven by <code>go-ycsb</code>'s redis driver, so it compares <b>BonsaiGrid's RESP protocol</b>
-    head-to-head with real Redis on a standard, recognizable workload set. <span id="summary"></span></p>
+    Driven by <code>go-ycsb</code> (with a memcache driver patched in), so <b>BonsaiGrid via both its
+    RESP and memcached protocols</b> is compared head-to-head with real Redis and Memcached on a
+    standard, recognizable workload set. <span id="summary"></span></p>
   <div class="chips" id="chips"></div>
   <div class="card"><h2>Throughput by workload</h2><p class="sub">ops/sec. Higher is better.</p><div class="legend" id="lg1"></div><div id="c1"></div></div>
   <div class="card"><h2>p99 latency by workload</h2><p class="sub">Microseconds. Lower is better.</p><div class="legend" id="lg2"></div><div id="c2"></div></div>
   <div class="card"><h2>Matrix (throughput / p99 / p99.9)</h2><div id="tbl"></div></div>
   <footer><p>Data: <code>bench/loadgen/ycsb-combined.json</code> (live when served, else embedded).
     Reproduce: <code>bench/run-ycsb.sh</code> (<code>RECORDS</code>, <code>OPS</code>, <code>THREADS</code>,
-    <code>WORKLOADS</code>). go-ycsb has no memcache driver, so the memcached-protocol pair is covered by
-    the memtier and open-loop benchmarks instead.</p></footer>
+    <code>WORKLOADS</code>). go-ycsb ships no memcache driver, so one is patched in at build time
+    (<code>bench/ycsb/patch/</code>) to cover the memcached-protocol backends too.</p></footer>
 </div>
 <script>
 // __YCSB_DATA_START__
-const D={"redis": {"a": {"ops": 162583.0, "p99": 677, "p999": 1146}, "b": {"ops": 165271.0, "p99": 675, "p999": 1085}, "c": {"ops": 166690.0, "p99": 679, "p999": 1124}, "d": {"ops": 173193.0, "p99": 640, "p999": 1114}, "f": {"ops": 166988.0, "p99": 663, "p999": 1543}}, "bonsaigrid-redis": {"a": {"ops": 337692.0, "p99": 389, "p999": 1121}, "b": {"ops": 676808.0, "p99": 335, "p999": 1096}, "c": {"ops": 703782.0, "p99": 329, "p999": 1004}, "d": {"ops": 640204.0, "p99": 389, "p999": 1084}, "f": {"ops": 450195.0, "p99": 328, "p999": 986}}};
+const D={"memcached": {"a": {"ops": 607237.0, "p99": 518, "p999": 1115}, "b": {"ops": 586387.0, "p99": 612, "p999": 1317}, "c": {"ops": 548554.0, "p99": 589, "p999": 1242}, "d": {"ops": 622128.0, "p99": 498, "p999": 1115}, "f": {"ops": 551419.0, "p99": 617, "p999": 1253}}, "bonsaigrid-mc": {"a": {"ops": 612900.0, "p99": 479, "p999": 1076}, "b": {"ops": 592617.0, "p99": 566, "p999": 1264}, "c": {"ops": 566528.0, "p99": 537, "p999": 1141}, "d": {"ops": 605914.0, "p99": 526, "p999": 1658}, "f": {"ops": 566962.0, "p99": 498, "p999": 1311}}, "redis": {"a": {"ops": 165807.0, "p99": 669, "p999": 1076}, "b": {"ops": 163328.0, "p99": 668, "p999": 1160}, "c": {"ops": 164199.0, "p99": 680, "p999": 1147}, "d": {"ops": 173047.0, "p99": 659, "p999": 1165}, "f": {"ops": 165443.0, "p99": 668, "p999": 1551}}, "bonsaigrid-redis": {"a": {"ops": 322114.0, "p99": 423, "p999": 1004}, "b": {"ops": 675958.0, "p99": 272, "p999": 881}, "c": {"ops": 694412.0, "p99": 322, "p999": 982}, "d": {"ops": 659059.0, "p99": 309, "p999": 1073}, "f": {"ops": 380265.0, "p99": 471, "p999": 1308}}};
 // __YCSB_DATA_END__
-const ORDER=["bonsaigrid-redis","redis"];
-const NAME={"redis":"Redis","bonsaigrid-redis":"BonsaiGrid · RESP"};
-const COL={"redis":"var(--redis)","bonsaigrid-redis":"var(--bgredis)"};
+const ORDER=["bonsaigrid-mc","bonsaigrid-redis","memcached","redis"];
+const NAME={"memcached":"Memcached","redis":"Redis","bonsaigrid-mc":"BonsaiGrid · memcached","bonsaigrid-redis":"BonsaiGrid · RESP"};
+const COL={"memcached":"var(--memc)","redis":"var(--redis)","bonsaigrid-mc":"var(--bgmc)","bonsaigrid-redis":"var(--bgredis)"};
 const WLN={a:"A update-heavy",b:"B read-heavy",c:"C read-only",d:"D read-latest",e:"E scan",f:"F read-modify-write"};
 let HAVE=Object.keys(D).filter(k=>ORDER.includes(k));
 const fmtK=n=>n>=1e6?(n/1e6).toFixed(1)+"M":n>=1000?(n/1000).toFixed(n>=1e4?0:1).replace(/\.0$/,"")+"k":Math.round(n)+"";
