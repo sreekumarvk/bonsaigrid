@@ -730,6 +730,7 @@ pub struct Store {
     /// Optional durability sink: when set (after recovery, before serving), each
     /// map mutation emits a WAL record. `None` = no persistence (lock-free check).
     wal_sink: std::sync::OnceLock<std::sync::Arc<dyn WalSink>>,
+    wan_sink: std::sync::OnceLock<std::sync::Arc<dyn WalSink>>,
 }
 
 /// Durability seam: the store emits a record for every map mutation, capturing
@@ -823,12 +824,52 @@ impl Store {
             schemas: std::sync::OnceLock::new(),
             map_stores: Mutex::new(HashMap::new()),
             wal_sink: std::sync::OnceLock::new(),
+            wan_sink: std::sync::OnceLock::new(),
         }
     }
 
     /// Attach the durability sink (once, after recovery, before serving).
     pub fn set_wal_sink(&self, sink: std::sync::Arc<dyn WalSink>) {
         let _ = self.wal_sink.set(sink);
+    }
+
+    /// Attach the WAN capture sink (once, before serving). Local IMap mutations
+    /// emit to this *in addition to* the persistence sink; WAN-applied writes do
+    /// not (see [`Store::apply_wan`]) so cross-cluster replication does not loop.
+    pub fn set_wan_sink(&self, sink: std::sync::Arc<dyn WalSink>) {
+        let _ = self.wan_sink.set(sink);
+    }
+
+    /// Apply an inbound WAN record with the HLC merge, WITHOUT re-publishing it to
+    /// the WAN sink (loop prevention). It still emits to the persistence sink so a
+    /// WAN-applied write survives restart.
+    pub fn apply_wan(
+        &self,
+        op_is_put: bool,
+        map: &str,
+        key: &[u8],
+        value: &[u8],
+        ttl_ms: u64,
+        stamp: u64,
+    ) {
+        self.observe_stamp(stamp);
+        let schemas = self.schemas();
+        if op_is_put {
+            self.shard(map, key)
+                .lock()
+                .unwrap()
+                .put_merge(map, key, value, ttl_ms, stamp, true, schemas);
+        } else {
+            self.shard(map, key).lock().unwrap().remove(map, key, schemas);
+        }
+        if let Some(s) = self.wal_sink.get() {
+            if op_is_put {
+                s.map_put(stamp, ttl_ms, map, key, value);
+            } else {
+                s.map_remove(stamp, map, key);
+            }
+        }
+        // NOTE: deliberately no `wan_sink` emit — this is the loop-prevention seam.
     }
 
     /// Emit a structure's full state to the WAL sink after a mutation (no-op when
@@ -1576,6 +1617,9 @@ impl Store {
         if let Some(s) = self.wal_sink.get() {
             s.map_put(stamp, 0, map, &key, &val);
         }
+        if let Some(s) = self.wan_sink.get() {
+            s.map_put(stamp, 0, map, &key, &val);
+        }
         old
     }
 
@@ -1592,6 +1636,9 @@ impl Store {
             .unwrap()
             .put(map, &key, &val, ttl_ms, stamp, schemas);
         if let Some(s) = self.wal_sink.get() {
+            s.map_put(stamp, ttl_ms, map, &key, &val);
+        }
+        if let Some(s) = self.wan_sink.get() {
             s.map_put(stamp, ttl_ms, map, &key, &val);
         }
         old
@@ -1648,6 +1695,9 @@ impl Store {
         // Persist migrated/replicated entries too (recovery runs before the sink
         // is attached, so replay never re-persists). Idempotent under the stamp.
         if let Some(s) = self.wal_sink.get() {
+            s.map_put(stamp, ttl_ms, map, key, val);
+        }
+        if let Some(s) = self.wan_sink.get() {
             s.map_put(stamp, ttl_ms, map, key, val);
         }
     }
@@ -1772,8 +1822,12 @@ impl Store {
             .lock()
             .unwrap()
             .remove(map, key, schemas);
+        let rm_stamp = self.next_stamp();
         if let Some(s) = self.wal_sink.get() {
-            s.map_remove(self.next_stamp(), map, key);
+            s.map_remove(rm_stamp, map, key);
+        }
+        if let Some(s) = self.wan_sink.get() {
+            s.map_remove(rm_stamp, map, key);
         }
         old
     }
@@ -2097,6 +2151,40 @@ impl AuxReader<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apply_wan_persists_but_does_not_republish() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        struct Counter(Arc<AtomicUsize>);
+        impl WalSink for Counter {
+            fn map_put(&self, _: u64, _: u64, _: &str, _: &[u8], _: &[u8]) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            fn map_remove(&self, _: u64, _: &str, _: &[u8]) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            fn aux_state(&self, _: u8, _: &str, _: &[u8]) {}
+        }
+
+        let s = Store::new();
+        let wal = Arc::new(AtomicUsize::new(0));
+        let wan = Arc::new(AtomicUsize::new(0));
+        s.set_wal_sink(Arc::new(Counter(wal.clone())));
+        s.set_wan_sink(Arc::new(Counter(wan.clone())));
+
+        // A local write emits to BOTH sinks.
+        s.put("m", b"k".to_vec(), b"v".to_vec());
+        assert_eq!(wal.load(Ordering::SeqCst), 1);
+        assert_eq!(wan.load(Ordering::SeqCst), 1);
+
+        // A WAN-applied write emits to the persistence sink only (no re-publish).
+        s.apply_wan(true, "m", b"k2", b"v2", 0, s.next_stamp());
+        assert_eq!(wal.load(Ordering::SeqCst), 2, "persisted");
+        assert_eq!(wan.load(Ordering::SeqCst), 1, "NOT re-published");
+        assert_eq!(s.get("m", b"k2"), Some(b"v2".to_vec()));
+    }
 
     #[test]
     fn put_get_remove_roundtrip() {

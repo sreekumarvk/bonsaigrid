@@ -1,0 +1,9 @@
+[package]
+name = "wan"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+store = { path = "../store" }
+spsc = { path = "../spsc" }
+crc32fast = "1"
