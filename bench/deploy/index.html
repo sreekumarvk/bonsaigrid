@@ -1,10 +1,12 @@
 <title>BonsaiGrid — Benchmark Report</title>
 <style>
   :root{--surface:#fcfcfb;--plane:#f9f9f7;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;
-    --grid:#e1e0d9;--axis:#c3c2b7;--border:rgba(11,11,11,.1);--bonsai:#2a78d6;--good:#006300;
+    --grid:#e1e0d9;--axis:#c3c2b7;--border:rgba(11,11,11,.1);
+    --bonsai:#2a78d6;--hazel:#008300;--redis:#e87ba4;--memc:#eb6834;--bgmc:#eda100;
     --shadow:0 1px 2px rgba(11,11,11,.04),0 6px 20px rgba(11,11,11,.05);--font:system-ui,-apple-system,"Segoe UI",sans-serif}
-  @media(prefers-color-scheme:dark){:root{--surface:#1a1a19;--plane:#0d0d0d;--ink:#fff;--ink2:#c3c2b7;
-    --grid:#2c2c2a;--axis:#383835;--border:rgba(255,255,255,.1);--bonsai:#3987e5;--good:#0ca30c;--shadow:0 1px 2px rgba(0,0,0,.3),0 8px 28px rgba(0,0,0,.45)}}
+  @media(prefers-color-scheme:dark){:root{--surface:#1a1a19;--plane:#0d0d0d;--ink:#fff;--ink2:#c3c2b7;--muted:#898781;
+    --grid:#2c2c2a;--axis:#383835;--border:rgba(255,255,255,.1);
+    --bonsai:#3987e5;--hazel:#008300;--redis:#d55181;--memc:#d95926;--bgmc:#c98500;--shadow:0 1px 2px rgba(0,0,0,.3),0 8px 28px rgba(0,0,0,.45)}}
   *{box-sizing:border-box}
   body{margin:0;background:var(--plane);color:var(--ink);font-family:var(--font);line-height:1.5;padding:32px 20px 64px;-webkit-font-smoothing:antialiased}
   .wrap{max-width:1120px;margin:0 auto}
@@ -12,125 +14,193 @@
   h1{font-size:clamp(24px,3.4vw,34px);margin:0 0 10px;font-weight:700;letter-spacing:-.01em;text-wrap:balance}
   .lede{font-size:15px;color:var(--ink2);max-width:78ch;margin:0 0 22px}
   .lede b{color:var(--ink);font-weight:600}
-  .cards{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:0 0 26px}
-  @media(max-width:720px){.cards{grid-template-columns:1fr}}
-  .card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:18px 19px;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:10px}
-  .card h3{margin:0;font-size:15px;font-weight:700}
-  .card .tag{font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
-  .card p{margin:0;font-size:13px;color:var(--ink2)}
-  .card .big{font-size:22px;font-weight:750;letter-spacing:-.02em;color:var(--bonsai)}
-  .card .big small{font-size:13px;font-weight:600;color:var(--ink2)}
-  .rows{font-size:12.5px;color:var(--ink2);font-variant-numeric:tabular-nums}
-  .rows div{display:flex;justify-content:space-between;padding:2px 0;border-bottom:1px solid var(--grid)}
-  .rows b{color:var(--ink);font-weight:650}
-  .open{margin-top:auto;font-size:12.5px;font-weight:650;color:var(--bonsai);background:none;border:0;padding:6px 0 0;cursor:pointer;text-align:left}
-  .miss{opacity:.55}
-  .tabs{display:flex;flex-wrap:wrap;gap:4px;background:var(--surface);border:1px solid var(--border);border-radius:11px;padding:4px;box-shadow:var(--shadow);margin:0 0 14px;position:sticky;top:12px;z-index:5}
-  .tabs button{font-family:var(--font);font-size:13px;font-weight:600;color:var(--ink2);background:none;border:0;padding:7px 14px;border-radius:8px;cursor:pointer}
-  .tabs button[aria-pressed=true]{background:var(--ink);color:var(--surface)}
-  .frame{width:100%;height:82vh;border:1px solid var(--border);border-radius:14px;background:var(--surface);box-shadow:var(--shadow)}
-  .hidden{display:none}
-  footer{margin-top:30px;padding-top:16px;border-top:1px solid var(--grid);font-size:12px;color:var(--muted)}
+  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:0 0 30px}
+  @media(max-width:860px){.cards{grid-template-columns:1fr 1fr}}
+  @media(max-width:480px){.cards{grid-template-columns:1fr}}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:15px 16px;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:6px}
+  .card .tag{font-size:10.5px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+  .card h3{margin:0;font-size:13.5px;font-weight:700}
+  .card .big{font-size:22px;font-weight:750;letter-spacing:-.02em;color:var(--bonsai);line-height:1.1}
+  .card .sub{font-size:11.5px;color:var(--ink2)}
+  .card.miss{opacity:.5}
+  .sec{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:20px 20px 14px;box-shadow:var(--shadow);margin:0 0 18px}
+  .sec h2{font-size:16px;margin:0 0 3px;font-weight:700}
+  .sec .d{font-size:13px;color:var(--ink2);margin:0 0 10px;max-width:80ch}
+  .sec .d b{color:var(--ink)}
+  .g2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:720px){.g2{grid-template-columns:1fr}}
+  .ct h4{font-size:12.5px;font-weight:650;margin:2px 0 2px;color:var(--ink2)}
+  .legend{display:flex;gap:13px;flex-wrap:wrap;margin:2px 0 4px}
+  .lg{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ink2);font-weight:600}
+  .lg .sw{width:11px;height:11px;border-radius:3px}
+  .lg.dash .sw{border-radius:0;background:none!important;border-top:3px dashed var(--muted);height:0;width:15px}
+  svg{width:100%;height:auto;display:block;overflow:visible}
+  .tick{fill:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+  .axtitle{fill:var(--muted);font-size:11px;font-weight:600}
+  .endlab{fill:var(--ink);font-size:10.5px;font-weight:650}
+  .barlab{fill:var(--ink);font-size:10px;font-weight:650;font-variant-numeric:tabular-nums}
+  .glab{fill:var(--ink2);font-size:11.5px;font-weight:600}
+  .note{font-size:12.5px;color:var(--ink2);margin:8px 2px 0}
+  .note b{color:var(--ink)}
+  footer{margin-top:22px;padding-top:16px;border-top:1px solid var(--grid);font-size:12px;color:var(--muted)}
   footer code{background:var(--surface);border:1px solid var(--border);border-radius:5px;padding:1px 6px}
 </style>
 <div class="wrap">
   <p class="eyebrow">bench/benchmark-all.sh · cgroup-isolated · every result value-verified</p>
   <h1>BonsaiGrid — Benchmark Report</h1>
-  <p class="lede">One page for every measurement. Each benchmark stresses a different axis —
-    a <b>fair four-backend</b> comparison, an <b>industry-standard tool</b> (memtier), a
+  <p class="lede">One self-contained page for every measurement. Each benchmark stresses a different
+    axis — a <b>fair four-backend</b> comparison, an <b>industry-standard tool</b> (memtier), a
     <b>coordinated-omission-correct</b> capacity test, and the <b>YCSB</b> workload matrix.
-    The cards summarize; the tabs open each full interactive dashboard. <span id="src"></span></p>
+    <span id="src"></span></p>
   <div class="cards" id="cards"></div>
-
-  <div class="tabs" id="tabs"></div>
-  <div id="panes"></div>
-
-  <footer><p>Generated by <code>bench/gen_index.py</code> from the per-benchmark
-    <code>*-combined.json</code>. Reproduce everything with <code>bench/benchmark-all.sh</code>.
-    Tabs embed the standalone dashboards — serve the repo over http
-    (<code>python3 -m http.server</code>) so they load the latest data live; opened as a
-    <code>file://</code> they fall back to each dashboard's embedded snapshot.</p></footer>
+  <div id="secs"></div>
+  <footer><p>Generated by <code>bench/gen_index.py</code> from each benchmark's
+    <code>*-combined.json</code>; all charts are baked inline. Reproduce with
+    <code>bench/benchmark-all.sh</code>. The full interactive dashboards live beside this file
+    (<code>dashboard.html</code>, <code>memtier.html</code>, <code>openloop.html</code>,
+    <code>ycsb.html</code>) — serve the repo over http to open them.</p></footer>
 </div>
 <script>
 // __REPORT_START__
-const REPORT={"closed": {"peak": {"memcached": 360628, "redis": 85080, "hazelcast": 144582, "bonsaigrid": 268072, "bonsaigrid-mc": 347962}, "gc": {"hazelcast": {"pauses": 33, "total_ms": 582.4, "max_ms": 47.6, "avg_ms": 17.65}}}, "memtier": {"memcached": {"ops": 1186814, "p999": 615.0, "hit": 10.7}, "redis": {"ops": 212351, "p999": 1367.0, "hit": 10.4}, "bonsaigrid-mc": {"ops": 1120179, "p999": 479.0, "hit": 12.1}, "bonsaigrid-redis": {"ops": 1158667, "p999": 679.0, "hit": 12.5}}, "openloop": {"slo_ms": 10, "b": {"memcached": {"usable": 600238, "hit": 87.0}, "bonsaigrid-mc": {"usable": 600240, "hit": 87.0}, "redis": {"usable": 100000, "hit": 80.9}, "bonsaigrid-redis": {"usable": 400000, "hit": 85.7}}}, "ycsb": {"redis": {"a": 162583, "b": 165271, "c": 166690, "d": 173193, "f": 166988}, "bonsaigrid-redis": {"a": 337692, "b": 676808, "c": 703782, "d": 640204, "f": 450195}}};
+const DATA={"closed": {"memcached": [{"level": 1, "set": {"op": "set", "count": 74398, "rps": 18599.5, "p50_us": 23, "p90_us": 29, "p99_us": 146, "p999_us": 441}, "get": {"op": "get", "count": 74398, "rps": 18599.5, "p50_us": 23, "p90_us": 28, "p99_us": 88, "p999_us": 351}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265144095, "t_end_ms": 1783265148096, "cpu": {"avg_pct": 6.1, "max_pct": 14.6}, "mem": {"avg_mb": 145.8, "max_mb": 156.9}, "res_samples": 15}, {"level": 2, "set": {"op": "set", "count": 138052, "rps": 34513, "p50_us": 24, "p90_us": 29, "p99_us": 175, "p999_us": 391}, "get": {"op": "get", "count": 138052, "rps": 34513, "p50_us": 24, "p90_us": 29, "p99_us": 163, "p999_us": 321}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265148099, "t_end_ms": 1783265152100, "cpu": {"avg_pct": 9.4, "max_pct": 11.9}, "mem": {"avg_mb": 178.3, "max_mb": 196.9}, "res_samples": 15}, {"level": 4, "set": {"op": "set", "count": 220840, "rps": 55210, "p50_us": 29, "p90_us": 47, "p99_us": 169, "p999_us": 374}, "get": {"op": "get", "count": 220840, "rps": 55210, "p50_us": 29, "p90_us": 46, "p99_us": 161, "p999_us": 272}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265152108, "t_end_ms": 1783265156112, "cpu": {"avg_pct": 15.1, "max_pct": 20.5}, "mem": {"avg_mb": 231.1, "max_mb": 263.6}, "res_samples": 15}, {"level": 8, "set": {"op": "set", "count": 466243, "rps": 116560.75, "p50_us": 30, "p90_us": 43, "p99_us": 141, "p999_us": 393}, "get": {"op": "get", "count": 466243, "rps": 116560.75, "p50_us": 29, "p90_us": 43, "p99_us": 80, "p999_us": 220}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265156129, "t_end_ms": 1783265160138, "cpu": {"avg_pct": 28.6, "max_pct": 30.2}, "mem": {"avg_mb": 335.4, "max_mb": 402.0}, "res_samples": 16}, {"level": 16, "set": {"op": "set", "count": 872425, "rps": 218106.25, "p50_us": 30, "p90_us": 53, "p99_us": 113, "p999_us": 427}, "get": {"op": "get", "count": 872425, "rps": 218106.25, "p50_us": 30, "p90_us": 52, "p99_us": 93, "p999_us": 344}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265160163, "t_end_ms": 1783265164179, "cpu": {"avg_pct": 53.1, "max_pct": 59.1}, "mem": {"avg_mb": 537.9, "max_mb": 659.9}, "res_samples": 15}, {"level": 32, "set": {"op": "set", "count": 1397483, "rps": 349370.75, "p50_us": 33, "p90_us": 63, "p99_us": 369, "p999_us": 871}, "get": {"op": "get", "count": 1397483, "rps": 349370.75, "p50_us": 33, "p90_us": 62, "p99_us": 262, "p999_us": 1163}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265164239, "t_end_ms": 1783265168265, "cpu": {"avg_pct": 69.1, "max_pct": 73.3}, "mem": {"avg_mb": 861.6, "max_mb": 1052.6}, "res_samples": 15}, {"level": 64, "set": {"op": "set", "count": 1451687, "rps": 362921.75, "p50_us": 58, "p90_us": 141, "p99_us": 641, "p999_us": 1376}, "get": {"op": "get", "count": 1451687, "rps": 362921.75, "p50_us": 58, "p90_us": 139, "p99_us": 722, "p999_us": 1857}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265168348, "t_end_ms": 1783265172371, "cpu": {"avg_pct": 71.4, "max_pct": 75.9}, "mem": {"avg_mb": 1306.7, "max_mb": 1502.8}, "res_samples": 15}, {"level": 128, "set": {"op": "set", "count": 1442512, "rps": 360628, "p50_us": 111, "p90_us": 339, "p99_us": 1121, "p999_us": 2259}, "get": {"op": "get", "count": 1442512, "rps": 360628, "p50_us": 110, "p90_us": 337, "p99_us": 1382, "p999_us": 2880}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265172479, "t_end_ms": 1783265176506, "cpu": {"avg_pct": 69.6, "max_pct": 77.9}, "mem": {"avg_mb": 1725.4, "max_mb": 1943.4}, "res_samples": 16}], "redis": [{"level": 1, "set": {"op": "set", "count": 65641, "rps": 16410.25, "p50_us": 26, "p90_us": 34, "p99_us": 173, "p999_us": 434}, "get": {"op": "get", "count": 65641, "rps": 16410.25, "p50_us": 25, "p90_us": 32, "p99_us": 156, "p999_us": 474}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265179341, "t_end_ms": 1783265183341, "cpu": {"avg_pct": 6.0, "max_pct": 7.0}, "mem": {"avg_mb": 51.5, "max_mb": 58.3}, "res_samples": 15}, {"level": 2, "set": {"op": "set", "count": 168646, "rps": 42161.5, "p50_us": 19, "p90_us": 32, "p99_us": 70, "p999_us": 391}, "get": {"op": "get", "count": 168646, "rps": 42161.5, "p50_us": 19, "p90_us": 31, "p99_us": 60, "p999_us": 358}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265183344, "t_end_ms": 1783265187345, "cpu": {"avg_pct": 8.2, "max_pct": 9.3}, "mem": {"avg_mb": 84.7, "max_mb": 103.6}, "res_samples": 15}, {"level": 4, "set": {"op": "set", "count": 187128, "rps": 46782, "p50_us": 32, "p90_us": 62, "p99_us": 178, "p999_us": 368}, "get": {"op": "get", "count": 187128, "rps": 46782, "p50_us": 32, "p90_us": 60, "p99_us": 176, "p999_us": 368}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265187354, "t_end_ms": 1783265191357, "cpu": {"avg_pct": 8.6, "max_pct": 9.0}, "mem": {"avg_mb": 131.0, "max_mb": 166.5}, "res_samples": 15}, {"level": 8, "set": {"op": "set", "count": 224917, "rps": 56229.25, "p50_us": 54, "p90_us": 120, "p99_us": 348, "p999_us": 615}, "get": {"op": "get", "count": 224917, "rps": 56229.25, "p50_us": 54, "p90_us": 108, "p99_us": 346, "p999_us": 600}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265191368, "t_end_ms": 1783265195371, "cpu": {"avg_pct": 9.9, "max_pct": 10.5}, "mem": {"avg_mb": 190.7, "max_mb": 214.4}, "res_samples": 15}, {"level": 16, "set": {"op": "set", "count": 267927, "rps": 66981.75, "p50_us": 98, "p90_us": 213, "p99_us": 410, "p999_us": 781}, "get": {"op": "get", "count": 267927, "rps": 66981.75, "p50_us": 96, "p90_us": 208, "p99_us": 413, "p999_us": 818}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265195393, "t_end_ms": 1783265199397, "cpu": {"avg_pct": 10.6, "max_pct": 11.0}, "mem": {"avg_mb": 253.0, "max_mb": 286.0}, "res_samples": 16}, {"level": 32, "set": {"op": "set", "count": 276745, "rps": 69186.25, "p50_us": 215, "p90_us": 361, "p99_us": 564, "p999_us": 1607}, "get": {"op": "get", "count": 276745, "rps": 69186.25, "p50_us": 211, "p90_us": 356, "p99_us": 570, "p999_us": 1608}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265199417, "t_end_ms": 1783265203422, "cpu": {"avg_pct": 11.8, "max_pct": 12.1}, "mem": {"avg_mb": 350.3, "max_mb": 379.4}, "res_samples": 15}, {"level": 64, "set": {"op": "set", "count": 343053, "rps": 85763.25, "p50_us": 361, "p90_us": 513, "p99_us": 755, "p999_us": 1814}, "get": {"op": "get", "count": 343053, "rps": 85763.25, "p50_us": 362, "p90_us": 510, "p99_us": 754, "p999_us": 1809}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265203457, "t_end_ms": 1783265207462, "cpu": {"avg_pct": 12.2, "max_pct": 12.4}, "mem": {"avg_mb": 418.0, "max_mb": 457.8}, "res_samples": 15}, {"level": 128, "set": {"op": "set", "count": 340322, "rps": 85080.5, "p50_us": 731, "p90_us": 904, "p99_us": 1520, "p999_us": 2884}, "get": {"op": "get", "count": 340322, "rps": 85080.5, "p50_us": 732, "p90_us": 895, "p99_us": 1514, "p999_us": 2764}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265207491, "t_end_ms": 1783265211498, "cpu": {"avg_pct": 12.3, "max_pct": 12.5}, "mem": {"avg_mb": 503.8, "max_mb": 543.8}, "res_samples": 15}], "hazelcast": [{"level": 1, "set": {"op": "set", "count": 8436, "rps": 2109, "p50_us": 224, "p90_us": 395, "p99_us": 624, "p999_us": 926}, "get": {"op": "get", "count": 8436, "rps": 2109, "p50_us": 213, "p90_us": 386, "p99_us": 633, "p999_us": 1012}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265219927, "t_end_ms": 1783265223927, "cpu": {"avg_pct": 8.1, "max_pct": 28.3}, "mem": {"avg_mb": 687.6, "max_mb": 693.2}, "res_samples": 15}, {"level": 2, "set": {"op": "set", "count": 19152, "rps": 4788, "p50_us": 206, "p90_us": 360, "p99_us": 499, "p999_us": 604}, "get": {"op": "get", "count": 19152, "rps": 4788, "p50_us": 197, "p90_us": 356, "p99_us": 497, "p999_us": 609}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265223928, "t_end_ms": 1783265227928, "cpu": {"avg_pct": 9.2, "max_pct": 10.6}, "mem": {"avg_mb": 687.1, "max_mb": 687.4}, "res_samples": 15}, {"level": 4, "set": {"op": "set", "count": 44729, "rps": 11182.25, "p50_us": 179, "p90_us": 327, "p99_us": 458, "p999_us": 631}, "get": {"op": "get", "count": 44729, "rps": 11182.25, "p50_us": 170, "p90_us": 324, "p99_us": 451, "p999_us": 616}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265227930, "t_end_ms": 1783265231931, "cpu": {"avg_pct": 17.1, "max_pct": 23.8}, "mem": {"avg_mb": 724.0, "max_mb": 812.7}, "res_samples": 15}, {"level": 8, "set": {"op": "set", "count": 177953, "rps": 44488.25, "p50_us": 65, "p90_us": 191, "p99_us": 338, "p999_us": 464}, "get": {"op": "get", "count": 177953, "rps": 44488.25, "p50_us": 62, "p90_us": 189, "p99_us": 340, "p999_us": 453}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265231934, "t_end_ms": 1783265235957, "cpu": {"avg_pct": 31.3, "max_pct": 36.3}, "mem": {"avg_mb": 1012.9, "max_mb": 1080.2}, "res_samples": 16}, {"level": 16, "set": {"op": "set", "count": 462171, "rps": 115542.75, "p50_us": 59, "p90_us": 101, "p99_us": 229, "p999_us": 408}, "get": {"op": "get", "count": 462171, "rps": 115542.75, "p50_us": 57, "p90_us": 96, "p99_us": 212, "p999_us": 378}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265235975, "t_end_ms": 1783265239976, "cpu": {"avg_pct": 59.8, "max_pct": 64.0}, "mem": {"avg_mb": 1184.4, "max_mb": 1275.2}, "res_samples": 15}, {"level": 32, "set": {"op": "set", "count": 487564, "rps": 121891, "p50_us": 99, "p90_us": 242, "p99_us": 546, "p999_us": 927}, "get": {"op": "get", "count": 487564, "rps": 121891, "p50_us": 95, "p90_us": 217, "p99_us": 470, "p999_us": 829}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265240005, "t_end_ms": 1783265244012, "cpu": {"avg_pct": 66.6, "max_pct": 70.6}, "mem": {"avg_mb": 1560.3, "max_mb": 1843.5}, "res_samples": 15}, {"level": 64, "set": {"op": "set", "count": 503999, "rps": 125999.75, "p50_us": 193, "p90_us": 513, "p99_us": 927, "p999_us": 1447}, "get": {"op": "get", "count": 503999, "rps": 125999.75, "p50_us": 186, "p90_us": 492, "p99_us": 902, "p999_us": 1428}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265244050, "t_end_ms": 1783265248054, "cpu": {"avg_pct": 72.7, "max_pct": 89.5}, "mem": {"avg_mb": 1869.1, "max_mb": 1889.4}, "res_samples": 16}, {"level": 128, "set": {"op": "set", "count": 578329, "rps": 144582.25, "p50_us": 312, "p90_us": 942, "p99_us": 1597, "p999_us": 2502}, "get": {"op": "get", "count": 578329, "rps": 144582.25, "p50_us": 298, "p90_us": 927, "p99_us": 1577, "p999_us": 2441}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265248098, "t_end_ms": 1783265252102, "cpu": {"avg_pct": 77.5, "max_pct": 89.6}, "mem": {"avg_mb": 2295.7, "max_mb": 2432.8}, "res_samples": 15}], "bonsaigrid": [{"level": 1, "set": {"op": "set", "count": 11555, "rps": 2888.75, "p50_us": 189, "p90_us": 301, "p99_us": 457, "p999_us": 1189}, "get": {"op": "get", "count": 11555, "rps": 2888.75, "p50_us": 180, "p90_us": 257, "p99_us": 410, "p999_us": 941}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265255169, "t_end_ms": 1783265259169, "cpu": {"avg_pct": 6.3, "max_pct": 35.8}, "mem": {"avg_mb": 144.0, "max_mb": 144.1}, "res_samples": 15}, {"level": 2, "set": {"op": "set", "count": 28847, "rps": 7211.75, "p50_us": 104, "p90_us": 262, "p99_us": 408, "p999_us": 1530}, "get": {"op": "get", "count": 28847, "rps": 7211.75, "p50_us": 92, "p90_us": 258, "p99_us": 401, "p999_us": 1361}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265259171, "t_end_ms": 1783265263171, "cpu": {"avg_pct": 7.2, "max_pct": 8.0}, "mem": {"avg_mb": 150.5, "max_mb": 180.6}, "res_samples": 16}, {"level": 4, "set": {"op": "set", "count": 80317, "rps": 20079.25, "p50_us": 61, "p90_us": 217, "p99_us": 338, "p999_us": 798}, "get": {"op": "get", "count": 80317, "rps": 20079.25, "p50_us": 59, "p90_us": 213, "p99_us": 337, "p999_us": 953}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265263173, "t_end_ms": 1783265267174, "cpu": {"avg_pct": 12.4, "max_pct": 13.6}, "mem": {"avg_mb": 180.3, "max_mb": 180.6}, "res_samples": 15}, {"level": 8, "set": {"op": "set", "count": 246666, "rps": 61666.5, "p50_us": 47, "p90_us": 92, "p99_us": 271, "p999_us": 1331}, "get": {"op": "get", "count": 246666, "rps": 61666.5, "p50_us": 46, "p90_us": 88, "p99_us": 267, "p999_us": 1240}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265267182, "t_end_ms": 1783265271183, "cpu": {"avg_pct": 22.1, "max_pct": 24.2}, "mem": {"avg_mb": 263.3, "max_mb": 290.6}, "res_samples": 15}, {"level": 16, "set": {"op": "set", "count": 605321, "rps": 151330.25, "p50_us": 42, "p90_us": 69, "p99_us": 191, "p999_us": 1374}, "get": {"op": "get", "count": 605321, "rps": 151330.25, "p50_us": 41, "p90_us": 67, "p99_us": 186, "p999_us": 1309}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265271198, "t_end_ms": 1783265275202, "cpu": {"avg_pct": 41.0, "max_pct": 44.7}, "mem": {"avg_mb": 436.0, "max_mb": 584.7}, "res_samples": 15}, {"level": 32, "set": {"op": "set", "count": 972342, "rps": 243085.5, "p50_us": 51, "p90_us": 88, "p99_us": 230, "p999_us": 1615}, "get": {"op": "get", "count": 972342, "rps": 243085.5, "p50_us": 50, "p90_us": 87, "p99_us": 230, "p999_us": 1588}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265275244, "t_end_ms": 1783265279263, "cpu": {"avg_pct": 58.1, "max_pct": 64.3}, "mem": {"avg_mb": 741.3, "max_mb": 906.0}, "res_samples": 15}, {"level": 64, "set": {"op": "set", "count": 1082699, "rps": 270674.75, "p50_us": 83, "p90_us": 191, "p99_us": 623, "p999_us": 2457}, "get": {"op": "get", "count": 1082699, "rps": 270674.75, "p50_us": 83, "p90_us": 191, "p99_us": 619, "p999_us": 2400}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265279325, "t_end_ms": 1783265283348, "cpu": {"avg_pct": 63.4, "max_pct": 67.6}, "mem": {"avg_mb": 1135.2, "max_mb": 1218.7}, "res_samples": 15}, {"level": 128, "set": {"op": "set", "count": 1072290, "rps": 268072.5, "p50_us": 124, "p90_us": 506, "p99_us": 1331, "p999_us": 9436}, "get": {"op": "get", "count": 1072290, "rps": 268072.5, "p50_us": 124, "p90_us": 507, "p99_us": 1329, "p999_us": 6383}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265283429, "t_end_ms": 1783265287446, "cpu": {"avg_pct": 61.7, "max_pct": 71.2}, "mem": {"avg_mb": 1594.3, "max_mb": 1911.3}, "res_samples": 15}], "bonsaigrid-mc": [{"level": 1, "set": {"op": "set", "count": 63731, "rps": 15932.75, "p50_us": 29, "p90_us": 32, "p99_us": 53, "p999_us": 250}, "get": {"op": "get", "count": 63731, "rps": 15932.75, "p50_us": 29, "p90_us": 32, "p99_us": 50, "p999_us": 248}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265324429, "t_end_ms": 1783265328430, "cpu": {"avg_pct": 6.4, "max_pct": 12.0}, "mem": {"avg_mb": 181.7, "max_mb": 182.4}, "res_samples": 15}, {"level": 2, "set": {"op": "set", "count": 147397, "rps": 36849.25, "p50_us": 24, "p90_us": 29, "p99_us": 81, "p999_us": 248}, "get": {"op": "get", "count": 147397, "rps": 36849.25, "p50_us": 24, "p90_us": 29, "p99_us": 73, "p999_us": 232}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265328432, "t_end_ms": 1783265332434, "cpu": {"avg_pct": 12.2, "max_pct": 13.3}, "mem": {"avg_mb": 250.7, "max_mb": 274.6}, "res_samples": 15}, {"level": 4, "set": {"op": "set", "count": 196125, "rps": 49031.25, "p50_us": 33, "p90_us": 53, "p99_us": 157, "p999_us": 269}, "get": {"op": "get", "count": 196125, "rps": 49031.25, "p50_us": 33, "p90_us": 53, "p99_us": 157, "p999_us": 271}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265332439, "t_end_ms": 1783265336443, "cpu": {"avg_pct": 15.8, "max_pct": 16.5}, "mem": {"avg_mb": 294.0, "max_mb": 367.5}, "res_samples": 15}, {"level": 8, "set": {"op": "set", "count": 417170, "rps": 104292.5, "p50_us": 33, "p90_us": 48, "p99_us": 87, "p999_us": 260}, "get": {"op": "get", "count": 417170, "rps": 104292.5, "p50_us": 33, "p90_us": 48, "p99_us": 84, "p999_us": 236}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265336453, "t_end_ms": 1783265340459, "cpu": {"avg_pct": 30.2, "max_pct": 31.7}, "mem": {"avg_mb": 436.6, "max_mb": 569.7}, "res_samples": 15}, {"level": 16, "set": {"op": "set", "count": 769598, "rps": 192399.5, "p50_us": 35, "p90_us": 56, "p99_us": 89, "p999_us": 273}, "get": {"op": "get", "count": 769598, "rps": 192399.5, "p50_us": 35, "p90_us": 56, "p99_us": 90, "p999_us": 282}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265340490, "t_end_ms": 1783265344506, "cpu": {"avg_pct": 48.0, "max_pct": 51.6}, "mem": {"avg_mb": 674.1, "max_mb": 889.7}, "res_samples": 16}, {"level": 32, "set": {"op": "set", "count": 1182166, "rps": 295541.5, "p50_us": 43, "p90_us": 80, "p99_us": 159, "p999_us": 754}, "get": {"op": "get", "count": 1182166, "rps": 295541.5, "p50_us": 44, "p90_us": 80, "p99_us": 168, "p999_us": 882}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265344562, "t_end_ms": 1783265348582, "cpu": {"avg_pct": 63.7, "max_pct": 67.9}, "mem": {"avg_mb": 1057.9, "max_mb": 1203.3}, "res_samples": 15}, {"level": 64, "set": {"op": "set", "count": 1395386, "rps": 348846.5, "p50_us": 65, "p90_us": 129, "p99_us": 332, "p999_us": 1309}, "get": {"op": "get", "count": 1395386, "rps": 348846.5, "p50_us": 66, "p90_us": 130, "p99_us": 454, "p999_us": 1787}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265348655, "t_end_ms": 1783265352679, "cpu": {"avg_pct": 71.9, "max_pct": 82.3}, "mem": {"avg_mb": 1579.4, "max_mb": 1897.1}, "res_samples": 16}, {"level": 128, "set": {"op": "set", "count": 1391846, "rps": 347961.5, "p50_us": 117, "p90_us": 302, "p99_us": 1080, "p999_us": 2651}, "get": {"op": "get", "count": 1391846, "rps": 347961.5, "p50_us": 118, "p90_us": 309, "p99_us": 1434, "p999_us": 3186}, "errors": 0, "mismatch": 0, "t_start_ms": 1783265352777, "t_end_ms": 1783265356797, "cpu": {"avg_pct": 74.1, "max_pct": 84.3}, "mem": {"avg_mb": 2013.7, "max_mb": 2599.9}, "res_samples": 15}]}, "gc": {"hazelcast": {"pauses": 33, "total_ms": 582.4, "max_ms": 47.6, "avg_ms": 17.65}}, "memtier": {"memcached": [{"ops": 37430.7, "p50_us": 23.0, "p99_us": 135.0, "p999_us": 511.0, "hit_ratio": 4.5, "kb_s": 3617.0, "level": 1}, {"ops": 79883.4, "p50_us": 31.0, "p99_us": 47.0, "p999_us": 295.0, "hit_ratio": 9.0, "kb_s": 7996.0, "level": 2}, {"ops": 157221.2, "p50_us": 31.0, "p99_us": 55.0, "p999_us": 295.0, "hit_ratio": 10.7, "kb_s": 15946.0, "level": 4}, {"ops": 338219.9, "p50_us": 23.0, "p99_us": 39.0, "p999_us": 167.0, "hit_ratio": 10.7, "kb_s": 34304.0, "level": 8}, {"ops": 770507.1, "p50_us": 31.0, "p99_us": 127.0, "p999_us": 239.0, "hit_ratio": 10.7, "kb_s": 78123.0, "level": 16}, {"ops": 995789.1, "p50_us": 39.0, "p99_us": 111.0, "p999_us": 407.0, "hit_ratio": 10.7, "kb_s": 100957.0, "level": 32}, {"ops": 1164797.9, "p50_us": 55.0, "p99_us": 151.0, "p999_us": 559.0, "hit_ratio": 10.7, "kb_s": 118080.0, "level": 64}, {"ops": 1186814.6, "p50_us": 103.0, "p99_us": 255.0, "p999_us": 615.0, "hit_ratio": 10.7, "kb_s": 120314.0, "level": 128}], "redis": [{"ops": 41629.0, "p50_us": 31.0, "p99_us": 39.0, "p999_us": 343.0, "hit_ratio": 5.0, "kb_s": 4478.0, "level": 1}, {"ops": 87493.4, "p50_us": 23.0, "p99_us": 39.0, "p999_us": 175.0, "hit_ratio": 9.8, "kb_s": 9683.0, "level": 2}, {"ops": 139628.3, "p50_us": 31.0, "p99_us": 47.0, "p999_us": 159.0, "hit_ratio": 10.5, "kb_s": 15514.0, "level": 4}, {"ops": 143649.5, "p50_us": 55.0, "p99_us": 79.0, "p999_us": 207.0, "hit_ratio": 10.4, "kb_s": 15954.0, "level": 8}, {"ops": 177098.3, "p50_us": 119.0, "p99_us": 303.0, "p999_us": 383.0, "hit_ratio": 10.4, "kb_s": 19666.0, "level": 16}, {"ops": 190225.8, "p50_us": 175.0, "p99_us": 391.0, "p999_us": 487.0, "hit_ratio": 10.6, "kb_s": 21150.0, "level": 32}, {"ops": 213021.3, "p50_us": 335.0, "p99_us": 567.0, "p999_us": 751.0, "hit_ratio": 10.3, "kb_s": 23638.0, "level": 64}, {"ops": 212351.4, "p50_us": 591.0, "p99_us": 1151.0, "p999_us": 1367.0, "hit_ratio": 10.4, "kb_s": 23575.0, "level": 128}], "bonsaigrid-mc": [{"ops": 36517.2, "p50_us": 31.0, "p99_us": 39.0, "p999_us": 159.0, "hit_ratio": 4.4, "kb_s": 3525.0, "level": 1}, {"ops": 89708.2, "p50_us": 23.0, "p99_us": 39.0, "p999_us": 143.0, "hit_ratio": 8.9, "kb_s": 8969.0, "level": 2}, {"ops": 158867.0, "p50_us": 31.0, "p99_us": 39.0, "p999_us": 151.0, "hit_ratio": 11.1, "kb_s": 16164.0, "level": 4}, {"ops": 285205.3, "p50_us": 31.0, "p99_us": 47.0, "p999_us": 143.0, "hit_ratio": 11.1, "kb_s": 29010.0, "level": 8}, {"ops": 749243.2, "p50_us": 31.0, "p99_us": 63.0, "p999_us": 87.0, "hit_ratio": 11.4, "kb_s": 76383.0, "level": 16}, {"ops": 872533.2, "p50_us": 39.0, "p99_us": 119.0, "p999_us": 207.0, "hit_ratio": 12.1, "kb_s": 89408.0, "level": 32}, {"ops": 1050585.2, "p50_us": 63.0, "p99_us": 183.0, "p999_us": 423.0, "hit_ratio": 12.0, "kb_s": 107599.0, "level": 64}, {"ops": 1120179.7, "p50_us": 119.0, "p99_us": 263.0, "p999_us": 479.0, "hit_ratio": 12.1, "kb_s": 114773.0, "level": 128}], "bonsaigrid-redis": [{"ops": 42653.2, "p50_us": 23.0, "p99_us": 31.0, "p999_us": 159.0, "hit_ratio": 5.1, "kb_s": 4592.0, "level": 1}, {"ops": 88192.7, "p50_us": 31.0, "p99_us": 31.0, "p999_us": 127.0, "hit_ratio": 10.1, "kb_s": 9776.0, "level": 2}, {"ops": 165010.0, "p50_us": 23.0, "p99_us": 39.0, "p999_us": 151.0, "hit_ratio": 11.3, "kb_s": 18417.0, "level": 4}, {"ops": 335545.2, "p50_us": 23.0, "p99_us": 39.0, "p999_us": 143.0, "hit_ratio": 12.6, "kb_s": 37730.0, "level": 8}, {"ops": 766145.2, "p50_us": 31.0, "p99_us": 79.0, "p999_us": 151.0, "hit_ratio": 12.6, "kb_s": 86127.0, "level": 16}, {"ops": 893886.0, "p50_us": 39.0, "p99_us": 111.0, "p999_us": 231.0, "hit_ratio": 12.5, "kb_s": 100473.0, "level": 32}, {"ops": 1078323.8, "p50_us": 55.0, "p99_us": 191.0, "p999_us": 567.0, "hit_ratio": 12.5, "kb_s": 121181.0, "level": 64}, {"ops": 1158667.8, "p50_us": 103.0, "p99_us": 255.0, "p999_us": 679.0, "hit_ratio": 12.5, "kb_s": 130194.0, "level": 128}]}, "openloop": {"memcached": [{"rate": 25000, "achieved": 25000.0, "p50": 167, "p99": 1219, "p999": 1369, "hit": 85.5, "errs": 0}, {"rate": 50000, "achieved": 50000.0, "p50": 61, "p99": 637, "p999": 1186, "hit": 85.3, "errs": 0}, {"rate": 100000, "achieved": 100000, "p50": 44, "p99": 725, "p999": 1227, "hit": 85.5, "errs": 0}, {"rate": 200000, "achieved": 200000, "p50": 36, "p99": 479, "p999": 1408, "hit": 85.6, "errs": 0}, {"rate": 400000, "achieved": 400000.0, "p50": 39, "p99": 348, "p999": 953, "hit": 85.7, "errs": 0}, {"rate": 600000, "achieved": 600238.0, "p50": 45, "p99": 1258, "p999": 3000, "hit": 86.1, "errs": 0}, {"rate": 800000, "achieved": 784872.0, "p50": 76214, "p99": 90886, "p999": 91971, "hit": 86.5, "errs": 0}, {"rate": 1000000, "achieved": 783684.0, "p50": 438710, "p99": 858177, "p999": 864174, "hit": 87.0, "errs": 0}], "bonsaigrid-mc": [{"rate": 25000, "achieved": 24995.0, "p50": 165, "p99": 1248, "p999": 1535, "hit": 85.5, "errs": 0}, {"rate": 50000, "achieved": 49999.0, "p50": 51, "p99": 1059, "p999": 1273, "hit": 85.4, "errs": 0}, {"rate": 100000, "achieved": 100000.0, "p50": 44, "p99": 1024, "p999": 1304, "hit": 85.5, "errs": 0}, {"rate": 200000, "achieved": 200000.0, "p50": 39, "p99": 815, "p999": 2884, "hit": 85.7, "errs": 0}, {"rate": 400000, "achieved": 400000.0, "p50": 45, "p99": 363, "p999": 884, "hit": 85.8, "errs": 0}, {"rate": 600000, "achieved": 600240.0, "p50": 56, "p99": 5555, "p999": 10609, "hit": 86.1, "errs": 0}, {"rate": 800000, "achieved": 790085.0, "p50": 52179, "p99": 69456, "p999": 69988, "hit": 86.6, "errs": 0}, {"rate": 1000000, "achieved": 792256.0, "p50": 448263, "p99": 823178, "p999": 830063, "hit": 87.0, "errs": 0}], "redis": [{"rate": 25000, "achieved": 24997, "p50": 206, "p99": 1495, "p999": 4776, "hit": 78.3, "errs": 0}, {"rate": 50000, "achieved": 50000, "p50": 65, "p99": 1183, "p999": 1490, "hit": 78.3, "errs": 0}, {"rate": 100000, "achieved": 100000.0, "p50": 49, "p99": 1116, "p999": 1469, "hit": 78.6, "errs": 0}, {"rate": 200000, "achieved": 170404, "p50": 284622, "p99": 585390, "p999": 591698, "hit": 79.1, "errs": 0}, {"rate": 400000, "achieved": 165921, "p50": 1173144, "p99": 2317307, "p999": 2339184, "hit": 79.4, "errs": 0}, {"rate": 600000, "achieved": 165081, "p50": 1466524, "p99": 2872721, "p999": 2897980, "hit": 80.0, "errs": 0}, {"rate": 800000, "achieved": 164406.0, "p50": 1601066, "p99": 3148216, "p999": 3175600, "hit": 80.4, "errs": 0}, {"rate": 1000000, "achieved": 166614.0, "p50": 1683425, "p99": 3302559, "p999": 3330774, "hit": 80.9, "errs": 0}], "bonsaigrid-redis": [{"rate": 25000, "achieved": 25000.0, "p50": 150, "p99": 1259, "p999": 1577, "hit": 83.9, "errs": 0}, {"rate": 50000, "achieved": 50000, "p50": 56, "p99": 1131, "p999": 1316, "hit": 83.7, "errs": 0}, {"rate": 100000, "achieved": 99985.0, "p50": 43, "p99": 887, "p999": 1304, "hit": 83.9, "errs": 0}, {"rate": 200000, "achieved": 200000.0, "p50": 42, "p99": 597, "p999": 1240, "hit": 84.1, "errs": 0}, {"rate": 400000, "achieved": 400000.0, "p50": 45, "p99": 462, "p999": 1004, "hit": 84.4, "errs": 0}, {"rate": 600000, "achieved": 548687.0, "p50": 168259, "p99": 340537, "p999": 343355, "hit": 84.8, "errs": 0}, {"rate": 800000, "achieved": 552660.0, "p50": 622859, "p99": 1226235, "p999": 1235566, "hit": 85.3, "errs": 0}, {"rate": 1000000, "achieved": 548911.0, "p50": 914681, "p99": 1786865, "p999": 1802790, "hit": 85.7, "errs": 0}]}, "ycsb": {"redis": {"a": {"ops": 162583.0, "p99": 677, "p999": 1146}, "b": {"ops": 165271.0, "p99": 675, "p999": 1085}, "c": {"ops": 166690.0, "p99": 679, "p999": 1124}, "d": {"ops": 173193.0, "p99": 640, "p999": 1114}, "f": {"ops": 166988.0, "p99": 663, "p999": 1543}}, "bonsaigrid-redis": {"a": {"ops": 337692.0, "p99": 389, "p999": 1121}, "b": {"ops": 676808.0, "p99": 335, "p999": 1096}, "c": {"ops": 703782.0, "p99": 329, "p999": 1004}, "d": {"ops": 640204.0, "p99": 389, "p999": 1084}, "f": {"ops": 450195.0, "p99": 328, "p999": 986}}}};
 const PRESENT=["closed", "memtier", "openloop", "ycsb"];
 // __REPORT_END__
 const META={
-  closed:{title:"Fair four-backend comparison",tag:"closed-loop · throughput ladder",file:"dashboard.html"},
-  memtier:{title:"memtier_benchmark",tag:"industry-standard tool",file:"memtier.html"},
-  openloop:{title:"Open-loop capacity",tag:"coordinated-omission-correct",file:"openloop.html"},
-  ycsb:{title:"YCSB workload matrix",tag:"standardized workloads A–F",file:"ycsb.html"},
+  closed:{title:"Fair four-backend comparison",tag:"closed-loop"},
+  memtier:{title:"memtier_benchmark",tag:"industry tool"},
+  openloop:{title:"Open-loop capacity",tag:"CO-correct"},
+  ycsb:{title:"YCSB workload matrix",tag:"workloads A–F"},
 };
-const NAME={bonsaigrid:"BonsaiGrid",hazelcast:"Hazelcast",redis:"Redis",memcached:"Memcached",
-  "bonsaigrid-mc":"BonsaiGrid·memcached","bonsaigrid-redis":"BonsaiGrid·RESP"};
-const fmtK=n=>n>=1e6?(n/1e6).toFixed(1)+"M":n>=1000?(n/1000).toFixed(n>=1e4?0:1).replace(/\.0$/,"")+"k":Math.round(n)+"";
-const fmtUs=n=>n>=1000?(n/1000).toFixed(1)+" ms":Math.round(n)+" µs";
-function rows(pairs){return `<div class="rows">`+pairs.map(([k,v])=>`<div><span>${k}</span><b>${v}</b></div>`).join("")+`</div>`;}
-function summary(key){
-  if(key==="closed"){
-    const pk=REPORT.closed.peak, ranked=Object.entries(pk).sort((a,b)=>b[1]-a[1]);
-    const gc=REPORT.closed.gc&&REPORT.closed.gc.hazelcast;
-    return `<p>Peak ops/s at 128 connections, equal CPU/mem budgets.</p>`+
-      rows(ranked.map(([b,v])=>[NAME[b]||b,fmtK(v)+" ops/s"]))+
-      (gc?`<p style="margin-top:4px">JVM GC: Hazelcast <b>${gc.pauses}</b> pauses (${gc.total_ms} ms) · others <b>0</b>.</p>`:"");
-  }
-  if(key==="memtier"){
-    const r=Object.entries(REPORT.memtier).sort((a,b)=>b[1].ops-a[1].ops);
-    return `<p>Same thin client, real protocol. Peak ops/s + p99.9 tail + hit ratio.</p>`+
-      rows(r.map(([b,v])=>[NAME[b]||b,`${fmtK(v.ops)} · ${fmtUs(v.p999)} · ${v.hit}%`]));
-  }
-  if(key==="openloop"){
-    const r=Object.entries(REPORT.openloop.b).sort((a,b)=>b[1].usable-a[1].usable);
-    return `<p>Usable throughput — highest offered load holding p99 ≤ ${REPORT.openloop.slo_ms} ms (the honest capacity).</p>`+
-      rows(r.map(([b,v])=>[NAME[b]||b,fmtK(v.usable)+" ops/s"]));
-  }
-  if(key==="ycsb"){
-    const bs=Object.keys(REPORT.ycsb), wl=["a","b","c","d","f"];
-    const r=bs.map(b=>[NAME[b]||b, wl.map(w=>REPORT.ycsb[b][w]!=null?fmtK(REPORT.ycsb[b][w]):"–").join(" / ")]);
-    return `<p>ops/s per workload (A B C D F), Zipfian keyspace.</p>`+rows(r);
-  }
-  return "";
-}
-function bigOf(key){
-  try{
-    if(key==="closed"){const e=Object.entries(REPORT.closed.peak).sort((a,b)=>b[1]-a[1])[0];return[fmtK(e[1]),"ops/s peak · "+(NAME[e[0]]||e[0])];}
-    if(key==="memtier"){const e=Object.entries(REPORT.memtier).sort((a,b)=>b[1].ops-a[1].ops)[0];return[fmtK(e[1].ops),"ops/s · "+(NAME[e[0]]||e[0])];}
-    if(key==="openloop"){const e=Object.entries(REPORT.openloop.b).sort((a,b)=>b[1].usable-a[1].usable)[0];return[fmtK(e[1].usable),"usable ops/s · "+(NAME[e[0]]||e[0])];}
-    if(key==="ycsb"){const b=REPORT.ycsb["bonsaigrid-redis"],r=REPORT.ycsb["redis"];if(b&&r&&b.b&&r.b)return[(b.b/r.b).toFixed(1)+"×","BonsaiGrid·RESP vs Redis (read-heavy B)"];const any=Object.values(REPORT.ycsb)[0];return[fmtK(Math.max(...Object.values(any))),"ops/s peak workload"];}
-  }catch(e){}
-  return ["",""];
-}
-let loaded={};
-function showTab(key){
-  document.querySelectorAll("#tabs button").forEach(b=>b.setAttribute("aria-pressed", b.dataset.k===key));
-  document.querySelectorAll("#panes .frame").forEach(f=>f.classList.toggle("hidden", f.dataset.k!==key));
-  const f=document.querySelector(`#panes .frame[data-k="${key}"]`);
-  if(f && !loaded[key]){ f.src=META[key].file; loaded[key]=true; }
-}
-function render(){
-  const cards=document.getElementById("cards");
-  const keys=Object.keys(META);
-  cards.innerHTML=keys.map(key=>{
-    const has=PRESENT.includes(key), m=META[key];
-    const [big,sub]=has?bigOf(key):["—",""];
-    return `<div class="card${has?"":" miss"}">
-      <span class="tag">${m.tag}</span>
-      <h3>${m.title}</h3>
-      ${has?`<div class="big">${big} <small>${sub}</small></div>${summary(key)}
-        <button class="open" data-k="${key}">Open full dashboard →</button>`
-        :`<p>Not in this run. Add it with <code>bench/run-all.sh</code>.</p>`}
-    </div>`;
-  }).join("");
-  cards.querySelectorAll(".open").forEach(b=>b.onclick=()=>{showTab(b.dataset.k);document.getElementById("tabs").scrollIntoView({behavior:"smooth"});});
+const NAME={bonsaigrid:"BonsaiGrid",hazelcast:"Hazelcast",redis:"Redis",memcached:"Memcached","bonsaigrid-mc":"BonsaiGrid · memcached","bonsaigrid-redis":"BonsaiGrid · RESP"};
+const SHORT={bonsaigrid:"BonsaiGrid",hazelcast:"Hazelcast",redis:"Redis",memcached:"Memcached","bonsaigrid-mc":"BG · mc","bonsaigrid-redis":"BG · RESP"};
+const COL={bonsaigrid:"var(--bonsai)",hazelcast:"var(--hazel)",redis:"var(--redis)",memcached:"var(--memc)","bonsaigrid-mc":"var(--bgmc)","bonsaigrid-redis":"var(--bonsai)"};
+const ORDER=["bonsaigrid-mc","bonsaigrid-redis","bonsaigrid","memcached","hazelcast","redis"];
+const ord=ks=>ks.slice().sort((a,b)=>ORDER.indexOf(a)-ORDER.indexOf(b));
+const SLO=10000;
+const fmtK=n=>n>=1e6?(n/1e6).toFixed(n>=1e7?0:1).replace(/\.0$/,"")+"M":n>=1000?(n/1000).toFixed(n>=1e4?0:1).replace(/\.0$/,"")+"k":Math.round(n)+"";
+const fmtUs=n=>n>=1e6?(n/1e6).toFixed(1)+" s":n>=1000?(n/1000).toFixed(1)+" ms":Math.round(n)+" µs";
+function niceMax(v){if(v<=0)return 1;const p=Math.pow(10,Math.floor(Math.log10(v))),n=v/p;const s=n<=1?1:n<=2?2:n<=2.5?2.5:n<=5?5:10;return s*p;}
+const NS="http://www.w3.org/2000/svg",mk=(t,a)=>{const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);return e;};
 
-  const tabs=document.getElementById("tabs"), panes=document.getElementById("panes");
-  if(!PRESENT.length){tabs.style.display="none";return;}
-  tabs.innerHTML=PRESENT.map(k=>`<button data-k="${k}">${META[k].title}</button>`).join("");
-  panes.innerHTML=PRESENT.map(k=>`<iframe class="frame hidden" data-k="${k}" title="${META[k].title}"></iframe>`).join("");
-  tabs.querySelectorAll("button").forEach(b=>b.onclick=()=>showTab(b.dataset.k));
-  showTab(PRESENT[0]);
+// generic line chart. o={x:[labels], series:[{key,vals}], logY, ideal:[vals], yfmt, xtitle}
+function lineChart(host,o){
+  const W=740,H=300,m={t:14,r:118,b:38,l:62},iw=W-m.l-m.r,ih=H-m.t-m.b,n=o.x.length;
+  const xAt=i=>m.l+(n<2?0:i/(n-1)*iw);
+  const svg=mk("svg",{viewBox:`0 0 ${W} ${H}`});
+  let yAt,ticks;
+  if(o.logY){let mx=1;o.series.forEach(s=>s.vals.forEach(v=>{if(v>mx)mx=v;}));const hi=Math.ceil(Math.log10(mx));
+    yAt=v=>m.t+ih-(Math.log10(Math.max(v,1)))/hi*ih;ticks=[];for(let e=0;e<=hi;e++)ticks.push(Math.pow(10,e));
+  }else{let mx=0;o.series.forEach(s=>s.vals.forEach(v=>{if(v>mx)mx=v;}));if(o.ideal)o.ideal.forEach(v=>{if(v>mx)mx=v;});mx=niceMax(mx);
+    yAt=v=>m.t+ih-v/mx*ih;ticks=[];for(let g=0;g<=5;g++)ticks.push(mx*g/5);}
+  ticks.forEach(val=>{const y=yAt(val);svg.appendChild(mk("line",{x1:m.l,x2:m.l+iw,y1:y,y2:y,stroke:"var(--grid)","stroke-width":1}));const t=mk("text",{x:m.l-8,y:y+3.5,"text-anchor":"end",class:"tick"});t.textContent=o.yfmt(val);svg.appendChild(t);});
+  svg.appendChild(mk("line",{x1:m.l,x2:m.l+iw,y1:m.t+ih,y2:m.t+ih,stroke:"var(--axis)","stroke-width":1}));
+  o.x.forEach((lb,i)=>{const t=mk("text",{x:xAt(i),y:m.t+ih+16,"text-anchor":"middle",class:"tick"});t.textContent=lb;svg.appendChild(t);});
+  if(o.xtitle){const t=mk("text",{x:m.l+iw/2,y:H-1,"text-anchor":"middle",class:"axtitle"});t.textContent=o.xtitle;svg.appendChild(t);}
+  if(o.ideal){svg.appendChild(mk("polyline",{points:o.ideal.map((v,i)=>`${xAt(i)},${yAt(v)}`).join(" "),fill:"none",stroke:"var(--muted)","stroke-width":1.5,"stroke-dasharray":"5 4"}));}
+  const ends=[];
+  o.series.forEach(s=>{const pts=s.vals.map((v,i)=>`${xAt(i)},${yAt(v)}`).join(" ");
+    svg.appendChild(mk("polyline",{points:pts,fill:"none",stroke:COL[s.key],"stroke-width":2,"stroke-linejoin":"round"}));
+    s.vals.forEach((v,i)=>svg.appendChild(mk("circle",{cx:xAt(i),cy:yAt(v),r:2.6,fill:COL[s.key],stroke:"var(--surface)","stroke-width":1.3})));
+    ends.push({t:SHORT[s.key],c:COL[s.key],y:yAt(s.vals[s.vals.length-1])});});
+  ends.sort((a,b)=>a.y-b.y);for(let i=1;i<ends.length;i++)if(ends[i].y-ends[i-1].y<12)ends[i].y=ends[i-1].y+12;
+  ends.forEach(e=>{const lx=m.l+iw+7;svg.appendChild(mk("rect",{x:lx,y:e.y-8,width:9,height:9,rx:2,fill:e.c}));const t=mk("text",{x:lx+13,y:Math.min(e.y,m.t+ih),class:"endlab"});t.textContent=e.t;svg.appendChild(t);});
+  host.innerHTML="";host.appendChild(svg);
+}
+// grouped bars. o={groups:[labels], series:[{key,vals}], yfmt}
+function barChart(host,o){
+  const W=740,H=320,m={t:16,r:14,b:42,l:60},iw=W-m.l-m.r,ih=H-m.t-m.b,G=o.groups.length,B=o.series.length;
+  let mx=0;o.series.forEach(s=>s.vals.forEach(v=>{if(v>mx)mx=v;}));mx=niceMax(mx);
+  const yAt=v=>m.t+ih-v/mx*ih,svg=mk("svg",{viewBox:`0 0 ${W} ${H}`});
+  for(let g=0;g<=5;g++){const val=mx*g/5,y=yAt(val);svg.appendChild(mk("line",{x1:m.l,x2:m.l+iw,y1:y,y2:y,stroke:"var(--grid)","stroke-width":1}));const t=mk("text",{x:m.l-8,y:y+3.5,"text-anchor":"end",class:"tick"});t.textContent=o.yfmt(val);svg.appendChild(t);}
+  svg.appendChild(mk("line",{x1:m.l,x2:m.l+iw,y1:m.t+ih,y2:m.t+ih,stroke:"var(--axis)","stroke-width":1}));
+  const gw=iw/G,bw=Math.min(44,(gw-14)/B);
+  o.groups.forEach((lb,gi)=>{const gx=m.l+gi*gw+gw/2,tot=B*bw+(B-1)*2,x0=gx-tot/2;
+    o.series.forEach((s,bi)=>{const v=s.vals[gi],x=x0+bi*(bw+2),y=yAt(v),h=m.t+ih-y;
+      svg.appendChild(mk("rect",{x,y,width:bw,height:Math.max(h,0),rx:4,fill:COL[s.key],stroke:"var(--surface)","stroke-width":2}));
+      const t=mk("text",{x:x+bw/2,y:y-4,"text-anchor":"middle",class:"barlab"});t.textContent=fmtK(v);svg.appendChild(t);});
+    const g1=mk("text",{x:gx,y:m.t+ih+16,"text-anchor":"middle",class:"glab"});g1.textContent=lb;svg.appendChild(g1);});
+  host.innerHTML="";host.appendChild(svg);
+}
+function legend(host,keys,extra){host.innerHTML=ord(keys).map(k=>`<span class="lg"><span class="sw" style="background:${COL[k]}"></span>${NAME[k]}</span>`).join("")+(extra||"");}
+
+// ---- data adapters ----
+const closedBk=()=>Object.keys(DATA.closed||{}).filter(k=>(DATA.closed[k]||[]).length);
+const closedLevels=()=>{const b=closedBk()[0];return (DATA.closed[b]||[]).map(s=>s.level);};
+const mtBk=()=>Object.keys(DATA.memtier||{}).filter(k=>(DATA.memtier[k]||[]).length);
+const olBk=()=>Object.keys(DATA.openloop||{}).filter(k=>(DATA.openloop[k]||[]).length);
+const ycBk=()=>Object.keys(DATA.ycsb||{});
+function usable(st){let m=0;st.forEach(s=>{if(s.p99<=SLO&&s.achieved>=0.9*s.rate)m=Math.max(m,s.achieved);});return m;}
+
+// ---- summary cards ----
+function bigOf(key){try{
+  if(key==="closed"){const e=Object.entries(DATA.closed).filter(([,v])=>v.length).map(([b,st])=>[b,st[st.length-1].set.rps]).sort((a,b)=>b[1]-a[1])[0];return[fmtK(e[1]),"ops/s peak · "+SHORT[e[0]]];}
+  if(key==="memtier"){const e=mtBk().map(b=>[b,DATA.memtier[b][DATA.memtier[b].length-1].ops]).sort((a,b)=>b[1]-a[1])[0];return[fmtK(e[1]),"ops/s · "+SHORT[e[0]]];}
+  if(key==="openloop"){const e=olBk().map(b=>[b,usable(DATA.openloop[b])]).sort((a,b)=>b[1]-a[1])[0];return[fmtK(e[1]),"usable ops/s · "+SHORT[e[0]]];}
+  if(key==="ycsb"){const y=DATA.ycsb;if(y["bonsaigrid-redis"]&&y["redis"]&&y["bonsaigrid-redis"].b&&y["redis"].b)return[(y["bonsaigrid-redis"].b.ops/y["redis"].b.ops).toFixed(1)+"×","BG·RESP vs Redis (read-heavy)"];const b=ycBk()[0];return[fmtK(Math.max(...Object.values(y[b]).map(v=>v.ops))),"ops/s peak"];}
+}catch(e){}return["—",""];}
+function cards(){
+  document.getElementById("cards").innerHTML=Object.keys(META).map(key=>{
+    const has=PRESENT.includes(key),[big,sub]=has?bigOf(key):["—",""];
+    return `<div class="card${has?"":" miss"}"><span class="tag">${META[key].tag}</span><h3>${META[key].title}</h3>`+
+      (has?`<div class="big">${big}</div><div class="sub">${sub}</div>`:`<div class="sub">not in this run</div>`)+`</div>`;
+  }).join("");
+}
+
+// ---- sections ----
+function sec(title,desc,inner){return `<div class="sec"><h2>${title}</h2><p class="d">${desc}</p>${inner}</div>`;}
+function ctBox(id,h4){return `<div class="ct"><h4>${h4}</h4><div class="legend" id="lg-${id}"></div><div id="${id}"></div></div>`;}
+function render(){
+  cards();
   document.getElementById("src").textContent="This run: "+PRESENT.map(k=>META[k].title).join(", ")+".";
+  const S=document.getElementById("secs");let html="";
+  if(PRESENT.includes("closed")) html+=sec("Fair four-backend comparison",
+    "Every server and the load client in their own cgroup on disjoint CPUs with equal budgets. Peak throughput across a connection ladder; every GET is value-verified.",
+    ctBox("c-closed","Throughput vs connections")+`<p class="note" id="n-closed"></p>`);
+  if(PRESENT.includes("memtier")) html+=sec("memtier_benchmark — industry-standard tool",
+    "The Redis Labs standard drives each backend through its real protocol with the same thin client. Also captures p99.9 tail and hit/miss ratio.",
+    ctBox("c-mt","Throughput vs connections")+`<p class="note" id="n-mt"></p>`);
+  if(PRESENT.includes("openloop")) html+=sec("Open-loop capacity — coordinated-omission-correct",
+    "Requests issued at a fixed offered rate; latency measured from the ideal send time, so saturation shows as an exploding tail (the elbow) instead of hiding. Usable throughput = the honest capacity at a p99 SLO.",
+    `<div class="g2">`+ctBox("c-olp","p99 latency vs offered load (log)")+ctBox("c-ola","Achieved vs offered")+`</div><p class="note" id="n-ol"></p>`);
+  if(PRESENT.includes("ycsb")) html+=sec("YCSB workload matrix",
+    "Yahoo! Cloud Serving Benchmark core workloads (A update-heavy, B read-heavy, C read-only, D read-latest, F read-modify-write) over a Zipfian keyspace, via go-ycsb's redis driver.",
+    ctBox("c-yc","Throughput by workload")+`<p class="note" id="n-yc"></p>`);
+  S.innerHTML=html;
+
+  if(PRESENT.includes("closed")){
+    const bks=ord(closedBk());
+    lineChart(document.getElementById("c-closed"),{x:closedLevels().map(String),xtitle:"concurrent connections",yfmt:fmtK,
+      series:bks.map(b=>({key:b,vals:DATA.closed[b].map(s=>s.set.rps)}))});
+    legend(document.getElementById("lg-closed"),bks);
+    const gc=DATA.gc&&DATA.gc.hazelcast;
+    document.getElementById("n-closed").innerHTML=gc?`<b>JVM GC:</b> Hazelcast paused <b>${gc.pauses}</b> times (${gc.total_ms} ms total, ${gc.max_ms} ms max) — BonsaiGrid, Redis and Memcached are not garbage-collected: <b>zero</b>.`:"";
+  }
+  if(PRESENT.includes("memtier")){
+    const bks=ord(mtBk());
+    lineChart(document.getElementById("c-mt"),{x:DATA.memtier[bks[0]].map(s=>fmtK(s.level)),xtitle:"connections",yfmt:fmtK,
+      series:bks.map(b=>({key:b,vals:DATA.memtier[b].map(s=>s.ops)}))});
+    legend(document.getElementById("lg-mt"),bks);
+    const last=b=>DATA.memtier[b][DATA.memtier[b].length-1];
+    document.getElementById("n-mt").innerHTML="At peak: "+ord(mtBk()).map(b=>`<b>${SHORT[b]}</b> ${fmtK(last(b).ops)} (p99.9 ${fmtUs(last(b).p999_us)}, hit ${last(b).hit_ratio}%)`).join(" · ")+".";
+  }
+  if(PRESENT.includes("openloop")){
+    const bks=ord(olBk()),rates=DATA.openloop[bks[0]].map(s=>fmtK(s.rate));
+    lineChart(document.getElementById("c-olp"),{x:rates,xtitle:"offered ops/sec",yfmt:fmtUs,logY:true,
+      series:bks.map(b=>({key:b,vals:DATA.openloop[b].map(s=>s.p99)}))});
+    legend(document.getElementById("lg-olp"),bks);
+    lineChart(document.getElementById("c-ola"),{x:rates,xtitle:"offered ops/sec",yfmt:fmtK,ideal:DATA.openloop[bks[0]].map(s=>s.rate),
+      series:bks.map(b=>({key:b,vals:DATA.openloop[b].map(s=>s.achieved)}))});
+    legend(document.getElementById("lg-ola"),bks,`<span class="lg dash"><span class="sw"></span>ideal</span>`);
+    document.getElementById("n-ol").innerHTML="Usable throughput (p99 ≤ "+fmtUs(SLO)+"): "+ord(olBk()).map(b=>[b,usable(DATA.openloop[b])]).sort((a,b)=>b[1]-a[1]).map(([b,u])=>`<b>${SHORT[b]}</b> ${fmtK(u)}`).join(" › ")+".";
+  }
+  if(PRESENT.includes("ycsb")){
+    const bks=ord(ycBk()),wl=["a","b","c","d","f"].filter(w=>bks.some(b=>DATA.ycsb[b][w]));
+    barChart(document.getElementById("c-yc"),{groups:wl.map(w=>w.toUpperCase()),yfmt:fmtK,
+      series:bks.map(b=>({key:b,vals:wl.map(w=>DATA.ycsb[b][w]?DATA.ycsb[b][w].ops:0)}))});
+    legend(document.getElementById("lg-yc"),bks);
+    const y=DATA.ycsb;
+    document.getElementById("n-yc").innerHTML=(y["bonsaigrid-redis"]&&y["redis"])?"BonsaiGrid·RESP vs Redis: "+wl.map(w=>y["bonsaigrid-redis"][w]&&y["redis"][w]?`${w.toUpperCase()} <b>${(y["bonsaigrid-redis"][w].ops/y["redis"][w].ops).toFixed(1)}×</b>`:"").filter(Boolean).join(" · ")+".":"";
+  }
 }
 render();
 </script>
