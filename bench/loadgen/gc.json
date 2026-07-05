@@ -1,0 +1,8 @@
+{
+  "hazelcast": {
+    "pauses": 33,
+    "total_ms": 582.4,
+    "max_ms": 47.6,
+    "avg_ms": 17.65
+  }
+}

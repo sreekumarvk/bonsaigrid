@@ -42,6 +42,29 @@ for p in 5701 5702 6379 11211; do
   fi
 done
 
+# --- CPU frequency governor: 'performance' avoids DVFS jitter/throttling that
+#     would contaminate latency numbers. Warn if not, and set it when we can. ---
+gov_file=/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
+if [ -r "$gov_file" ]; then
+  gov=$(cat "$gov_file" 2>/dev/null)
+  if [ "$gov" = performance ]; then
+    ok "cpu governor = performance"
+  else
+    warn "cpu governor = ${gov:-unknown} (not 'performance') — frequency scaling adds latency jitter"
+    set_ok=1
+    for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+      echo performance > "$g" 2>/dev/null || set_ok=0
+    done
+    if [ "$set_ok" = 1 ] && [ "$(cat "$gov_file" 2>/dev/null)" = performance ]; then
+      ok "  set governor -> performance (all cpus)"
+    else
+      warn "  could not set it (need root): sudo cpupower frequency-set -g performance"
+    fi
+  fi
+else
+  warn "cpu governor not readable (no cpufreq/virtualized host) — skipping"
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "preflight: FAILED — fix the above and re-run"
   exit 1

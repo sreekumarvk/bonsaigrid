@@ -149,6 +149,34 @@ json.dump(d, open(res, "w"), indent=2)
 print(f"    injected CPU/mem into {n}/{len(d.get('stages',[]))} stages ({len(S)} samples)")
 PY
 }
+# Parse JVM stop-the-world GC pauses from a container's -Xlog:gc output and record
+# them (the Rust/C backends have none — a real resource-pillar difference). Writes
+# the summary into the results file and a side gc.json the dashboard reads.
+inject_gc() {
+  local res="$1" cont="$2" tmp="/tmp/bench_gc_$$.txt"
+  $DOCKER logs "$cont" 2>&1 | grep -E "\bPause\b" | grep -oE "[0-9]+\.[0-9]+ms" | sed 's/ms//' > "$tmp" || true
+  python3 - "$res" "$tmp" "$LOADDIR/gc.json" "$(basename "$res" .json | sed 's/^results-//')" <<'PY'
+import json, os, sys
+res, f, gcpath, backend = sys.argv[1:5]
+vals = []
+for ln in open(f):
+    try: vals.append(float(ln.strip()))
+    except ValueError: pass
+if not vals:
+    print("    no GC pauses parsed"); sys.exit(0)
+gc = {"pauses": len(vals), "total_ms": round(sum(vals), 1),
+      "max_ms": round(max(vals), 1), "avg_ms": round(sum(vals) / len(vals), 2)}
+d = json.load(open(res)); d["gc"] = gc; json.dump(d, open(res, "w"), indent=2)
+allgc = {}
+if os.path.exists(gcpath):
+    try: allgc = json.load(open(gcpath))
+    except Exception: allgc = {}
+allgc[backend] = gc
+json.dump(allgc, open(gcpath, "w"), indent=2)
+print(f"    injected GC: {gc['pauses']} pauses, total {gc['total_ms']}ms, max {gc['max_ms']}ms")
+PY
+  rm -f "$tmp"
+}
 
 # ---- preflight -------------------------------------------------------------
 log "Isolation configuration"
@@ -200,7 +228,7 @@ start_backend() {
         --cpuset-cpus="$SERVER_CPUS" --memory="$SERVER_MEM" \
         -e HZ_NETWORK_PORT_PORT="$P_HZ" -e HZ_NETWORK_PORT_AUTOINCREMENT=false \
         -e HZ_NETWORK_JOIN_MULTICAST_ENABLED=false -e HZ_CLUSTERNAME=dev \
-        -e JAVA_OPTS="-XX:MaxRAMPercentage=75.0" \
+        -e JAVA_OPTS="-XX:MaxRAMPercentage=75.0 -Xlog:gc:stdout:time,uptime" \
         "$IMG_HAZELCAST" >/dev/null || die "hazelcast start failed"
       wait_port 127.0.0.1 "$P_HZ" 120 || die "hazelcast did not open :$P_HZ"
       wait_hz_ready bench_hazelcast 120 || warn "hazelcast 'is STARTED' not seen; proceeding"; sleep 2 ;;
@@ -272,6 +300,8 @@ bench_one() {
     [ -f "$LOADDIR/results-$t.json" ] && inject_resources "$LOADDIR/results-$t.json" "$samp"
     rm -f "$samp"
   fi
+  # JVM backends emit GC pauses; capture them before teardown (container still up).
+  [ "$t" = "hazelcast" ] && [ -f "$LOADDIR/results-$t.json" ] && inject_gc "$LOADDIR/results-$t.json" "bench_hazelcast"
   [ "$t" = "bonsaigrid" ] && run_ladder   # refresh the thin-client reference while the server is up
   stop_backend "$t"
 }
