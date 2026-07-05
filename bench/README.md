@@ -193,6 +193,26 @@ runs `bencher run --dry-run` to validate — safe with no server at all.
 
 ---
 
+## Standardized workloads — YCSB (`run-ycsb.sh`)
+
+The Yahoo! Cloud Serving Benchmark's **core workloads** model real applications that
+the throughput ladder and memtier's fixed ratios don't: **A** update-heavy (50/50),
+**B** read-heavy (95/5), **C** read-only, **D** read-latest (recency skew), **F**
+read-modify-write — all over a **Zipfian** keyspace. Driven by **`go-ycsb`**'s redis
+driver, so it puts **BonsaiGrid's RESP protocol** head-to-head with real Redis on a
+standard, recognizable workload set.
+
+```bash
+bench/run-ycsb.sh                                  # redis + bonsaigrid-redis, workloads A–F
+RECORDS=1000000 OPS=1000000 THREADS=64 bench/run-ycsb.sh
+WORKLOADS="b c f" bench/run-ycsb.sh                # a subset
+```
+
+`ycsb_report.py` builds the matrix (`ycsb-combined.json`) and bakes
+`bench/deploy/ycsb.html`. go-ycsb has no memcache driver, so the memcached-protocol
+pair is covered by the memtier and open-loop benchmarks instead. The `go-ycsb` binary
+is built once (static) and cached at `bench/ycsb/go-ycsb` (git-ignored).
+
 ## Open-loop benchmark — coordinated-omission-correct (`run-openloop.sh`)
 
 The closed-loop harness (above) reports peak ops/sec but **understates tail latency**:

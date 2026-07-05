@@ -31,3 +31,7 @@ bench/loadgen/memtier-bmf.json
 
 # open-loop per-backend intermediates (openloop-combined.json is the committed merge)
 bench/loadgen/results-open-*.json
+
+# go-ycsb binary (95MB; rebuilt by run-ycsb.sh) + per-workload intermediates
+bench/ycsb/go-ycsb
+bench/loadgen/ycsb/

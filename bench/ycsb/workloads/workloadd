@@ -1,0 +1,8 @@
+# D: read-latest (95% read / 5% insert), most-recently-inserted skew
+workload=core
+readallfields=true
+readproportion=0.95
+updateproportion=0
+scanproportion=0
+insertproportion=0.05
+requestdistribution=latest

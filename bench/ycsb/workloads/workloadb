@@ -1,0 +1,8 @@
+# B: read-heavy (95% read / 5% update), Zipfian
+workload=core
+readallfields=true
+readproportion=0.95
+updateproportion=0.05
+scanproportion=0
+insertproportion=0
+requestdistribution=zipfian
