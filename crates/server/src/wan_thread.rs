@@ -30,7 +30,10 @@ pub struct WanConfig {
 }
 
 fn env_u64(k: &str, d: u64) -> u64 {
-    std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+    std::env::var(k)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(d)
 }
 
 /// Parse WAN config from the environment. Returns `None` (WAN disabled) unless
@@ -77,10 +80,19 @@ fn ship_batch(target: &str, up_to: u64, recs: &[WanRecord]) -> std::io::Result<u
     let mut s = TcpStream::connect(target)?;
     s.set_read_timeout(Some(Duration::from_secs(5)))?;
     s.set_write_timeout(Some(Duration::from_secs(5)))?;
-    write_frame(&mut s, &encode_msg(&WanMsg::Batch { up_to_seq: up_to, records: recs.to_vec() }))?;
+    write_frame(
+        &mut s,
+        &encode_msg(&WanMsg::Batch {
+            up_to_seq: up_to,
+            records: recs.to_vec(),
+        }),
+    )?;
     match decode_msg(&read_frame(&mut s)?) {
         Some(WanMsg::Ack { up_to_seq }) => Ok(up_to_seq),
-        _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "bad WAN ack")),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "bad WAN ack",
+        )),
     }
 }
 

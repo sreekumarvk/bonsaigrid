@@ -23,7 +23,7 @@ fn frame_needs_full_line() {
 fn frame_storage_waits_for_data_block() {
     assert_eq!(have(b"set k 0 0 5\r\nhel"), None); // data incomplete
     assert_eq!(have(b"set k 0 0 5\r\nhello\r\n"), Some(20)); // 13 (line) + 5 (data) + 2 (CRLF)
-    // extra bytes after one command are not consumed
+                                                             // extra bytes after one command are not consumed
     assert_eq!(have(b"set k 0 0 5\r\nhello\r\nget k\r\n"), Some(20));
 }
 
@@ -31,31 +31,60 @@ fn frame_storage_waits_for_data_block() {
 
 #[test]
 fn parse_get_and_gets() {
-    assert_eq!(parse(b"get a b c\r\n"),
-        Command::Get { keys: vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], with_cas: false });
-    assert!(matches!(parse(b"gets x\r\n"), Command::Get { with_cas: true, .. }));
+    assert_eq!(
+        parse(b"get a b c\r\n"),
+        Command::Get {
+            keys: vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
+            with_cas: false
+        }
+    );
+    assert!(matches!(
+        parse(b"gets x\r\n"),
+        Command::Get { with_cas: true, .. }
+    ));
     assert!(matches!(parse(b"get\r\n"), Command::ClientError(_))); // no keys
 }
 
 #[test]
 fn parse_set_with_flags_exptime_noreply() {
     let c = parse(b"set key 42 100 5 noreply\r\nhello\r\n");
-    assert_eq!(c, Command::Store {
-        op: StoreOp::Set, key: b"key".to_vec(), flags: 42, exptime: 100,
-        cas: 0, data: b"hello".to_vec(), noreply: true });
+    assert_eq!(
+        c,
+        Command::Store {
+            op: StoreOp::Set,
+            key: b"key".to_vec(),
+            flags: 42,
+            exptime: 100,
+            cas: 0,
+            data: b"hello".to_vec(),
+            noreply: true
+        }
+    );
 }
 
 #[test]
 fn parse_cas_carries_unique() {
     let c = parse(b"cas key 0 0 2 777\r\nhi\r\n");
-    assert_eq!(c, Command::Store {
-        op: StoreOp::Cas, key: b"key".to_vec(), flags: 0, exptime: 0,
-        cas: 777, data: b"hi".to_vec(), noreply: false });
+    assert_eq!(
+        c,
+        Command::Store {
+            op: StoreOp::Cas,
+            key: b"key".to_vec(),
+            flags: 0,
+            exptime: 0,
+            cas: 777,
+            data: b"hi".to_vec(),
+            noreply: false
+        }
+    );
 }
 
 #[test]
 fn parse_rejects_bad_keys_and_verbs() {
-    assert!(matches!(parse(b"set \x01bad 0 0 1\r\nx\r\n"), Command::ClientError(_)));
+    assert!(matches!(
+        parse(b"set \x01bad 0 0 1\r\nx\r\n"),
+        Command::ClientError(_)
+    ));
     let long = format!("get {}\r\n", "k".repeat(251));
     assert!(matches!(parse(long.as_bytes()), Command::ClientError(_)));
     assert_eq!(parse(b"frobnicate x\r\n"), Command::Error);
@@ -64,9 +93,25 @@ fn parse_rejects_bad_keys_and_verbs() {
 
 #[test]
 fn parse_delete_touch_admin() {
-    assert_eq!(parse(b"delete k noreply\r\n"), Command::Delete { key: b"k".to_vec(), noreply: true });
-    assert_eq!(parse(b"touch k 30\r\n"), Command::Touch { key: b"k".to_vec(), exptime: 30, noreply: false });
-    assert_eq!(parse(b"flush_all\r\n"), Command::FlushAll { noreply: false });
+    assert_eq!(
+        parse(b"delete k noreply\r\n"),
+        Command::Delete {
+            key: b"k".to_vec(),
+            noreply: true
+        }
+    );
+    assert_eq!(
+        parse(b"touch k 30\r\n"),
+        Command::Touch {
+            key: b"k".to_vec(),
+            exptime: 30,
+            noreply: false
+        }
+    );
+    assert_eq!(
+        parse(b"flush_all\r\n"),
+        Command::FlushAll { noreply: false }
+    );
     assert_eq!(parse(b"version\r\n"), Command::Version);
     assert_eq!(parse(b"quit\r\n"), Command::Quit);
 }
@@ -102,9 +147,12 @@ fn getset_roundtrip_with_flags() {
     let s = Store::new();
     let cas = AtomicU64::new(0);
     assert_eq!(run(&s, &cas, b"set k 7 0 5\r\nhello\r\n"), "STORED\r\n");
-    assert_eq!(run(&s, &cas, b"get k\r\n"), "VALUE k 7 5\r\nhello\r\nEND\r\n");
+    assert_eq!(
+        run(&s, &cas, b"get k\r\n"),
+        "VALUE k 7 5\r\nhello\r\nEND\r\n"
+    );
     assert_eq!(run(&s, &cas, b"get missing\r\n"), "END\r\n"); // miss
-    // overwrite
+                                                              // overwrite
     assert_eq!(run(&s, &cas, b"set k 9 0 3\r\nbye\r\n"), "STORED\r\n");
     assert_eq!(run(&s, &cas, b"get k\r\n"), "VALUE k 9 3\r\nbye\r\nEND\r\n");
 }
@@ -116,7 +164,10 @@ fn add_and_replace() {
     assert_eq!(run(&s, &cas, b"add k 0 0 1\r\na\r\n"), "STORED\r\n");
     assert_eq!(run(&s, &cas, b"add k 0 0 1\r\nb\r\n"), "NOT_STORED\r\n"); // exists
     assert_eq!(run(&s, &cas, b"replace k 0 0 1\r\nc\r\n"), "STORED\r\n");
-    assert_eq!(run(&s, &cas, b"replace absent 0 0 1\r\nx\r\n"), "NOT_STORED\r\n");
+    assert_eq!(
+        run(&s, &cas, b"replace absent 0 0 1\r\nx\r\n"),
+        "NOT_STORED\r\n"
+    );
     assert_eq!(run(&s, &cas, b"get k\r\n"), "VALUE k 0 1\r\nc\r\nEND\r\n");
 }
 
@@ -127,10 +178,27 @@ fn cas_match_stale_and_missing() {
     run(&s, &cas, b"set k 0 0 1\r\na\r\n");
     let gets = run(&s, &cas, b"gets k\r\n"); // VALUE k 0 1 <cas>\r\na\r\nEND\r\n
     let unique: u64 = gets.split_whitespace().nth(3).unwrap().parse().unwrap();
-    assert_eq!(run(&s, &cas, format!("cas k 0 0 1 {}\r\nb\r\n", unique).as_bytes()), "STORED\r\n");
+    assert_eq!(
+        run(
+            &s,
+            &cas,
+            format!("cas k 0 0 1 {}\r\nb\r\n", unique).as_bytes()
+        ),
+        "STORED\r\n"
+    );
     // now stale
-    assert_eq!(run(&s, &cas, format!("cas k 0 0 1 {}\r\nc\r\n", unique).as_bytes()), "EXISTS\r\n");
-    assert_eq!(run(&s, &cas, b"cas absent 0 0 1 1\r\nx\r\n"), "NOT_FOUND\r\n");
+    assert_eq!(
+        run(
+            &s,
+            &cas,
+            format!("cas k 0 0 1 {}\r\nc\r\n", unique).as_bytes()
+        ),
+        "EXISTS\r\n"
+    );
+    assert_eq!(
+        run(&s, &cas, b"cas absent 0 0 1 1\r\nx\r\n"),
+        "NOT_FOUND\r\n"
+    );
 }
 
 #[test]
@@ -179,8 +247,10 @@ fn multiget_returns_present_then_end() {
     let cas = AtomicU64::new(0);
     run(&s, &cas, b"set a 0 0 1\r\n1\r\n");
     run(&s, &cas, b"set c 0 0 1\r\n3\r\n");
-    assert_eq!(run(&s, &cas, b"get a b c\r\n"),
-        "VALUE a 0 1\r\n1\r\nVALUE c 0 1\r\n3\r\nEND\r\n"); // b absent
+    assert_eq!(
+        run(&s, &cas, b"get a b c\r\n"),
+        "VALUE a 0 1\r\n1\r\nVALUE c 0 1\r\n3\r\nEND\r\n"
+    ); // b absent
 }
 
 #[test]

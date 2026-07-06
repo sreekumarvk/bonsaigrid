@@ -77,7 +77,9 @@ fn find_crlf(b: &[u8]) -> Option<usize> {
 }
 
 fn tokens(line: &[u8]) -> Vec<&[u8]> {
-    line.split(|&b| b == b' ').filter(|t| !t.is_empty()).collect()
+    line.split(|&b| b == b' ')
+        .filter(|t| !t.is_empty())
+        .collect()
 }
 
 fn is_storage(verb: &[u8]) -> bool {
@@ -129,13 +131,35 @@ pub enum StoreOp {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
-    Get { keys: Vec<Vec<u8>>, with_cas: bool },
-    Store { op: StoreOp, key: Vec<u8>, flags: u32, exptime: i64, cas: u64, data: Vec<u8>, noreply: bool },
-    Delete { key: Vec<u8>, noreply: bool },
-    Touch { key: Vec<u8>, exptime: i64, noreply: bool },
-    FlushAll { noreply: bool },
+    Get {
+        keys: Vec<Vec<u8>>,
+        with_cas: bool,
+    },
+    Store {
+        op: StoreOp,
+        key: Vec<u8>,
+        flags: u32,
+        exptime: i64,
+        cas: u64,
+        data: Vec<u8>,
+        noreply: bool,
+    },
+    Delete {
+        key: Vec<u8>,
+        noreply: bool,
+    },
+    Touch {
+        key: Vec<u8>,
+        exptime: i64,
+        noreply: bool,
+    },
+    FlushAll {
+        noreply: bool,
+    },
     Version,
-    Verbosity { noreply: bool },
+    Verbosity {
+        noreply: bool,
+    },
     Quit,
     /// Unknown command → `ERROR`.
     Error,
@@ -170,7 +194,10 @@ pub fn parse(cmd: &[u8]) -> Command {
             if keys.is_empty() || keys.iter().any(|k| !valid_key(k)) {
                 return Command::ClientError("bad command line format");
             }
-            Command::Get { keys, with_cas: verb == b"gets" }
+            Command::Get {
+                keys,
+                with_cas: verb == b"gets",
+            }
         }
         b"set" | b"add" | b"replace" | b"cas" => {
             let is_cas = verb == b"cas";
@@ -178,9 +205,11 @@ pub fn parse(cmd: &[u8]) -> Command {
                 return Command::ClientError("bad command line format");
             }
             let key = toks[1].to_vec();
-            let (Some(flags), Some(exptime), Some(bytes)) =
-                (num::<u32>(toks[2]), num::<i64>(toks[3]), num::<usize>(toks[4]))
-            else {
+            let (Some(flags), Some(exptime), Some(bytes)) = (
+                num::<u32>(toks[2]),
+                num::<i64>(toks[3]),
+                num::<usize>(toks[4]),
+            ) else {
                 return Command::ClientError("bad command line format");
             };
             if !valid_key(&key) {
@@ -208,14 +237,25 @@ pub fn parse(cmd: &[u8]) -> Command {
                 b"replace" => StoreOp::Replace,
                 _ => StoreOp::Cas,
             };
-            Command::Store { op, key, flags, exptime, cas, data: data.to_vec(), noreply }
+            Command::Store {
+                op,
+                key,
+                flags,
+                exptime,
+                cas,
+                data: data.to_vec(),
+                noreply,
+            }
         }
         b"append" | b"prepend" | b"incr" | b"decr" => Command::NotImplemented,
         b"delete" => {
             if toks.len() < 2 || !valid_key(toks[1]) {
                 return Command::ClientError("bad command line format");
             }
-            Command::Delete { key: toks[1].to_vec(), noreply: is_noreply(toks.get(2)) }
+            Command::Delete {
+                key: toks[1].to_vec(),
+                noreply: is_noreply(toks.get(2)),
+            }
         }
         b"touch" => {
             if toks.len() < 3 || !valid_key(toks[1]) {
@@ -224,11 +264,19 @@ pub fn parse(cmd: &[u8]) -> Command {
             let Some(exptime) = num::<i64>(toks[2]) else {
                 return Command::ClientError("invalid exptime argument");
             };
-            Command::Touch { key: toks[1].to_vec(), exptime, noreply: is_noreply(toks.get(3)) }
+            Command::Touch {
+                key: toks[1].to_vec(),
+                exptime,
+                noreply: is_noreply(toks.get(3)),
+            }
         }
-        b"flush_all" => Command::FlushAll { noreply: is_noreply(toks.last()) },
+        b"flush_all" => Command::FlushAll {
+            noreply: is_noreply(toks.last()),
+        },
         b"version" => Command::Version,
-        b"verbosity" => Command::Verbosity { noreply: is_noreply(toks.last()) },
+        b"verbosity" => Command::Verbosity {
+            noreply: is_noreply(toks.last()),
+        },
         b"quit" => Command::Quit,
         _ => Command::Error,
     }
@@ -238,7 +286,13 @@ pub fn parse(cmd: &[u8]) -> Command {
 
 /// Execute one parsed command against the store. Returns the reply bytes (empty
 /// when suppressed by `noreply`) and whether the connection should close (`quit`).
-pub fn execute(store: &Store, cmd: &Command, now_unix: u64, cas_ctr: &AtomicU64, version: &str) -> (Vec<u8>, bool) {
+pub fn execute(
+    store: &Store,
+    cmd: &Command,
+    now_unix: u64,
+    cas_ctr: &AtomicU64,
+    version: &str,
+) -> (Vec<u8>, bool) {
     let mut out = Vec::new();
     let next_cas = || cas_ctr.fetch_add(1, Ordering::Relaxed) + 1;
     match cmd {
@@ -260,7 +314,15 @@ pub fn execute(store: &Store, cmd: &Command, now_unix: u64, cas_ctr: &AtomicU64,
             }
             out.extend_from_slice(b"END\r\n");
         }
-        Command::Store { op, key, flags, exptime, cas, data, noreply } => {
+        Command::Store {
+            op,
+            key,
+            flags,
+            exptime,
+            cas,
+            data,
+            noreply,
+        } => {
             let reply: &[u8] = if data.len() > MAX_VALUE {
                 b"SERVER_ERROR object too large for cache\r\n"
             } else {
@@ -286,7 +348,10 @@ pub fn execute(store: &Store, cmd: &Command, now_unix: u64, cas_ctr: &AtomicU64,
                         } else if expired {
                             (McAction::Remove, &b"STORED\r\n"[..])
                         } else {
-                            (McAction::Store(pack(*flags, next_cas(), data), ttl_ms), &b"STORED\r\n"[..])
+                            (
+                                McAction::Store(pack(*flags, next_cas(), data), ttl_ms),
+                                &b"STORED\r\n"[..],
+                            )
                         }
                     }),
                     StoreOp::Replace => store.mc_update(MAP, key, |cur| {
@@ -295,14 +360,22 @@ pub fn execute(store: &Store, cmd: &Command, now_unix: u64, cas_ctr: &AtomicU64,
                         } else if expired {
                             (McAction::Remove, &b"STORED\r\n"[..])
                         } else {
-                            (McAction::Store(pack(*flags, next_cas(), data), ttl_ms), &b"STORED\r\n"[..])
+                            (
+                                McAction::Store(pack(*flags, next_cas(), data), ttl_ms),
+                                &b"STORED\r\n"[..],
+                            )
                         }
                     }),
                     StoreOp::Cas => store.mc_update(MAP, key, |cur| match cur.and_then(unpack) {
                         None => (McAction::Keep, &b"NOT_FOUND\r\n"[..]),
-                        Some((_, cur_cas, _)) if cur_cas != *cas => (McAction::Keep, &b"EXISTS\r\n"[..]),
+                        Some((_, cur_cas, _)) if cur_cas != *cas => {
+                            (McAction::Keep, &b"EXISTS\r\n"[..])
+                        }
                         Some(_) if expired => (McAction::Remove, &b"STORED\r\n"[..]),
-                        Some(_) => (McAction::Store(pack(*flags, next_cas(), data), ttl_ms), &b"STORED\r\n"[..]),
+                        Some(_) => (
+                            McAction::Store(pack(*flags, next_cas(), data), ttl_ms),
+                            &b"STORED\r\n"[..],
+                        ),
                     }),
                 }
             };
@@ -320,7 +393,11 @@ pub fn execute(store: &Store, cmd: &Command, now_unix: u64, cas_ctr: &AtomicU64,
                 out.extend_from_slice(reply);
             }
         }
-        Command::Touch { key, exptime, noreply } => {
+        Command::Touch {
+            key,
+            exptime,
+            noreply,
+        } => {
             let ttl = classify_exptime(*exptime, now_unix);
             let reply = store.mc_update(MAP, key, |cur| match cur {
                 None => (McAction::Keep, &b"NOT_FOUND\r\n"[..]),

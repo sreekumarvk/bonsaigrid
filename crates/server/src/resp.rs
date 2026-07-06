@@ -17,7 +17,10 @@ pub enum Frame {
 }
 
 fn crlf(b: &[u8], from: usize) -> Option<usize> {
-    b.get(from..)?.windows(2).position(|w| w == b"\r\n").map(|p| from + p)
+    b.get(from..)?
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .map(|p| from + p)
 }
 
 /// Length of the next complete RESP command in `acc` (best-effort on malformed
@@ -36,7 +39,10 @@ pub fn frame(acc: &[u8]) -> Frame {
     let Some(e0) = crlf(acc, 0) else {
         return Frame::Need;
     };
-    let count: i64 = match std::str::from_utf8(&acc[1..e0]).ok().and_then(|s| s.parse().ok()) {
+    let count: i64 = match std::str::from_utf8(&acc[1..e0])
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
         Some(c) => c,
         None => return Frame::Have(e0 + 2),
     };
@@ -54,7 +60,10 @@ pub fn frame(acc: &[u8]) -> Frame {
         let Some(el) = crlf(acc, pos) else {
             return Frame::Need;
         };
-        let len: i64 = match std::str::from_utf8(&acc[pos + 1..el]).ok().and_then(|s| s.parse().ok()) {
+        let len: i64 = match std::str::from_utf8(&acc[pos + 1..el])
+            .ok()
+            .and_then(|s| s.parse().ok())
+        {
             Some(l) => l,
             None => return Frame::Have(e0 + 2),
         };

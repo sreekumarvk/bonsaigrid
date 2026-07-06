@@ -56,8 +56,14 @@ fn two_clusters_replicate_over_tcp_active_active() {
     sa.put("m", b"ka".to_vec(), b"va".to_vec());
     sb.put("m", b"kb".to_vec(), b"vb".to_vec());
 
-    assert!(wait_for(|| sb.get("m", b"ka") == Some(b"va".to_vec())), "A->B replicated over TCP");
-    assert!(wait_for(|| sa.get("m", b"kb") == Some(b"vb".to_vec())), "B->A replicated over TCP");
+    assert!(
+        wait_for(|| sb.get("m", b"ka") == Some(b"va".to_vec())),
+        "A->B replicated over TCP"
+    );
+    assert!(
+        wait_for(|| sa.get("m", b"kb") == Some(b"vb".to_vec())),
+        "B->A replicated over TCP"
+    );
 
     // Loop prevention holds live: the WAN-applied write on B was not re-shipped back
     // to A (A still holds only its own value for ka; no divergence/oscillation).

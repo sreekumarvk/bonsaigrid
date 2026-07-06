@@ -29,8 +29,10 @@ fn frame_waits_for_full_array() {
 
 #[test]
 fn parse_extracts_bulk_args() {
-    assert_eq!(parse(&req(&["SET", "key", "val"])).unwrap(),
-        vec![b"SET".to_vec(), b"key".to_vec(), b"val".to_vec()]);
+    assert_eq!(
+        parse(&req(&["SET", "key", "val"])).unwrap(),
+        vec![b"SET".to_vec(), b"key".to_vec(), b"val".to_vec()]
+    );
     // binary-safe value with embedded CRLF
     let mut m = b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$4\r\n".to_vec();
     m.extend_from_slice(b"a\r\nb\r\n");
