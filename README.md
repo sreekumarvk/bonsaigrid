@@ -10,8 +10,8 @@ density underneath.
 (and a benchmark running) in a few minutes.
 
 Design philosophy and the cross-core routing architecture live under
-`docs/superpowers/specs/`; the platform-parity roadmap is
-`docs/hazelcast-platform-gap-roadmap.md`.
+`docs/superpowers/specs/`; the requirements + living roadmap (single source of truth)
+is [`REQUIREMENTS.md`](REQUIREMENTS.md).
 
 ---
 
@@ -26,7 +26,7 @@ two modes:
   owner — verified by 1000 keys round-tripping across a 3-member cluster.
 
 All five major platform-parity gaps are **shipped or substantially shipped** (see
-`docs/hazelcast-platform-gap-roadmap.md` for the box-by-box status):
+[`REQUIREMENTS.md`](REQUIREMENTS.md) for the box-by-box status and roadmap):
 
 - **Distributed architecture** — thread-per-core shared-nothing, io_uring, membership
   / heartbeat / master-election / migration, cross-core routing, zero-allocation hot

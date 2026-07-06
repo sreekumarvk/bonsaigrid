@@ -1,5 +1,9 @@
 # BonsaiGrid → Hazelcast Open Source Parity — Scoping Document (validated)
 
+> **⚠️ Superseded — historical.** The living requirements + roadmap (single source of
+> truth) is [`../REQUIREMENTS.md`](../REQUIREMENTS.md). This file is retained for its
+> OSS/Enterprise scoping detail (what's in vs out of scope) and is **not** kept current.
+
 **Date:** 2026-06-25
 **Status:** Validated against the Hazelcast 5.x source tree (`./hazelcast`, 477
 client protocol codecs) + the official OSS/Enterprise edition matrix.

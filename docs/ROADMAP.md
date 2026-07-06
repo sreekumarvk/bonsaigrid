@@ -1,5 +1,10 @@
 # BonsaiGrid Roadmap to Full Hazelcast Parity
 
+> **⚠️ Superseded — historical.** The living requirements + roadmap (single source of
+> truth, kept in sync with the repo) is [`../REQUIREMENTS.md`](../REQUIREMENTS.md). This
+> file is retained for its dependency-ordered 15-epic breakdown and is **not** kept
+> current.
+
 Dependency-ordered. Each epic lists its goal, concrete first deliverables, what
 it depends on, and what it unblocks. Governing invariant throughout: *new
 airframe, new engines, better seats — no expectation held by clients or
