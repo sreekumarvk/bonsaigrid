@@ -1,6 +1,7 @@
 //! BonsaiGrid server: io_uring reactor, handshake wiring, and dispatch.
 
 pub mod catalog;
+pub mod cdc;
 pub mod cluster_coordinator;
 pub mod connection;
 pub mod entry_processor;
