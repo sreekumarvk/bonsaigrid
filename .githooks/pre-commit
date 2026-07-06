@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Opt-in local secret scan of STAGED changes, so a credential is caught before it is
+# ever committed. Enable it once with:
+#
+#   git config core.hooksPath .githooks
+#
+# Uses the gitleaks binary if installed, else the pinned Docker image, else no-ops
+# with a warning (CI still enforces the scan on push/PR).
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+cfg="$root/.gitleaks.toml"
+
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks protect --staged --source "$root" --config "$cfg" --redact --no-banner
+elif command -v docker >/dev/null 2>&1; then
+  docker run --rm -v "$root":/repo -w /repo zricethezav/gitleaks:v8.30.1 \
+    protect --staged --source=/repo --config=/repo/.gitleaks.toml --redact --no-banner
+else
+  echo "pre-commit: neither gitleaks nor docker found — skipping secret scan" >&2
+  echo "            (CI still enforces it; install gitleaks to scan locally)" >&2
+fi

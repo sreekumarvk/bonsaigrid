@@ -1,0 +1,34 @@
+# gitleaks configuration for BonsaiGrid.
+# Extends the built-in ruleset; allowlists the read-only Hazelcast reference tree,
+# vendored toolchains, and a handful of known test fixtures (protocol decode vectors
+# and local-only test passwords) so CI fails only on genuine secrets.
+
+title = "BonsaiGrid gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Vendored/reference trees and known non-secret test fixtures"
+
+# Paths that are not BonsaiGrid source (reference checkout, vendored JDK/Maven, build
+# output — all gitignored/not pushed) or that contain only test fixtures. Substring
+# regexes (no `^` anchor) so they match in both git and --no-git (absolute-path) scans.
+paths = [
+  '''hazelcast/''',
+  '''\.tools/''',
+  '''(^|/)target/''',
+  # Protocol decode-test vectors: long hex blobs are serialized {name, age} records,
+  # not credentials.
+  '''crates/query/src/lib\.rs''',
+  '''crates/serialization/src/compact\.rs''',
+]
+
+# Known non-secret substrings: local-only test passwords, hashing-test inputs, and
+# technical prose in docs that trips the generic-key heuristic.
+regexes = [
+  '''password=pw''',
+  '''POSTGRES_PASSWORD=pw''',
+  '''hash_password\(b"[^"]*"''',
+  '''consistency/durability''',
+]

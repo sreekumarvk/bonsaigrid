@@ -1,0 +1,23 @@
+name: gitleaks
+
+# Secret scanning runs on every push and PR (no path filter — a credential can land
+# in any file). Fails the build if a secret is detected. Config + allowlist live in
+# .gitleaks.toml. The gitignored hazelcast/ reference and .tools/ trees are not in the
+# git history, so they are never scanned.
+on:
+  push:
+  pull_request:
+
+jobs:
+  scan:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history, so the scan covers every commit
+      - name: gitleaks detect
+        run: |
+          docker run --rm -v "$PWD":/repo -w /repo zricethezav/gitleaks:v8.30.1 \
+            detect --source=/repo --config=/repo/.gitleaks.toml \
+            --redact --no-banner --exit-code 1

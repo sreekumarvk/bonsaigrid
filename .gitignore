@@ -35,3 +35,24 @@ bench/loadgen/results-open-*.json
 # go-ycsb binary (95MB; rebuilt by run-ycsb.sh) + per-workload intermediates
 bench/ycsb/go-ycsb
 bench/loadgen/ycsb/
+
+# Secrets & key material — never commit (CI also enforces this via gitleaks).
+# Test certs are generated at runtime (rcgen), never checked in; use `git add -f`
+# only for a deliberate, reviewed test fixture.
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.truststore
+.env
+.env.*
+*.env
+.netrc
+.pgpass
+id_rsa
+id_ed25519
+*.pkcs12
+# gitleaks scratch report (never commit)
+.gitleaks-report.json

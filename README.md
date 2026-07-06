@@ -103,6 +103,20 @@ Common server env vars: `BONSAI_MEMBERS` (cluster size), `BONSAI_CORES`,
 `BONSAI_CP=1` (CP subsystem), `BONSAI_PERSISTENCE=none|async|sync`,
 `BONSAI_WAN_TARGETS=...` (geo/WAN). See the roadmap and per-crate docs for the full set.
 
+### Secret scanning
+
+The repo has **no committed secrets** and is guarded against future ones:
+
+- **CI** — `.github/workflows/gitleaks.yml` runs `gitleaks` on every push and PR (full
+  history) and fails the build on any detected credential. Config + allowlist:
+  `.gitleaks.toml`.
+- **`.gitignore`** blocks key material by pattern (`*.pem`, `*.key`, `.env`, keystores,
+  …). Test certs are generated at runtime (rcgen), never committed.
+- **Opt-in local hook** — scan staged changes before every commit:
+  ```bash
+  git config core.hooksPath .githooks    # uses gitleaks, or its Docker image, or no-ops
+  ```
+
 ---
 
 ## Conformance testing
