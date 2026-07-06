@@ -42,6 +42,45 @@ shipped** — the last untouched box (Disaster Recovery & Geo-Replication) is cl
 
 ---
 
+## Next up — prioritized (2026-07-05)
+
+All major gaps are shipped; what remains is depth and tail. Ordered by value ÷ effort,
+and by whether it can be built + tested *here* (no external infra) vs. needs a live
+backend.
+
+**A. CP finishers — self-contained, highest value (do next).**
+Hardens the one subsystem that's "substantially" rather than fully shipped; all
+deterministic-sim testable, no external infra.
+- `InstallSnapshot` — let a long-down member rejoin by shipping a snapshot when its
+  needed log prefix was already compacted away. Plugs into the existing compaction seam.
+- Semaphore per-session auto-release (dead client's permits return) — mirrors the
+  FencedLock session-expiry release already shipped.
+- FencedLock `getLockOwnershipState` (introspection codec).
+- Named-group membership *subsets* (groups currently span all CP members).
+
+**B. Durability + SQL depth — self-contained (do after A).**
+- Persistence `sync` deferred-ack: hold the client reply until fsync (async already
+  works). Touches the reactor deferred-reply path — the one item near the hot path.
+- SESSION-window SQL; `SELECT *` distribution; continuous (vs batch) SQL execution.
+
+**C. Larger / architectural (scope before starting).**
+- Distributed joins (needs a network shuffle stage).
+- Management Center depth — close remaining `MC*` operations for full GUI parity.
+- Data-structure tail — audit ReplicatedMap / JCache-ICache edge ops / ReliableTopic
+  guarantees against the client codecs, then fill.
+
+**D. Needs external infra (Docker-testable, like the JDBC/CDC connectors were).**
+- LDAP/JAAS auth backends behind the `IdentityProvider` seam (needs a directory server).
+- Live-cluster **real Hazelcast-client CP conformance** (algorithm is sim-verified;
+  frame-level compat needs a running cluster + real client).
+- More connectors: JMS, other databases.
+
+**E. Won't do — genuinely infeasible.**
+- `IExecutorService` / distributed Runnable fan-out: BonsaiGrid is not a JVM and cannot
+  execute the serialized Java callables those APIs carry.
+
+---
+
 ## Gap 1 — Security ✅ SHIPPED
 
 **Spec:** `docs/superpowers/specs/2026-07-01-security-tls-rbac-design.md`.
