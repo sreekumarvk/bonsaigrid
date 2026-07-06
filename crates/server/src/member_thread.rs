@@ -34,38 +34,99 @@ pub enum ReplyKind {
     Session,
 }
 
-/// CP-subsystem state owned by the member thread: the default group's Raft node +
-/// AtomicLong SM, plus the per-op client bookkeeping needed to answer clients.
+/// The CP group a request targets when it names none — Hazelcast's `default` group.
+const DEFAULT_GROUP: &str = "default";
+
+/// CP-subsystem state owned by the member thread: one independent Raft node + SM per
+/// **named CP group** (each its own consensus domain), plus the per-op client
+/// bookkeeping needed to answer clients. Named groups beyond `default` are created on
+/// demand from `template` (the member's index + the CP group size); a message for a
+/// group is tagged with its name on the wire so the receiver routes it to that group.
 struct CpState {
-    group: CpGroup,
+    groups: HashMap<String, CpGroup>,
+    /// (self_index, group_size) for lazily creating a named group; `None` in
+    /// single-group tests (an unknown group then falls back to `default`).
+    template: Option<(usize, usize)>,
     /// client_id -> (conn, correlation, response msg-type, reply shape).
     pending: HashMap<u64, (u64, i64, i32, ReplyKind)>,
     next_client: u64,
 }
 
 impl CpState {
-    fn new(group: CpGroup) -> CpState {
+    /// Single default group, no lazy creation (tests). `default_group` becomes the
+    /// `default` group.
+    fn new(default_group: CpGroup) -> CpState {
+        let mut groups = HashMap::new();
+        groups.insert(DEFAULT_GROUP.to_string(), default_group);
         CpState {
-            group,
+            groups,
+            template: None,
             pending: HashMap::new(),
             next_client: 1,
         }
     }
 
-    fn route(cpout: Vec<(usize, CpMsg)>, outbox: &mut Vec<(usize, Msg)>) {
+    /// Production: the `default` group plus a template so any other named group a
+    /// client references is created on demand (same membership, per-group seed).
+    fn multi(default_group: CpGroup, self_index: usize, group_size: usize) -> CpState {
+        let mut s = CpState::new(default_group);
+        s.template = Some((self_index, group_size));
+        s
+    }
+
+    /// The named group, creating it from `template` if absent. Without a template
+    /// (single-group tests) an unknown name resolves to `default`.
+    fn group_mut(&mut self, name: &str) -> &mut CpGroup {
+        if !self.groups.contains_key(name) {
+            match self.template {
+                Some((self_index, group_size)) => {
+                    // Per-group seed so groups don't randomize their election
+                    // timeouts identically (liveness diversity).
+                    let seed = self_index as u64 + 1 + group_seed(name);
+                    let node = raft::RaftNode::new(
+                        self_index,
+                        (0..group_size).collect(),
+                        raft::RaftLog::new(),
+                        seed,
+                    );
+                    self.groups.insert(name.to_string(), CpGroup::new(node));
+                }
+                None => return self.groups.get_mut(DEFAULT_GROUP).unwrap(),
+            }
+        }
+        self.groups.get_mut(name).unwrap()
+    }
+
+    /// Tag CP messages from `group` with its name so the receiver routes correctly:
+    /// `[grouplen:u16-le][group][cpmsg]`.
+    fn route(group: &str, cpout: Vec<(usize, CpMsg)>, outbox: &mut Vec<(usize, Msg)>) {
         for (to, m) in cpout {
-            outbox.push((
-                to,
-                Msg::Cp {
-                    payload: raft::cp::encode_msg(&m),
-                },
-            ));
+            let mut payload = Vec::new();
+            payload.extend_from_slice(&(group.len() as u16).to_le_bytes());
+            payload.extend_from_slice(group.as_bytes());
+            payload.extend_from_slice(&raft::cp::encode_msg(&m));
+            outbox.push((to, Msg::Cp { payload }));
         }
     }
 
-    /// Submit a client op; record how to answer it once it commits.
+    /// Submit a client op to the `default` group.
     fn submit(
         &mut self,
+        conn: u64,
+        corr: i64,
+        resp_type: i32,
+        kind: ReplyKind,
+        command: Vec<u8>,
+        outbox: &mut Vec<(usize, Msg)>,
+    ) {
+        self.submit_to(DEFAULT_GROUP, conn, corr, resp_type, kind, command, outbox);
+    }
+
+    /// Submit a client op to a named CP group; record how to answer it once it commits.
+    #[allow(clippy::too_many_arguments)]
+    fn submit_to(
+        &mut self,
+        group: &str,
         conn: u64,
         corr: i64,
         resp_type: i32,
@@ -77,34 +138,64 @@ impl CpState {
         self.next_client += 1;
         self.pending.insert(client, (conn, corr, resp_type, kind));
         let mut cpout = Vec::new();
-        self.group.submit(client, command, &mut cpout);
-        Self::route(cpout, outbox);
+        self.group_mut(group).submit(client, command, &mut cpout);
+        Self::route(group, cpout, outbox);
     }
 
-    /// Feed an inbound CP message and emit any resulting CP messages.
-    fn step(&mut self, src: usize, msg: CpMsg, outbox: &mut Vec<(usize, Msg)>) {
+    /// Feed an inbound (group-tagged) CP payload and emit any resulting CP messages.
+    fn step(&mut self, src: usize, payload: &[u8], outbox: &mut Vec<(usize, Msg)>) {
+        if payload.len() < 2 {
+            return;
+        }
+        let glen = u16::from_le_bytes([payload[0], payload[1]]) as usize;
+        if payload.len() < 2 + glen {
+            return;
+        }
+        let group = String::from_utf8_lossy(&payload[2..2 + glen]).into_owned();
+        let Some(msg) = raft::cp::decode_msg(&payload[2 + glen..]) else {
+            return;
+        };
         let mut cpout = Vec::new();
-        self.group.step(src, msg, &mut cpout);
-        Self::route(cpout, outbox);
+        self.group_mut(&group).step(src, msg, &mut cpout);
+        Self::route(&group, cpout, outbox);
     }
 
-    /// Advance CP time.
+    /// Advance CP time across every group.
     fn tick(&mut self, outbox: &mut Vec<(usize, Msg)>) {
-        let mut cpout = Vec::new();
-        self.group.tick(&mut cpout);
-        Self::route(cpout, outbox);
+        let names: Vec<String> = self.groups.keys().cloned().collect();
+        for name in names {
+            let mut cpout = Vec::new();
+            self.groups.get_mut(&name).unwrap().tick(&mut cpout);
+            Self::route(&name, cpout, outbox);
+        }
     }
 
-    /// Drain committed client ops into `(conn_id, response_bytes)` deliveries.
+    /// Drain committed client ops (across every group) into
+    /// `(conn_id, response_bytes)` deliveries. Client ids are globally unique across
+    /// groups, so `pending` disambiguates without a per-group key.
     fn drain_deliveries(&mut self) -> Vec<(u64, Vec<u8>)> {
         let mut out = Vec::new();
-        for comp in self.group.take_completions() {
-            if let Some((conn, corr, resp_type, kind)) = self.pending.remove(&comp.client) {
-                out.push((conn, build_response(resp_type, kind, &comp.reply, corr)));
+        let names: Vec<String> = self.groups.keys().cloned().collect();
+        for name in names {
+            for comp in self.groups.get_mut(&name).unwrap().take_completions() {
+                if let Some((conn, corr, resp_type, kind)) = self.pending.remove(&comp.client) {
+                    out.push((conn, build_response(resp_type, kind, &comp.reply, corr)));
+                }
             }
         }
         out
     }
+}
+
+/// A stable per-group seed offset so distinct groups don't share election-timeout
+/// randomization (FNV-1a of the name).
+fn group_seed(name: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in name.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
 }
 
 /// Build the AtomicLong response wire bytes for a committed reply, with the
@@ -179,6 +270,7 @@ pub enum MemberJob {
     /// A client CP (AtomicLong) op to submit to the default group; the reply is
     /// delivered to `conn_id` (with `correlation`) once it commits.
     CpSubmit {
+        group: String,
         conn_id: u64,
         correlation: i64,
         resp_type: i32,
@@ -255,8 +347,10 @@ impl Replicator {
 
     /// Submit a client AtomicLong op to the CP subsystem; the reply is delivered
     /// to `conn_id` once it commits. Returns `false` if the ring was full.
+    #[allow(clippy::too_many_arguments)]
     pub fn submit_cp(
         &self,
+        group: &str,
         conn_id: u64,
         correlation: i64,
         resp_type: i32,
@@ -265,6 +359,7 @@ impl Replicator {
     ) -> bool {
         self.tx
             .push(MemberJob::CpSubmit {
+                group: group.to_string(),
                 conn_id,
                 correlation,
                 resp_type,
@@ -348,9 +443,10 @@ impl MemberHandler {
         }
     }
 
-    /// Enable the CP subsystem on this member with `group` as the default group.
-    pub(crate) fn set_cp(&mut self, group: CpGroup) {
-        self.cp = Some(CpState::new(group));
+    /// Enable the CP subsystem on this member: `group` is the `default` group, and
+    /// `(self_index, group_size)` lets any other named group be created on demand.
+    pub(crate) fn set_cp(&mut self, group: CpGroup, self_index: usize, group_size: usize) {
+        self.cp = Some(CpState::multi(group, self_index, group_size));
     }
 
     // ---- distributed SQL (scatter/gather) ----
@@ -583,10 +679,8 @@ impl Handler for MemberHandler {
                 }
             }
             Msg::Cp { payload } => {
-                let deliveries = if let (Some(cp), Some(m)) =
-                    (self.cp.as_mut(), raft::cp::decode_msg(&payload))
-                {
-                    cp.step(src, m, outbox);
+                let deliveries = if let Some(cp) = self.cp.as_mut() {
+                    cp.step(src, &payload, outbox); // untags the group + decodes
                     cp.drain_deliveries()
                 } else {
                     Vec::new()
@@ -647,6 +741,7 @@ impl Handler for MemberHandler {
                 }
                 MemberJob::Membership(c) => self.coord.cluster = c,
                 MemberJob::CpSubmit {
+                    group,
                     conn_id,
                     correlation,
                     resp_type,
@@ -654,7 +749,15 @@ impl Handler for MemberHandler {
                     command,
                 } => {
                     if let Some(cp) = self.cp.as_mut() {
-                        cp.submit(conn_id, correlation, resp_type, kind, command, outbox);
+                        cp.submit_to(
+                            &group,
+                            conn_id,
+                            correlation,
+                            resp_type,
+                            kind,
+                            command,
+                            outbox,
+                        );
                     }
                 }
                 MemberJob::SqlScatter {
@@ -783,8 +886,8 @@ pub fn spawn(
                 raft::RaftLog::new(),
                 self_index as u64 + 1,
             );
-            handler.set_cp(CpGroup::new(node));
-            eprintln!("BonsaiGrid CP: AtomicLong enabled (default group, {cp_group_size} members)");
+            handler.set_cp(CpGroup::new(node), self_index, cp_group_size);
+            eprintln!("BonsaiGrid CP: enabled (default group, {cp_group_size} members; named groups on demand)");
         }
         let _ = transport.run(handler);
     })
@@ -940,6 +1043,54 @@ mod tests {
         assert_eq!(d[0].0, 5, "delivered to the originating connection");
         assert_eq!(read_i64_le(&d[0].1, 10), 99, "correlation preserved");
         assert_eq!(read_i64_le(&d[0].1, 19), 3, "AddAndGet(3) committed value");
+    }
+
+    #[test]
+    fn named_cp_groups_keep_independent_state() {
+        // Multi-group: a 1-member default group plus named groups created on demand.
+        let mut node = RaftNode::new(0, vec![0], RaftLog::new(), 1);
+        node.set_heartbeat_period(2);
+        let mut cp = CpState::multi(CpGroup::new(node), 0, 1);
+        let mut outbox = Vec::new();
+        for _ in 0..40 {
+            cp.tick(&mut outbox);
+            let _ = cp.drain_deliveries();
+        }
+        // The SAME object name "c" in two different groups → independent counters.
+        cp.submit_to(
+            "alpha",
+            1,
+            1,
+            ADD_AND_GET_RESP,
+            ReplyKind::Long,
+            al_command("c", &AlOp::AddAndGet(5)),
+            &mut outbox,
+        );
+        cp.submit_to(
+            "beta",
+            2,
+            2,
+            ADD_AND_GET_RESP,
+            ReplyKind::Long,
+            al_command("c", &AlOp::AddAndGet(10)),
+            &mut outbox,
+        );
+        let mut replies = Vec::new();
+        for _ in 0..80 {
+            cp.tick(&mut outbox);
+            replies.extend(cp.drain_deliveries());
+        }
+        let vals: Vec<i64> = replies.iter().map(|(_, b)| read_i64_le(b, 19)).collect();
+        // Shared state would make beta see 15 (5+10); independence yields 5 and 10.
+        assert!(vals.contains(&5), "alpha's c = 5; got {vals:?}");
+        assert!(
+            vals.contains(&10),
+            "beta's c = 10, independent of alpha; got {vals:?}"
+        );
+        assert!(
+            !vals.contains(&15),
+            "no counter is shared across groups; got {vals:?}"
+        );
     }
 
     #[test]

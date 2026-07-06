@@ -615,6 +615,21 @@ fn uuid_response(msg_type: i32, uuid: (i64, i64)) -> Vec<Frame> {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The CP group a request targets: the name carried in its RaftGroupId (frame 3 of a
+/// CP request — BEGIN, [seed,id], name, END), or "default" when absent/empty. Lets a
+/// client address a named CP group instead of the single default one.
+fn cp_group_name(req: &[Frame]) -> String {
+    let name = req
+        .get(3)
+        .map(|f| String::from_utf8_lossy(&f.content).into_owned())
+        .unwrap_or_default();
+    if name.is_empty() {
+        "default".to_string()
+    } else {
+        name
+    }
+}
+
 /// Dispatch an AtomicLong CP request: decode it, map to the replicated command,
 /// and submit to the CP subsystem via the member thread. Returns an empty reply
 /// (the committed reply is delivered later by the member thread through the
@@ -652,7 +667,7 @@ fn cp_atomiclong(
         Op::CompareAndSet(e, u) => (AlOp::CompareAndSet(e, u), ReplyKind::Bool),
     };
     let command = raft::cp::al_command(&dec.name, &op);
-    rep.submit_cp(conn_id, corr, resp_type, kind, command);
+    rep.submit_cp(&cp_group_name(req), conn_id, corr, resp_type, kind, command);
     vec![] // deferred: delivered after the op commits
 }
 
@@ -695,6 +710,7 @@ fn cp_cpmap(
         R::PutIfAbsent(k, v) => (MapOp::PutIfAbsent(k, v), ReplyKind::Data),
     };
     rep.submit_cp(
+        &cp_group_name(req),
         conn_id,
         corr,
         resp_type,
@@ -737,7 +753,7 @@ fn cp_atomicref(
         ArReq::Contains { value } => (ArOp::Contains(value), ReplyKind::Bool),
     };
     let command = raft::cp::ar_command(&dec.name, &op);
-    rep.submit_cp(conn_id, corr, resp_type, kind, command);
+    rep.submit_cp(&cp_group_name(req), conn_id, corr, resp_type, kind, command);
     vec![]
 }
 
@@ -801,7 +817,7 @@ fn cp_counter(
             ReplyKind::Int,
         ),
     };
-    rep.submit_cp(conn_id, corr, resp_type, kind, command);
+    rep.submit_cp(&cp_group_name(req), conn_id, corr, resp_type, kind, command);
     vec![]
 }
 
@@ -838,7 +854,7 @@ fn cp_fencedlock(
         FlReq::Unlock => (FlOp::Unlock { session, thread }, ReplyKind::Bool),
     };
     let command = raft::cp::fl_command(&dec.name, &op);
-    rep.submit_cp(conn_id, corr, resp_type, kind, command);
+    rep.submit_cp(&cp_group_name(req), conn_id, corr, resp_type, kind, command);
     vec![]
 }
 
@@ -873,7 +889,14 @@ fn cp_session(
         R::Heartbeat(id) => (SessOp::Heartbeat(id), ReplyKind::Void),
         R::GenerateThreadId => (SessOp::GenerateThreadId, ReplyKind::Long),
     };
-    rep.submit_cp(conn_id, corr, resp_type, kind, raft::cp::sess_command(&op));
+    rep.submit_cp(
+        &cp_group_name(req),
+        conn_id,
+        corr,
+        resp_type,
+        kind,
+        raft::cp::sess_command(&op),
+    );
     vec![]
 }
 
