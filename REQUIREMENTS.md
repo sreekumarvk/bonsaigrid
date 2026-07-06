@@ -6,9 +6,8 @@ BonsaiGrid must be — the guardrails that never change) and the *living status/
 commit/crate evidence — see [§8, How this document stays in sync](#8-how-this-document-stays-in-sync).
 
 **Last synced:** 2026-07-05.
-Supersedes `docs/hazelcast-platform-gap-roadmap.md` (merged here). `docs/ROADMAP.md`
-(15-epic history) and `docs/PARITY.md` (OSS/Enterprise scoping) remain as historical /
-scoping references only.
+Supersedes and replaces the former `docs/hazelcast-platform-gap-roadmap.md`,
+`docs/ROADMAP.md`, and `docs/PARITY.md` (all merged in and removed).
 
 ---
 
@@ -210,6 +209,4 @@ This file is the **living contract**. When a capability lands (or a requirement 
 4. Never let §5 list something already shipped, or a §4 "Remaining" contradict what's in
    the tree — reconcile in the same change that lands the code.
 
-The supplementary docs (`docs/ROADMAP.md`, `docs/PARITY.md`) are historical and are
-**not** kept in sync — this file is authoritative. Design specs live under
-`docs/superpowers/specs/`.
+This file is authoritative. Design specs live under `docs/superpowers/specs/`.

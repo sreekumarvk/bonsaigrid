@@ -1,6 +1,6 @@
 # BonsaiGrid → Hazelcast OSS Parity — Test Strategy
 
-**Date:** 2026-06-25 · **Companions:** [`PARITY.md`](PARITY.md) ·
+**Date:** 2026-06-25 · **Companion:**
 [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md)
 
 How every parity feature is proven correct, at three levels, on the test
