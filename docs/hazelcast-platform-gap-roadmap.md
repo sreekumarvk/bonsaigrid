@@ -194,11 +194,16 @@ per-target ack cursors** · ✅ **CP CPMap** · ✅ **CP read-index lease reads*
 **Also shipped:** ✅ **CPMap client wiring** (codec + dispatch — now end-to-end
 reachable) · ✅ **mTLS client-cert → RBAC** in the reactor auth path · ✅ **WAN queue
 reclaim** (compacts confirmed records; the unbounded-growth bug fixed) · ✅
-**JDBC/PostgreSQL connector** (loads a query into an IMap; Docker-tested).
+**JDBC/PostgreSQL connector** (loads a query into an IMap; Docker-tested) · ✅
+**CDC connector** (Postgres logical-replication change capture; Docker-tested) · ✅
+**socket source/sink** connectors · ✅ **named CP groups** (independent Raft consensus
+domains routed by group name).
 
 **Remaining (external-infra or larger):**
-- **Connectors:** Kafka + MapStore/MapLoader + file source + **JDBC/PostgreSQL**
-  shipped; CDC and socket sources/sinks still need a live backend.
+- **Connectors:** Kafka + MapStore/MapLoader + file + **JDBC** + **CDC** + **socket**
+  shipped; JMS/other-DB sources still need their live backends.
+- **CP:** named groups + 5 primitives shipped; InstallSnapshot (fast rejoin) and
+  named-group membership *subsets* remain.
 - **Management Center depth:** metrics + Prometheus + MC codecs exist; close
   remaining `MC*` operations for full GUI parity.
 - **Auth backends:** LDAP/JAAS behind the `IdentityProvider` seam (needs a directory).
