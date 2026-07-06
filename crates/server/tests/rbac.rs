@@ -66,6 +66,7 @@ fn run(principal: Principal, msg: &[u8]) -> Vec<u8> {
         &server::txn::TransactionService::new(),
         &jet::executor::JetService::new(),
         &mut principal,
+        None,
         &mut out,
     );
     out

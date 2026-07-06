@@ -93,7 +93,7 @@ fn session(cfg: &Cfg, principal: &mut Arc<Principal>, msgs: &[Vec<u8>]) -> Vec<u
         out.clear();
         dispatch_bytes(
             msg, 1, &store, cfg, &broker, &schemas, &cl, None, &executor, &txn, &jet, principal,
-            &mut out,
+            None, &mut out,
         );
     }
     out

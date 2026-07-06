@@ -87,6 +87,7 @@ fn map_get_hot_path_is_zero_alloc() {
             &txn,
             &jet,
             &mut principal,
+            None,
             &mut out,
         );
     }
@@ -111,6 +112,7 @@ fn map_get_hot_path_is_zero_alloc() {
             &txn,
             &jet,
             &mut principal,
+            None,
             &mut out,
         );
     }
@@ -149,6 +151,7 @@ fn map_get_hot_path_is_zero_alloc() {
             &txn,
             &jet,
             &mut granted,
+            None,
             &mut out,
         );
     }
@@ -172,6 +175,7 @@ fn map_get_hot_path_is_zero_alloc() {
             &txn,
             &jet,
             &mut granted,
+            None,
             &mut out,
         );
     }
