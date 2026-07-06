@@ -1,6 +1,6 @@
 # Hazelcast Platform Parity — Gap Roadmap
 
-**Created:** 2026-07-01 · **Last updated:** 2026-07-02
+**Created:** 2026-07-01 · **Last updated:** 2026-07-05
 **Basis:** Hands-on assessment against the Hazelcast "Unified Real-Time Platform"
 diagram, verified box-by-box against the actual BonsaiGrid codebase.
 **Purpose:** Track platform gaps as an ordered roadmap. This revision records what
@@ -56,8 +56,9 @@ shipped** — the last untouched box (Disaster Recovery & Geo-Replication) is cl
   `required`) for zero-downtime rollout.
 - **Member mTLS** — mutual-TLS member mesh trust (`crates/member` transport).
 
-**Remaining (minor):** LDAP/JAAS auth backends behind the `IdentityProvider` seam;
-client-cert-as-principal mapping.
+**Shipped since:** ✅ client-cert-as-principal (mTLS CN → RBAC, wired into the reactor
+auth path).
+**Remaining (minor):** LDAP/JAAS auth backends behind the `IdentityProvider` seam.
 
 ---
 
@@ -108,12 +109,15 @@ the platform-diagram "Consistency" box, beyond strict OSS parity.
 - **Live wiring** — Raft/CP messages over the member io_uring transport;
   AtomicLong/etc. client codecs with deferred replies via the broker.
 
-**Shipped since:** ✅ `CPMap` (`crates/raft/cpmap.rs`, sim-verified); ✅ read-index
-(lease) linearizable reads (`RaftNode::has_read_lease`).
-**Remaining:** multiple named CP groups; `InstallSnapshot` for a long-down/rejoining
-member; Semaphore per-session auto-release; FencedLock `getLockOwnershipState`; the
-live-cluster **real Hazelcast-client conformance test** (the algorithm is
-deterministically verified; frame-level client compat needs a running cluster).
+**Shipped since:** ✅ `CPMap` (sim-verified) + its **client wiring** (codec + dispatch,
+end-to-end reachable); ✅ read-index (lease) linearizable reads
+(`RaftNode::has_read_lease`); ✅ **named CP groups** (independent consensus domains
+routed by the request's RaftGroupId; group-tagged member messages).
+**Remaining:** `InstallSnapshot` for a long-down/rejoining member; named-group
+membership *subsets* (all groups currently span all CP members); Semaphore per-session
+auto-release; FencedLock `getLockOwnershipState`; the live-cluster **real
+Hazelcast-client conformance test** (the algorithm is deterministically verified;
+frame-level client compat needs a running cluster).
 
 ---
 
@@ -138,12 +142,15 @@ distributed execution.
 - **Stateful stream-stream keyed join** with watermark/TTL state eviction.
 - **File source connector** (beyond Kafka/MapStore).
 
+**Shipped since:** ✅ **JDBC/PostgreSQL** batch loader, ✅ **CDC** (Postgres
+logical-replication capture), ✅ **socket** source/sink connectors (all Docker- or
+loopback-tested).
 **Remaining:** SESSION-window *SQL* (batch two-pass; distributed sessions span
 members); `SELECT *` distribution (needs catalog star-columns on the member
 thread); distributed joins (needs a network shuffle); continuous/streaming (vs
-batch) SQL execution; JDBC/CDC connectors; **`IExecutorService` distributed
-fan-out is infeasible** — BonsaiGrid is not a JVM and cannot execute the
-serialized Java callables those APIs carry.
+batch) SQL execution; **`IExecutorService` distributed fan-out is infeasible** —
+BonsaiGrid is not a JVM and cannot execute the serialized Java callables those APIs
+carry.
 
 ---
 
@@ -177,10 +184,12 @@ major box is now closed.
 - **Config** — `BONSAI_WAN_TARGETS` / `_PORT` / `_BATCH` / `_QUEUE_MB` /
   `_BACKPRESSURE` / `_DIR`, wired via `setup_wan` at both server run paths.
 
+**Shipped since:** ✅ **per-target ack cursors** (a lagging remote no longer pins a
+fast one); ✅ **queue reclaim** (compacts records confirmed by every target — the
+unbounded-growth bug fixed).
 **Remaining (follow-ups):** WAN over TLS (reuse the member mTLS bundle); initial
 full-state bootstrap (v1 replicates from enable-forward); delta/compression + event
-filtering; dynamic WAN topology/discovery; merge policies beyond HLC LatestUpdate;
-per-target ack cursors (v1 uses one cursor = all-targets-confirmed).
+filtering; dynamic WAN topology/discovery; merge policies beyond HLC LatestUpdate.
 
 ---
 
